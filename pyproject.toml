@@ -1,0 +1,24 @@
+[project]
+name = "frmj"
+version = "0.1.0"
+description = "FRoMaJ — Forex Risk Operations, Management & Journal (Oanda trading assistant)"
+readme = "README.md"
+authors = [
+    { name = "Molingus", email = "stephen.c976@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.9.26,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.152.2",
+    "pytest>=9.0.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
