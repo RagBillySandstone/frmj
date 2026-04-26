@@ -1,7 +1,16 @@
 """
 Thin httpx wrapper for the Oanda v20 REST API.
 
-Only the two transaction endpoints we actually need are implemented here.
+Endpoints implemented
+---------------------
+  GET  /accounts/{id}/transactions              (cold sync — pages index)
+  GET  /accounts/{id}/transactions/sinceid      (incremental sync)
+  GET  /accounts/{id}/summary                  (NAV, margin, open trade count)
+  GET  /accounts/{id}/instruments              (InstrumentSpec for one pair)
+  GET  /accounts/{id}/pricing                  (live bid/ask + conversions)
+  GET  /accounts/{id}/trades                   (open ticket count per instrument)
+  POST /accounts/{id}/orders                   (place market order)
+
 We deliberately avoid the official v20 Python SDK so that:
 
   * We stay in full control of timeout and retry policy (no hidden waits).
@@ -64,9 +73,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Protocol
 
 import httpx
+
+from frmj.domain.sizing import InstrumentSpec, PriceQuote
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -128,6 +140,95 @@ class TransactionRow:
     time: str
     parent_oanda_id: str | None
     raw_json: str
+
+
+@dataclass(frozen=True, slots=True)
+class AccountSummary:
+    """Account-level snapshot returned by GET /accounts/{id}/summary.
+
+    ``nav`` (net asset value) is what the risk model calls *equity* — the
+    total account value including unrealised P/L on open positions.
+
+    ``margin_available`` is the margin currently available to open new
+    positions. This is what the sizing model's safety-reserve calculation
+    works from, not the raw NAV.
+
+    ``open_trade_count`` is the total number of open tickets across all
+    instruments, per Oanda's own count. We use it as the risk model's N.
+    """
+
+    nav: Decimal
+    margin_available: Decimal
+    open_trade_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class OrderFill:
+    """Result of a successfully filled market order.
+
+    ``transaction_id`` is Oanda's fill-transaction ID.  We attach the user's
+    optional note to this ID via the ``notes`` table.
+
+    ``fill_price`` is the actual execution price reported by Oanda.
+
+    ``units_filled`` is signed: positive for long fills, negative for short.
+    """
+
+    transaction_id: str
+    fill_price: Decimal
+    units_filled: int
+
+
+# ---------------------------------------------------------------------------
+# Module-level parsing helpers  (pure functions — tested directly)
+# ---------------------------------------------------------------------------
+# Separating parsing from HTTP means tests can feed sample dicts without
+# spinning up an HTTP server, while the OandaClient methods stay thin.
+
+
+def _parse_account_summary(payload: dict[str, Any]) -> AccountSummary:
+    """Parse GET /accounts/{id}/summary response."""
+    acct = payload["account"]
+    return AccountSummary(
+        nav=Decimal(acct["NAV"]),
+        margin_available=Decimal(acct["marginAvailable"]),
+        open_trade_count=int(acct["openTradeCount"]),
+    )
+
+
+def _parse_instrument_spec(instr: dict[str, Any]) -> InstrumentSpec:
+    """Parse one element of the ``instruments`` array from GET /instruments.
+
+    ``units_increment`` defaults to 1 because Oanda FX pairs accept any
+    integer unit count.  The API does not expose a dedicated increment field
+    for FX; ``tradeUnitsPrecision == 0`` means whole units only, which maps
+    to increment = 1. Instruments with non-standard increments (some metals /
+    CFDs) will need explicit overrides — add them when we encounter them.
+
+    ``min_units`` comes from Oanda's ``minimumTradeSize`` (a string like
+    ``"1"``).  We convert via Decimal to handle any decimal-valued minimums
+    safely before truncating to int.
+    """
+    return InstrumentSpec(
+        name=instr["name"],
+        pip_location=int(instr["pipLocation"]),
+        margin_rate=Decimal(instr["marginRate"]),
+        min_units=int(Decimal(instr["minimumTradeSize"])),
+        units_increment=1,
+    )
+
+
+def _extract_bid_ask(payload: dict[str, Any]) -> tuple[Decimal, Decimal]:
+    """Pull the best bid and ask from a GET /pricing response.
+
+    Oanda returns ``bids`` and ``asks`` as arrays (multiple liquidity bands).
+    Index 0 is always the best (tightest) price — the one we would receive
+    for a market order of typical size.
+    """
+    price_data = payload["prices"][0]
+    bid = Decimal(price_data["bids"][0]["price"])
+    ask = Decimal(price_data["asks"][0]["price"])
+    return bid, ask
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +333,149 @@ class OandaClient:
             return self._fetch_all_cold()
         return self._fetch_since(from_id)
 
+    def get_account_summary(self) -> AccountSummary:
+        """Fetch NAV, available margin, and open trade count.
+
+        Called at the start of the trade flow so the risk model has fresh
+        account state. Raises ``httpx.HTTPStatusError`` on Oanda errors.
+        """
+        resp = self._http.get(
+            f"{self._base_url}/accounts/{self.account_id}/summary"
+        )
+        resp.raise_for_status()
+        return _parse_account_summary(resp.json())
+
+    def get_instrument(self, name: str) -> InstrumentSpec:
+        """Fetch metadata for one instrument (pip location, margin rate, etc.).
+
+        Uses GET /accounts/{id}/instruments filtered to a single name so we
+        get the account-specific margin rate (which differs between practice
+        and live accounts and can vary per-account based on account type).
+        """
+        resp = self._http.get(
+            f"{self._base_url}/accounts/{self.account_id}/instruments",
+            params={"instruments": name},
+        )
+        resp.raise_for_status()
+        instruments = resp.json().get("instruments", [])
+        if not instruments:
+            raise ValueError(f"Instrument {name!r} not found for this account")
+        return _parse_instrument_spec(instruments[0])
+
+    def get_price(
+        self,
+        instrument: str,
+        home_currency: str = "USD",
+    ) -> PriceQuote:
+        """Fetch live bid/ask and compute currency conversion rates.
+
+        Conversion rates (``quote_to_home`` and ``base_to_home``) are what
+        the sizing and pricing models need to translate pip moves and margin
+        requirements into home-currency (account-currency) amounts.
+
+        Handles three cases:
+        1. ``quote == home`` (e.g., EUR_USD on USD account):
+           ``quote_to_home = 1``, ``base_to_home = mid``.
+        2. ``base == home`` (e.g., USD_JPY on USD account):
+           ``base_to_home = 1``, ``quote_to_home = 1 / mid``.
+        3. Cross-pair (e.g., EUR_GBP on USD account): fetches two additional
+           prices to resolve both conversion rates.
+
+        The cross-pair path makes extra HTTP calls. For the instruments
+        Stephen typically trades (major USD pairs), path 1 or 2 is always
+        taken.
+        """
+        resp = self._http.get(
+            f"{self._base_url}/accounts/{self.account_id}/pricing",
+            params={"instruments": instrument},
+        )
+        resp.raise_for_status()
+        bid, ask = _extract_bid_ask(resp.json())
+        mid = (bid + ask) / 2
+
+        base, quote = instrument.split("_")
+
+        if quote == home_currency:
+            # e.g. EUR_USD on USD account: quote IS home, no conversion needed.
+            quote_to_home = Decimal("1")
+            base_to_home = mid
+        elif base == home_currency:
+            # e.g. USD_JPY on USD account: base IS home.
+            base_to_home = Decimal("1")
+            quote_to_home = Decimal("1") / mid
+        else:
+            # Cross-pair: resolve each currency's home value separately.
+            base_to_home = self._currency_to_home(base, home_currency)
+            quote_to_home = self._currency_to_home(quote, home_currency)
+
+        return PriceQuote(
+            bid=bid,
+            ask=ask,
+            quote_to_home=quote_to_home,
+            base_to_home=base_to_home,
+        )
+
+    def get_open_tickets_on_instrument(self, instrument: str) -> int:
+        """Count open trade tickets for *instrument* (for the scale-in check).
+
+        Uses GET /accounts/{id}/trades?instrument={name}&state=OPEN.  Each
+        element in ``trades`` is one open ticket regardless of units size,
+        which is what the risk model's ``open_tickets_on_instrument`` expects.
+        """
+        resp = self._http.get(
+            f"{self._base_url}/accounts/{self.account_id}/trades",
+            params={"instrument": instrument, "state": "OPEN"},
+        )
+        resp.raise_for_status()
+        return len(resp.json().get("trades", []))
+
+    def place_market_order(
+        self,
+        instrument: str,
+        units_signed: int,
+    ) -> OrderFill:
+        """Place a market order and return the fill details.
+
+        ``units_signed`` follows Oanda's sign convention: positive = long,
+        negative = short.  We use FOK (Fill-Or-Kill) so the order either fills
+        immediately at the visible price or is rejected — no partial fills, no
+        resting orders left behind.
+
+        Raises:
+            RuntimeError: if Oanda does not return an ``orderFillTransaction``
+                (i.e., the order was killed, usually due to insufficient
+                liquidity — extremely rare for major FX pairs).
+            httpx.HTTPStatusError: on 4xx/5xx from the orders endpoint.
+        """
+        resp = self._http.post(
+            f"{self._base_url}/accounts/{self.account_id}/orders",
+            json={
+                "order": {
+                    "type": "MARKET",
+                    "instrument": instrument,
+                    "units": str(units_signed),
+                    "timeInForce": "FOK",
+                }
+            },
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+
+        if "orderFillTransaction" not in payload:
+            # FOK was killed — the order did not execute.
+            raise RuntimeError(
+                f"Order not filled (instrument={instrument}, "
+                f"units={units_signed}). "
+                f"Oanda response: {json.dumps(payload)}"
+            )
+
+        fill = payload["orderFillTransaction"]
+        return OrderFill(
+            transaction_id=str(fill["id"]),
+            fill_price=Decimal(fill["price"]),
+            units_filled=int(Decimal(fill["units"])),
+        )
+
     def close(self) -> None:
         """Release the underlying httpx connection pool."""
         self._http.close()
@@ -302,6 +546,39 @@ class OandaClient:
             current_from = str(txns[-1]["id"])
 
         return all_rows
+
+    def _fetch_mid(self, instrument: str) -> Decimal:
+        """Fetch the mid price for *instrument* (helper for cross-pair conversions)."""
+        resp = self._http.get(
+            f"{self._base_url}/accounts/{self.account_id}/pricing",
+            params={"instruments": instrument},
+        )
+        resp.raise_for_status()
+        bid, ask = _extract_bid_ask(resp.json())
+        return (bid + ask) / 2
+
+    def _currency_to_home(self, currency: str, home: str) -> Decimal:
+        """Return how many *home*-currency units one unit of *currency* is worth.
+
+        Tries ``{currency}_{home}`` first (direct quote).  If Oanda doesn't
+        know that pair (404 or empty), tries ``{home}_{currency}`` and inverts.
+        Raises ``ValueError`` when neither pair exists — this means we'd need a
+        three-leg conversion that we don't yet support.
+        """
+        if currency == home:
+            return Decimal("1")
+        try:
+            return self._fetch_mid(f"{currency}_{home}")
+        except httpx.HTTPStatusError:
+            pass
+        try:
+            return Decimal("1") / self._fetch_mid(f"{home}_{currency}")
+        except httpx.HTTPStatusError:
+            raise ValueError(
+                f"Cannot determine {currency}/{home} conversion rate: "
+                f"neither {currency}_{home} nor {home}_{currency} "
+                f"is a recognised Oanda pair for this account"
+            )
 
     def _parse_transaction(self, txn: dict[str, Any]) -> TransactionRow:
         """
