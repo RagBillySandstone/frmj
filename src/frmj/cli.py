@@ -13,8 +13,19 @@ Commands
 ``frmj config get <key>``
     Read a config key from the database.
 
-``frmj trade <INSTRUMENT> <long|short>``
+``frmj trade <INSTRUMENT> <long|short> [--dry-run]``
     Interactive trade flow: risk → sizing → TP/SL → confirm → execute → note.
+    ``--dry-run`` shows the full plan (including exit levels) without placing
+    the order or prompting for confirmation.
+
+``frmj note <OANDA_ID> <TEXT>``
+    Attach a free-text note to any locally-synced transaction by its Oanda
+    transaction ID.  Run ``frmj sync`` first if the transaction is not yet
+    in the local database.
+
+``frmj journal [--n N]``
+    Show the most recent N transactions (default 20) with any attached notes.
+    Reads only from the local database — no network call.
 
 All commands open the database, perform their work, and close.  Network errors
 propagate as plain RuntimeError or httpx exceptions and are caught at the
@@ -27,9 +38,9 @@ to 2dp, percentages to 1dp.
 
 from __future__ import annotations
 
-import sys
+import json
+import sqlite3
 from decimal import Decimal
-from fractions import Fraction
 
 import typer
 
@@ -138,8 +149,13 @@ def config_get(
 def trade(
     instrument: str = typer.Argument(..., help="Oanda instrument, e.g. EUR_USD"),
     direction_str: str = typer.Argument(..., metavar="DIRECTION", help="long or short"),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Show the full trade plan without placing an order.",
+    ),
 ) -> None:
-    """Plan and execute a trade."""
+    """Plan and (optionally) execute a trade."""
     # --- Parse direction -----------------------------------------------------
     direction_str = direction_str.lower()
     if direction_str not in ("long", "short"):
@@ -259,6 +275,12 @@ def trade(
             typer.echo(f"  R:R  {rr:.2f}")
     typer.echo("")
 
+    # --- Dry-run exit --------------------------------------------------------
+    if dry_run:
+        typer.echo("[DRY RUN] Plan complete. No order placed.")
+        conn.close()
+        return
+
     # --- Confirm -------------------------------------------------------------
     while True:
         answer = typer.prompt("Confirm order? [y/N/e=edit]").strip().lower()
@@ -320,8 +342,101 @@ def trade(
 
 
 # ---------------------------------------------------------------------------
+# note command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def note(
+    oanda_id: str = typer.Argument(..., help="Oanda transaction ID to annotate"),
+    text: str = typer.Argument(..., help="Note text"),
+) -> None:
+    """Attach a note to a locally-synced transaction."""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT id FROM transactions WHERE oanda_id = ?",
+            (oanda_id,),
+        ).fetchone()
+        if not row:
+            typer.echo(
+                f"Transaction {oanda_id!r} not found in local database. "
+                f"Run 'frmj sync' first.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        conn.execute(
+            "INSERT INTO notes (transaction_id, body) VALUES (?, ?)",
+            (row["id"], text),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    typer.echo(f"Note added to transaction {oanda_id}.")
+
+
+# ---------------------------------------------------------------------------
+# journal command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def journal(
+    n: int = typer.Option(
+        20, "--n", "-n", help="Number of recent transactions to show."
+    ),
+) -> None:
+    """Show recent transactions with their notes."""
+    conn = get_db()
+    try:
+        txns = conn.execute(
+            """
+            SELECT id, oanda_id, type, time, raw_json
+            FROM transactions
+            ORDER BY time DESC
+            LIMIT ?
+            """,
+            (n,),
+        ).fetchall()
+
+        if not txns:
+            typer.echo("No transactions in local database. Run 'frmj sync' first.")
+            return
+
+        for txn in txns:
+            _display_transaction(txn)
+            notes = conn.execute(
+                "SELECT body FROM notes WHERE transaction_id = ? ORDER BY id",
+                (txn["id"],),
+            ).fetchall()
+            for note_row in notes:
+                typer.echo(f"    Note: {note_row['body']}")
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _display_transaction(txn: sqlite3.Row) -> None:
+    """Format one transaction row for journal display."""
+    # Trim the ISO-8601 timestamp to seconds for readability.
+    time_short = txn["time"][:19].replace("T", " ")
+
+    extra = ""
+    if txn["type"] == "ORDER_FILL":
+        try:
+            data = json.loads(txn["raw_json"])
+            instrument = data.get("instrument", "")
+            units = int(Decimal(data.get("units", "0")))
+            direction = "LONG" if units >= 0 else "SHORT"
+            extra = f"  {instrument} {direction} {abs(units):,} units"
+        except Exception:
+            pass
+
+    typer.echo(f"{time_short}  {txn['type']:<24}  #{txn['oanda_id']}{extra}")
 
 
 def _prompt_tpsl(label: str) -> TPSLSpec | None:

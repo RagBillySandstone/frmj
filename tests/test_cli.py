@@ -1,17 +1,22 @@
-"""Tests for CLI commands: sync and config sub-commands.
+"""Tests for CLI commands: sync, config, note, journal, and trade --dry-run.
 
-We use typer's CliRunner to invoke commands in-process.  To avoid real network
-calls we monkeypatch ``frmj.app.get_client`` to return a ``FakeClient`` (same
-double used in the sync tests) seeded with whatever rows each test needs.
+We use typer's CliRunner to invoke commands in-process.  Network calls are
+avoided by monkeypatching ``frmj.cli.get_client`` with lightweight fakes:
 
-The ``trade`` command requires live Oanda calls (account summary, price, etc.)
-and interactive prompts — it is not unit-tested here.  Testing it requires an
-integration environment; see the project README for how to run integration tests.
+* ``FakeClient``      — satisfies ClientProtocol for sync tests.
+* ``FakeFullClient``  — additionally provides account_summary, instrument,
+                        price, open_tickets, and place_market_order; used for
+                        the trade --dry-run test.
+
+The ``trade`` command in normal (non-dry-run) mode requires interactive
+confirmation and live Oanda data; those paths are covered by integration tests.
 """
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -19,13 +24,14 @@ from typer.testing import CliRunner
 
 from frmj.app import get_db, set_config
 from frmj.cli import app
-from frmj.execution.oanda import TransactionRow
+from frmj.domain.sizing import Direction, InstrumentSpec, PriceQuote
+from frmj.execution.oanda import AccountSummary, OrderFill, TransactionRow
 
 runner = CliRunner()
 
 
 # ---------------------------------------------------------------------------
-# Fake client reused from sync tests
+# Fake clients
 # ---------------------------------------------------------------------------
 
 
@@ -188,3 +194,278 @@ class TestConfigCommands:
         for key, val in [("k1", "v1"), ("k2", "v2"), ("k3", "v3")]:
             result = runner.invoke(app, ["config", "get", key])
             assert result.output.strip() == val
+
+
+# ---------------------------------------------------------------------------
+# FakeFullClient — satisfies all OandaClient methods used by the trade command
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class FakeFullClient:
+    """Test double for the full OandaClient interface needed by ``trade``.
+
+    All methods are no-ops or return safe default values.  ``order_placed``
+    is set to True when ``place_market_order`` is called, letting tests
+    assert that dry-run skips order placement.
+    """
+
+    account_id: str = "acct-1"
+    order_placed: bool = False
+
+    # --- ClientProtocol (for the auto-sync step) ----------------------------
+    def get_transactions_since(self, from_id: str | None = None) -> list:
+        return []
+
+    # --- Trade-flow methods --------------------------------------------------
+    def get_account_summary(self) -> AccountSummary:
+        return AccountSummary(
+            nav=Decimal("10000.00"),
+            margin_available=Decimal("8000.00"),
+            open_trade_count=2,
+        )
+
+    def get_open_tickets_on_instrument(self, instrument: str) -> int:
+        return 0
+
+    def get_instrument(self, name: str) -> InstrumentSpec:
+        return InstrumentSpec(
+            name=name,
+            pip_location=-4,
+            margin_rate=Decimal("0.02"),
+            min_units=1,
+            units_increment=1,
+        )
+
+    def get_price(self, instrument: str, home_currency: str = "USD") -> PriceQuote:
+        return PriceQuote(
+            bid=Decimal("1.09990"),
+            ask=Decimal("1.10010"),
+            quote_to_home=Decimal("1"),
+            base_to_home=Decimal("1.10"),
+        )
+
+    def place_market_order(self, instrument: str, units_signed: int) -> OrderFill:
+        self.order_placed = True
+        return OrderFill(
+            transaction_id="99999",
+            fill_price=Decimal("1.10005"),
+            units_filled=units_signed,
+        )
+
+
+# ---------------------------------------------------------------------------
+# trade --dry-run
+# ---------------------------------------------------------------------------
+
+
+class TestDryRun:
+    """The --dry-run flag shows the plan and exits without placing an order."""
+
+    @pytest.fixture()
+    def trade_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """DB with all required config for the trade command."""
+        path = tmp_path / "trade_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        set_config(conn, "max_open_trades", "5")
+        conn.close()
+        return path
+
+    def test_dry_run_exits_zero(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``frmj trade EUR_USD long --dry-run`` must exit 0."""
+        fake = FakeFullClient()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        # Provide TP and SL input (50 pips, 30 pips), then dry-run exits.
+        result = runner.invoke(app, ["trade", "EUR_USD", "long", "--dry-run"],
+                               input="50\n30\n")
+        assert result.exit_code == 0, result.output
+
+    def test_dry_run_prints_dry_run_message(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Output must contain the [DRY RUN] marker."""
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
+        result = runner.invoke(app, ["trade", "EUR_USD", "long", "--dry-run"],
+                               input="50\n30\n")
+        assert "[DRY RUN]" in result.output
+
+    def test_dry_run_does_not_place_order(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``place_market_order`` must NOT be called in dry-run mode."""
+        fake = FakeFullClient()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        runner.invoke(app, ["trade", "EUR_USD", "long", "--dry-run"],
+                      input="50\n30\n")
+        assert not fake.order_placed
+
+    def test_dry_run_shows_exit_levels(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Exit levels table (TP and SL) appears in dry-run output."""
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
+        result = runner.invoke(app, ["trade", "EUR_USD", "long", "--dry-run"],
+                               input="50\n30\n")
+        assert "TP:" in result.output
+        assert "SL:" in result.output
+
+    def test_dry_run_skip_tpsl_shows_no_exit_levels(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pressing Enter for both TP and SL yields no exit levels line."""
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
+        # Empty input for both TP and SL prompts.
+        result = runner.invoke(app, ["trade", "EUR_USD", "long", "--dry-run"],
+                               input="\n\n")
+        assert result.exit_code == 0
+        # Neither TP nor SL was supplied, so no exit levels table is printed.
+        assert "TP:" not in result.output
+        assert "SL:" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# note command
+# ---------------------------------------------------------------------------
+
+
+def _seed_transaction(
+    path: Path,
+    oanda_id: str = "12345",
+    account_id: str = "acct-1",
+) -> None:
+    """Insert one transaction row directly into the DB for test setup."""
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(
+        """
+        INSERT INTO transactions (oanda_id, account_id, type, time, raw_json)
+        VALUES (?, ?, 'ORDER_FILL', '2026-04-25T12:00:00.000000Z', '{}')
+        """,
+        (oanda_id, account_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+class TestNoteCommand:
+    @pytest.fixture()
+    def note_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "note_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        get_db(path=path).close()  # create and apply schema
+        _seed_transaction(path, oanda_id="12345")
+        return path
+
+    def test_adds_note_to_transaction(self, note_db: Path) -> None:
+        result = runner.invoke(app, ["note", "12345", "Entry at weekly pivot"])
+        assert result.exit_code == 0, result.output
+        assert "12345" in result.output
+
+    def test_note_persisted_in_db(self, note_db: Path) -> None:
+        """The note body must appear in the notes table after the command."""
+        runner.invoke(app, ["note", "12345", "My trade rationale"])
+        conn = sqlite3.connect(str(note_db))
+        row = conn.execute("SELECT body FROM notes LIMIT 1").fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == "My trade rationale"
+
+    def test_note_on_missing_transaction_exits_1(self, note_db: Path) -> None:
+        """Referencing an Oanda ID not in the local DB must exit 1."""
+        result = runner.invoke(app, ["note", "99999", "This should fail"])
+        assert result.exit_code == 1
+
+    def test_multiple_notes_on_same_transaction(self, note_db: Path) -> None:
+        runner.invoke(app, ["note", "12345", "First note"])
+        runner.invoke(app, ["note", "12345", "Second note"])
+        conn = sqlite3.connect(str(note_db))
+        rows = conn.execute("SELECT body FROM notes ORDER BY id").fetchall()
+        conn.close()
+        assert len(rows) == 2
+        assert rows[0][0] == "First note"
+        assert rows[1][0] == "Second note"
+
+
+# ---------------------------------------------------------------------------
+# journal command
+# ---------------------------------------------------------------------------
+
+
+class TestJournalCommand:
+    @pytest.fixture()
+    def journal_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "journal_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        get_db(path=path).close()
+        # Seed 5 transactions with distinct IDs and times.
+        conn = sqlite3.connect(str(path))
+        conn.execute("PRAGMA foreign_keys = ON")
+        for i in range(1, 6):
+            conn.execute(
+                """
+                INSERT INTO transactions (oanda_id, account_id, type, time, raw_json)
+                VALUES (?, 'acct-1', 'ORDER_FILL',
+                        ?, '{"instrument":"EUR_USD","units":"1000"}')
+                """,
+                (str(1000 + i), f"2026-04-25T{10 + i:02d}:00:00.000000Z"),
+            )
+        conn.commit()
+        conn.close()
+        return path
+
+    def test_shows_transactions(self, journal_db: Path) -> None:
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        # All 5 transaction IDs should appear.
+        for i in range(1, 6):
+            assert str(1000 + i) in result.output
+
+    def test_n_flag_limits_output(self, journal_db: Path) -> None:
+        """``--n 2`` should show only the 2 most recent transactions."""
+        result = runner.invoke(app, ["journal", "--n", "2"])
+        assert result.exit_code == 0
+        # The 2 most recent are 1005 and 1004 (ordered DESC by time).
+        assert "1005" in result.output
+        assert "1004" in result.output
+        assert "1001" not in result.output
+
+    def test_empty_db_shows_helpful_message(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "empty.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        get_db(path=path).close()
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0
+        assert "sync" in result.output.lower()
+
+    def test_notes_appear_under_their_transaction(self, journal_db: Path) -> None:
+        """A note seeded for transaction 1001 must appear indented below it."""
+        conn = sqlite3.connect(str(journal_db))
+        conn.execute("PRAGMA foreign_keys = ON")
+        txn_id = conn.execute(
+            "SELECT id FROM transactions WHERE oanda_id = '1001'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO notes (transaction_id, body) VALUES (?, ?)",
+            (txn_id, "Confirmed breakout"),
+        )
+        conn.commit()
+        conn.close()
+
+        result = runner.invoke(app, ["journal"])
+        assert "Confirmed breakout" in result.output
+
+    def test_instrument_direction_shown_for_order_fill(
+        self, journal_db: Path
+    ) -> None:
+        """ORDER_FILL rows must show instrument and direction parsed from JSON."""
+        result = runner.invoke(app, ["journal"])
+        assert "EUR_USD" in result.output
+        assert "LONG" in result.output
