@@ -18,9 +18,11 @@ import pytest
 
 from frmj.execution.oanda import (
     AccountSummary,
+    OpenTrade,
     _extract_bid_ask,
     _parse_account_summary,
     _parse_instrument_spec,
+    _parse_open_trade,
     _parse_order_create_txn_id,
 )
 from frmj.domain.sizing import InstrumentSpec
@@ -179,6 +181,85 @@ class TestExtractBidAsk:
         bid, ask = _extract_bid_ask(payload)
         assert bid == Decimal("149.990")
         assert ask == Decimal("150.010")
+
+
+# ---------------------------------------------------------------------------
+# _parse_open_trade
+# ---------------------------------------------------------------------------
+
+
+def _open_trade_payload(
+    trade_id: str = "6368",
+    instrument: str = "EUR_USD",
+    current_units: str = "10000",
+    price: str = "1.10050",
+    unrealised_pl: str = "45.23",
+    margin_used: str = "220.10",
+    open_time: str = "2026-04-25T14:30:00.000000Z",
+    tp_price: str | None = "1.10550",
+    sl_price: str | None = "1.09750",
+) -> dict:
+    trade: dict = {
+        "id": trade_id,
+        "instrument": instrument,
+        "currentUnits": current_units,
+        "price": price,
+        "unrealizedPL": unrealised_pl,
+        "marginUsed": margin_used,
+        "openTime": open_time,
+    }
+    if tp_price is not None:
+        trade["takeProfitOrder"] = {"id": "6369", "price": tp_price}
+    if sl_price is not None:
+        trade["stopLossOrder"] = {"id": "6370", "price": sl_price}
+    return trade
+
+
+class TestParseOpenTrade:
+    def test_long_direction_from_positive_units(self) -> None:
+        result = _parse_open_trade(_open_trade_payload(current_units="10000"))
+        assert result.direction == "LONG"
+        assert result.units == 10000
+
+    def test_short_direction_from_negative_units(self) -> None:
+        result = _parse_open_trade(_open_trade_payload(current_units="-5000"))
+        assert result.direction == "SHORT"
+        assert result.units == 5000
+
+    def test_units_always_positive(self) -> None:
+        result = _parse_open_trade(_open_trade_payload(current_units="-1"))
+        assert result.units > 0
+
+    def test_parses_open_price(self) -> None:
+        result = _parse_open_trade(_open_trade_payload(price="1.10050"))
+        assert result.open_price == Decimal("1.10050")
+
+    def test_parses_unrealised_pl(self) -> None:
+        result = _parse_open_trade(_open_trade_payload(unrealised_pl="-12.50"))
+        assert result.unrealised_pl == Decimal("-12.50")
+
+    def test_parses_tp_and_sl_prices(self) -> None:
+        result = _parse_open_trade(
+            _open_trade_payload(tp_price="1.10550", sl_price="1.09750")
+        )
+        assert result.take_profit_price == Decimal("1.10550")
+        assert result.stop_loss_price == Decimal("1.09750")
+
+    def test_tp_sl_none_when_absent(self) -> None:
+        result = _parse_open_trade(_open_trade_payload(tp_price=None, sl_price=None))
+        assert result.take_profit_price is None
+        assert result.stop_loss_price is None
+
+    def test_returns_open_trade_dataclass(self) -> None:
+        result = _parse_open_trade(_open_trade_payload())
+        assert isinstance(result, OpenTrade)
+
+    def test_instrument_and_trade_id_preserved(self) -> None:
+        result = _parse_open_trade(
+            _open_trade_payload(trade_id="9999", instrument="USD_JPY")
+        )
+        assert result.trade_id == "9999"
+        assert result.instrument == "USD_JPY"
 
 
 # ---------------------------------------------------------------------------

@@ -25,7 +25,7 @@ from typer.testing import CliRunner
 from frmj.app import get_db, set_config
 from frmj.cli import app
 from frmj.domain.sizing import Direction, InstrumentSpec, PriceQuote
-from frmj.execution.oanda import AccountSummary, OrderFill, TransactionRow
+from frmj.execution.oanda import AccountSummary, OpenTrade, OrderFill, TransactionRow
 
 runner = CliRunner()
 
@@ -386,6 +386,11 @@ class FakeFullClient:
         self.sl_attached = str(price)
         return "100002"
 
+    open_trades: list[OpenTrade] = field(default_factory=list)
+
+    def get_open_trades(self) -> list[OpenTrade]:
+        return self.open_trades
+
 
 # ---------------------------------------------------------------------------
 # trade --dry-run
@@ -702,3 +707,144 @@ class TestTradeExecute:
         result = self._invoke(monkeypatch, fake, "50\n30\ny\n\n")
         assert result.exit_code == 0, result.output
         assert "trade ID" in result.output + result.stderr
+
+
+# ---------------------------------------------------------------------------
+# positions command
+# ---------------------------------------------------------------------------
+
+
+def _open_trade(
+    trade_id: str = "6368",
+    instrument: str = "EUR_USD",
+    direction: str = "LONG",
+    units: int = 10_000,
+    open_price: str = "1.10050",
+    unrealised_pl: str = "45.23",
+    margin_used: str = "220.10",
+    tp_price: str | None = "1.10550",
+    sl_price: str | None = "1.09750",
+) -> OpenTrade:
+    return OpenTrade(
+        trade_id=trade_id,
+        instrument=instrument,
+        direction=direction,
+        units=units,
+        open_price=Decimal(open_price),
+        unrealised_pl=Decimal(unrealised_pl),
+        margin_used=Decimal(margin_used),
+        take_profit_price=Decimal(tp_price) if tp_price else None,
+        stop_loss_price=Decimal(sl_price) if sl_price else None,
+        open_time="2026-04-25T14:30:00.000000Z",
+    )
+
+
+class TestPositionsCommand:
+    @pytest.fixture()
+    def pos_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "pos_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        conn.close()
+        return path
+
+    def _invoke(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        trades: list[OpenTrade],
+    ) -> object:
+        fake = FakeFullClient(open_trades=trades)
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        return runner.invoke(app, ["positions"])
+
+    def test_no_open_positions_message(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self._invoke(monkeypatch, [])
+        assert result.exit_code == 0, result.output
+        assert "No open positions" in result.output
+
+    def test_shows_instrument_and_direction(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self._invoke(monkeypatch, [_open_trade(instrument="EUR_USD", direction="LONG")])
+        assert result.exit_code == 0, result.output
+        assert "EUR_USD" in result.output
+        assert "LONG" in result.output
+
+    def test_shows_units_and_entry_price(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self._invoke(monkeypatch, [_open_trade(units=10_000, open_price="1.10050")])
+        assert "10,000" in result.output
+        assert "1.10050" in result.output
+
+    def test_shows_tp_and_sl(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self._invoke(
+            monkeypatch,
+            [_open_trade(tp_price="1.10550", sl_price="1.09750")],
+        )
+        assert "TP: 1.10550" in result.output
+        assert "SL: 1.09750" in result.output
+
+    def test_no_tpsl_shows_fallback_text(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self._invoke(monkeypatch, [_open_trade(tp_price=None, sl_price=None)])
+        assert "no TP/SL set" in result.output
+
+    def test_shows_position_count(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self._invoke(
+            monkeypatch,
+            [_open_trade(trade_id="1"), _open_trade(trade_id="2")],
+        )
+        assert "2 open positions" in result.output
+
+    def test_note_flag_shown_when_notes_exist(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A trade whose fill transaction has notes shows [note] in output."""
+        # Seed the fill transaction and a note directly in the DB.
+        conn = sqlite3.connect(str(pos_db))
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+            "VALUES ('6368', 'acct-1', 'ORDER_FILL', '2026-04-25T14:30:00Z', '{}')"
+        )
+        txn_id = conn.execute(
+            "SELECT id FROM transactions WHERE oanda_id='6368'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO notes (transaction_id, body) VALUES (?, 'Test note')",
+            (txn_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        result = self._invoke(monkeypatch, [_open_trade(trade_id="6368")])
+        assert "[note]" in result.output
+
+    def test_no_note_flag_when_no_notes(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self._invoke(monkeypatch, [_open_trade(trade_id="9999")])
+        assert "[note]" not in result.output
+
+    def test_api_error_exits_1(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+
+        def _fail() -> list:
+            raise RuntimeError("Oanda API unavailable")
+
+        fake.get_open_trades = _fail  # type: ignore[method-assign]
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["positions"])
+        assert result.exit_code == 1
+        assert "Error" in result.output + result.stderr

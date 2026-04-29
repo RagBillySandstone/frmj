@@ -143,6 +143,32 @@ class TransactionRow:
 
 
 @dataclass(frozen=True, slots=True)
+class OpenTrade:
+    """One open trade as returned by GET /accounts/{id}/openTrades.
+
+    ``direction`` is ``"LONG"`` or ``"SHORT"``.  ``units`` is always positive —
+    direction is carried separately so callers never have to check sign.
+
+    ``take_profit_price`` and ``stop_loss_price`` are ``None`` when no
+    corresponding order is attached to the trade.
+
+    ``open_time`` is the ISO-8601 timestamp from Oanda verbatim; the display
+    layer trims it to seconds.
+    """
+
+    trade_id: str
+    instrument: str
+    direction: str
+    units: int
+    open_price: Decimal
+    unrealised_pl: Decimal
+    margin_used: Decimal
+    take_profit_price: Decimal | None
+    stop_loss_price: Decimal | None
+    open_time: str
+
+
+@dataclass(frozen=True, slots=True)
 class AccountSummary:
     """Account-level snapshot returned by GET /accounts/{id}/summary.
 
@@ -191,6 +217,32 @@ class OrderFill:
 # ---------------------------------------------------------------------------
 # Separating parsing from HTTP means tests can feed sample dicts without
 # spinning up an HTTP server, while the OandaClient methods stay thin.
+
+
+def _parse_open_trade(trade: dict[str, Any]) -> OpenTrade:
+    """Parse one element of the ``trades`` array from GET /openTrades.
+
+    ``currentUnits`` is signed (positive=long, negative=short); we normalise to
+    a direction string + positive unit count so callers never have to check sign.
+
+    ``takeProfitOrder`` and ``stopLossOrder`` are optional keys — absent when no
+    exit order is attached.
+    """
+    units_raw = int(Decimal(trade["currentUnits"]))
+    tp_order = trade.get("takeProfitOrder")
+    sl_order = trade.get("stopLossOrder")
+    return OpenTrade(
+        trade_id=str(trade["id"]),
+        instrument=trade["instrument"],
+        direction="LONG" if units_raw >= 0 else "SHORT",
+        units=abs(units_raw),
+        open_price=Decimal(trade["price"]),
+        unrealised_pl=Decimal(trade["unrealizedPL"]),
+        margin_used=Decimal(trade["marginUsed"]),
+        take_profit_price=Decimal(tp_order["price"]) if tp_order else None,
+        stop_loss_price=Decimal(sl_order["price"]) if sl_order else None,
+        open_time=trade["openTime"],
+    )
 
 
 def _parse_account_summary(payload: dict[str, Any]) -> AccountSummary:
@@ -451,6 +503,20 @@ class OandaClient:
         )
         resp.raise_for_status()
         return len(resp.json().get("trades", []))
+
+    def get_open_trades(self) -> list[OpenTrade]:
+        """Fetch all currently open trades for the account.
+
+        Uses GET /accounts/{id}/openTrades which returns the full trade detail
+        including unrealised P/L, margin used, and any attached TP/SL orders.
+        Returns an empty list when there are no open positions.
+        Raises ``httpx.HTTPStatusError`` on Oanda errors.
+        """
+        resp = self._http.get(
+            f"{self._base_url}/accounts/{self.account_id}/openTrades"
+        )
+        resp.raise_for_status()
+        return [_parse_open_trade(t) for t in resp.json().get("trades", [])]
 
     def place_market_order(
         self,

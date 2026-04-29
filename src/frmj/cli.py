@@ -26,6 +26,11 @@ Commands
     (including exit levels) without placing the order or prompting for
     confirmation.
 
+``frmj positions``
+    Show all open trades fetched live from Oanda: instrument, direction,
+    units, entry price, unrealised P/L, margin, TP/SL levels.  Trades that
+    have journal notes in the local DB are flagged with ``[note]``.
+
 ``frmj note <OANDA_ID> <TEXT>``
     Attach a free-text note to any locally-synced transaction by its Oanda
     transaction ID.  Run ``frmj sync`` first if the transaction is not yet
@@ -72,6 +77,7 @@ from frmj.domain.pricing import (
 )
 from frmj.domain.risk import MaxTradesExceeded, ScaleInForbidden, evaluate_trade
 from frmj.domain.sizing import Direction, compute_units
+from frmj.execution.oanda import OpenTrade
 from frmj.execution.sync import sync_cold, sync_incremental
 
 # ---------------------------------------------------------------------------
@@ -122,6 +128,44 @@ def sync(
         typer.echo(f"Cursor: transaction {result.last_oanda_id}")
     else:
         typer.echo("No transactions returned.")
+
+
+# ---------------------------------------------------------------------------
+# positions command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def positions() -> None:
+    """Show all open trades with current P/L and TP/SL levels."""
+    conn = get_db()
+    try:
+        client = get_client(conn)
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        conn.close()
+        raise typer.Exit(1)
+
+    try:
+        trades = client.get_open_trades()
+    except Exception as exc:
+        typer.echo(f"Error fetching open positions: {exc}", err=True)
+        conn.close()
+        raise typer.Exit(1)
+
+    if not trades:
+        typer.echo("No open positions.")
+        conn.close()
+        return
+
+    label = "position" if len(trades) == 1 else "positions"
+    typer.echo(f"{len(trades)} open {label}")
+    typer.echo("─" * 56)
+
+    for trade in trades:
+        _display_open_trade(conn, trade)
+
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -600,3 +644,39 @@ def _display_exits(exits: ExitLevels, margin_used: Decimal) -> None:
         )
     for warn in exits.warnings:
         typer.echo(f"  ! {warn}", err=True)
+
+
+def _display_open_trade(conn: sqlite3.Connection, trade: OpenTrade) -> None:
+    """Print one open trade in the positions view."""
+    note_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM notes n
+        JOIN transactions t ON n.transaction_id = t.id
+        WHERE t.oanda_id = ?
+        """,
+        (trade.trade_id,),
+    ).fetchone()[0]
+    note_flag = "  [note]" if note_count else ""
+
+    time_short = trade.open_time[:19].replace("T", " ")
+    pl_sign = "+" if trade.unrealised_pl >= 0 else ""
+
+    typer.echo(
+        f"  #{trade.trade_id}  {trade.instrument}  {trade.direction}"
+        f"  {trade.units:,} units  @ {trade.open_price}"
+        f"  (opened {time_short}){note_flag}"
+    )
+
+    exits_parts: list[str] = []
+    if trade.take_profit_price is not None:
+        exits_parts.append(f"TP: {trade.take_profit_price}")
+    if trade.stop_loss_price is not None:
+        exits_parts.append(f"SL: {trade.stop_loss_price}")
+    exits_str = "  ".join(exits_parts) if exits_parts else "no TP/SL set"
+
+    typer.echo(
+        f"         P/L: {pl_sign}${trade.unrealised_pl:,.2f}"
+        f"  margin: ${trade.margin_used:,.2f}"
+        f"  {exits_str}"
+    )
+    typer.echo("")
