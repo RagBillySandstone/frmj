@@ -540,6 +540,17 @@ def trade(
                     err=True,
                 )
 
+    # --- Post-fill sync -------------------------------------------------------
+    # Brings the fill transaction into the local DB so the plan and any note
+    # can be saved with a proper FK reference in the same session.
+    try:
+        sync_incremental(conn, client)
+    except Exception as exc:
+        typer.echo(f"[sync] Warning: post-fill sync failed — {exc}", err=True)
+
+    # --- Save trade plan ------------------------------------------------------
+    _save_trade_plan(conn, fill.transaction_id, client.account_id, exits)
+
     # --- Optional entry note -------------------------------------------------
     note_text = typer.prompt("Add a note (Enter to skip)", default="").strip()
     if note_text:
@@ -629,6 +640,19 @@ def journal(
 
         for txn in txns:
             _display_transaction(txn)
+            if txn["type"] == "ORDER_FILL":
+                plan = conn.execute(
+                    "SELECT tp_price, sl_price FROM trade_plans WHERE transaction_id = ?",
+                    (txn["id"],),
+                ).fetchone()
+                if plan:
+                    parts: list[str] = []
+                    if plan["tp_price"]:
+                        parts.append(f"TP {plan['tp_price']}")
+                    if plan["sl_price"]:
+                        parts.append(f"SL {plan['sl_price']}")
+                    if parts:
+                        typer.echo(f"    Plan: {'  '.join(parts)}")
             notes = conn.execute(
                 "SELECT body FROM notes WHERE transaction_id = ? ORDER BY id",
                 (txn["id"],),
@@ -764,3 +788,33 @@ def _display_open_trade(conn: sqlite3.Connection, trade: OpenTrade) -> None:
         f"  {exits_str}"
     )
     typer.echo("")
+
+
+def _save_trade_plan(
+    conn: sqlite3.Connection,
+    fill_oanda_id: str,
+    account_id: str,
+    exits: ExitLevels,
+) -> None:
+    """Persist the intended TP/SL for a fill transaction if either side was set.
+
+    Silent no-op when neither TP nor SL was specified, or when the fill
+    transaction is not yet in the local DB (post-fill sync may have failed).
+    Uses INSERT OR IGNORE so a duplicate call (e.g. from a retry) is harmless.
+    """
+    if exits.take_profit_price is None and exits.stop_loss_price is None:
+        return
+    row = conn.execute(
+        "SELECT id FROM transactions WHERE oanda_id = ? AND account_id = ?",
+        (fill_oanda_id, account_id),
+    ).fetchone()
+    if not row:
+        return
+    tp_str = str(exits.take_profit_price) if exits.take_profit_price is not None else None
+    sl_str = str(exits.stop_loss_price) if exits.stop_loss_price is not None else None
+    conn.execute(
+        "INSERT OR IGNORE INTO trade_plans (transaction_id, tp_price, sl_price) "
+        "VALUES (?, ?, ?)",
+        (row["id"], tp_str, sl_str),
+    )
+    conn.commit()

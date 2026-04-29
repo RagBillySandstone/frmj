@@ -90,15 +90,15 @@ class TestEnsureSchema:
     """Verify that ensure_schema creates the correct structure."""
 
     def test_creates_all_tables(self, db: sqlite3.Connection) -> None:
-        """All four expected tables must be present after initialisation."""
+        """All five expected tables must be present after initialisation."""
         rows = db.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         ).fetchall()
         found = {r["name"] for r in rows}
-        assert {"transactions", "notes", "sync_cursors", "config"} <= found
+        assert {"transactions", "notes", "sync_cursors", "config", "trade_plans"} <= found
 
     def test_creates_all_indexes(self, db: sqlite3.Connection) -> None:
-        """All four named indexes must be present."""
+        """All named indexes must be present."""
         rows = db.execute(
             "SELECT name FROM sqlite_master WHERE type = 'index'"
         ).fetchall()
@@ -108,6 +108,7 @@ class TestEnsureSchema:
             "idx_transactions_time",
             "idx_transactions_parent",
             "idx_notes_transaction",
+            "idx_trade_plans_transaction",
         } <= found
 
     def test_idempotent(self, db: sqlite3.Connection) -> None:
@@ -429,3 +430,74 @@ class TestConfig:
         db.commit()
         count = db.execute("SELECT COUNT(*) FROM config").fetchone()[0]
         assert count == 3
+
+
+# ---------------------------------------------------------------------------
+# trade_plans table
+# ---------------------------------------------------------------------------
+
+
+class TestTradePlans:
+    """Contract tests for the trade intent / plan table."""
+
+    def test_insert_and_retrieve(self, db: sqlite3.Connection) -> None:
+        """TP and SL prices survive a roundtrip."""
+        txn_id = _insert_transaction(db)
+        db.execute(
+            "INSERT INTO trade_plans (transaction_id, tp_price, sl_price) VALUES (?, ?, ?)",
+            (txn_id, "1.10550", "1.09750"),
+        )
+        db.commit()
+        row = db.execute(
+            "SELECT tp_price, sl_price FROM trade_plans WHERE transaction_id = ?",
+            (txn_id,),
+        ).fetchone()
+        assert row["tp_price"] == "1.10550"
+        assert row["sl_price"] == "1.09750"
+
+    def test_null_prices_allowed(self, db: sqlite3.Connection) -> None:
+        """Either or both of tp_price / sl_price can be NULL."""
+        txn_id = _insert_transaction(db)
+        db.execute(
+            "INSERT INTO trade_plans (transaction_id, tp_price, sl_price) VALUES (?, ?, ?)",
+            (txn_id, None, "1.09750"),
+        )
+        db.commit()
+        row = db.execute(
+            "SELECT tp_price FROM trade_plans WHERE transaction_id = ?", (txn_id,)
+        ).fetchone()
+        assert row["tp_price"] is None
+
+    def test_fk_enforced(self, db: sqlite3.Connection) -> None:
+        """Inserting a plan for a non-existent transaction must fail."""
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute(
+                "INSERT INTO trade_plans (transaction_id, tp_price, sl_price) VALUES (?, ?, ?)",
+                (99999, "1.10550", "1.09750"),
+            )
+            db.commit()
+
+    def test_unique_per_transaction(self, db: sqlite3.Connection) -> None:
+        """Only one plan row is allowed per fill transaction."""
+        txn_id = _insert_transaction(db)
+        db.execute(
+            "INSERT INTO trade_plans (transaction_id, tp_price, sl_price) VALUES (?, ?, ?)",
+            (txn_id, "1.10550", "1.09750"),
+        )
+        db.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute(
+                "INSERT INTO trade_plans (transaction_id, tp_price, sl_price) VALUES (?, ?, ?)",
+                (txn_id, "1.11000", "1.09000"),
+            )
+            db.commit()
+
+    def test_created_at_populated_by_default(self, db: sqlite3.Connection) -> None:
+        txn_id = _insert_transaction(db)
+        db.execute(
+            "INSERT INTO trade_plans (transaction_id, tp_price, sl_price) VALUES (?, ?, ?)",
+            (txn_id, "1.10550", None),
+        )
+        db.commit()
+        row = db.execute("SELECT created_at FROM trade_plans").fetchone()
+        assert row["created_at"] is not None

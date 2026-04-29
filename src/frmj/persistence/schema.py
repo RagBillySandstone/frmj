@@ -164,6 +164,27 @@ CREATE TABLE IF NOT EXISTS sync_cursors (
 
 
 -- -------------------------------------------------------------------------
+-- Trade plans — intended TP/SL captured at entry time
+-- -------------------------------------------------------------------------
+-- One row per ORDER_FILL.  Stores the prices the trader intended when they
+-- placed the order so the journal and stats layer can compare intent with
+-- outcome.  tp_price / sl_price are NULL when the user did not specify that
+-- side.  Prices are stored as TEXT Decimal strings (same pattern as raw_json
+-- field values) to preserve exact representation.
+CREATE TABLE IF NOT EXISTS trade_plans (
+    id              INTEGER PRIMARY KEY,
+    transaction_id  INTEGER NOT NULL UNIQUE REFERENCES transactions(id),
+    tp_price        TEXT,
+    sl_price        TEXT,
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- "What was the plan for this fill?" — the only access pattern.
+CREATE INDEX IF NOT EXISTS idx_trade_plans_transaction
+    ON trade_plans (transaction_id);
+
+
+-- -------------------------------------------------------------------------
 -- Config — flat key/value store for account settings
 -- -------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS config (

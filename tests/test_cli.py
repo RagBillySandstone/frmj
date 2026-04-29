@@ -620,6 +620,32 @@ class TestJournalCommand:
         assert "EUR_USD" in result.output
         assert "LONG" in result.output
 
+    def test_plan_shown_under_order_fill(self, journal_db: Path) -> None:
+        """A trade plan row is shown as '    Plan: TP ...  SL ...' under its fill."""
+        conn = sqlite3.connect(str(journal_db))
+        conn.execute("PRAGMA foreign_keys = ON")
+        txn_id = conn.execute(
+            "SELECT id FROM transactions WHERE oanda_id = '1001'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO trade_plans (transaction_id, tp_price, sl_price) "
+            "VALUES (?, ?, ?)",
+            (txn_id, "1.10550", "1.09750"),
+        )
+        conn.commit()
+        conn.close()
+
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        assert "Plan:" in result.output
+        assert "TP 1.10550" in result.output
+        assert "SL 1.09750" in result.output
+
+    def test_plan_not_shown_when_absent(self, journal_db: Path) -> None:
+        """Transactions without a plan must not show a 'Plan:' line."""
+        result = runner.invoke(app, ["journal"])
+        assert "Plan:" not in result.output
+
 
 # ---------------------------------------------------------------------------
 # trade — confirmed execution path with TP/SL attachment
@@ -719,6 +745,48 @@ class TestTradeExecute:
         result = self._invoke(monkeypatch, fake, "50\n30\ny\n\n")
         assert result.exit_code == 0, result.output
         assert "trade ID" in result.output + result.stderr
+
+    def test_trade_plan_saved_to_db(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """TP and SL prices are persisted in trade_plans after a confirmed fill."""
+        # Seed the fill transaction as if post-fill sync brought it in.
+        conn = get_db(path=trade_db)
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+            "VALUES ('99999', 'acct-1', 'ORDER_FILL', '2026-04-29T12:00:00Z', '{}')"
+        )
+        conn.commit()
+        conn.close()
+
+        fake = FakeFullClient()
+        result = self._invoke(monkeypatch, fake, "50\n30\ny\n\n")
+        assert result.exit_code == 0, result.output
+
+        conn = get_db(path=trade_db)
+        plan = conn.execute(
+            "SELECT tp_price, sl_price FROM trade_plans "
+            "JOIN transactions ON trade_plans.transaction_id = transactions.id "
+            "WHERE transactions.oanda_id = '99999'"
+        ).fetchone()
+        conn.close()
+        assert plan is not None
+        assert plan["tp_price"] is not None
+        assert plan["sl_price"] is not None
+
+    def test_no_trade_plan_when_tpsl_skipped(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Skipping both TP and SL leaves no row in trade_plans."""
+        fake = FakeFullClient()
+        # skip TP, skip SL, confirm=y, note=skip
+        result = self._invoke(monkeypatch, fake, "\n\ny\n\n")
+        assert result.exit_code == 0, result.output
+
+        conn = get_db(path=trade_db)
+        count = conn.execute("SELECT COUNT(*) FROM trade_plans").fetchone()[0]
+        conn.close()
+        assert count == 0
 
 
 # ---------------------------------------------------------------------------
