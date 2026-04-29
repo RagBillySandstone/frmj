@@ -57,22 +57,22 @@ the "abort" path unreachable.
 
 Parent / child transaction IDs
 -------------------------------
-Oanda models DAILY_FINANCING as a single parent transaction that may
-reference related child transactions via a ``relatedTransactionIDs`` field.
-For all other transaction types that can have a parent reference, Oanda
-uses the ``orderID`` or a similar field. We extract the parent reference
-into ``TransactionRow.parent_oanda_id`` using the ``relatedTransactionIDs``
-convention; the sync layer resolves this to our synthetic SQLite FK.
+Oanda models DAILY_FINANCING as a single parent transaction that lists its
+per-instrument children via ``relatedTransactionIDs``.  Children have no
+back-reference to their parent.
 
-NOTE: the exact field names were validated against Oanda's v20 OpenAPI spec
-at the time of writing. If a future Oanda API change renames them, fix
-``_parse_transaction`` in this module — the sync layer is unaffected.
+``get_transactions_since`` applies ``_resolve_financing_parents`` to the
+collected batch before returning it, stamping ``parent_oanda_id`` on every
+child row.  The sync layer then resolves those IDs to the synthetic SQLite
+FK.  Rows from a prior sync run are handled by the sync layer's
+``_resolve_parent_id`` DB lookup — cross-batch links work correctly because
+the parent is already in the database when the children arrive.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -338,6 +338,50 @@ def _extract_bid_ask(payload: dict[str, Any]) -> tuple[Decimal, Decimal]:
 
 
 # ---------------------------------------------------------------------------
+# Parent/child resolution (pure — tested directly)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_financing_parents(rows: list[TransactionRow]) -> list[TransactionRow]:
+    """Stamp ``parent_oanda_id`` on DAILY_FINANCING child rows.
+
+    Oanda emits each DAILY_FINANCING batch as one summary parent (which
+    carries ``relatedTransactionIDs`` listing its per-instrument children)
+    followed by the children themselves.  The children have no back-reference.
+
+    We build a ``{child_oanda_id: parent_oanda_id}`` map from every parent in
+    *rows*, then return a new list where each child row has its
+    ``parent_oanda_id`` set.  All other rows are returned unchanged.
+
+    The fast path (no DAILY_FINANCING parents in the batch) returns *rows*
+    unmodified so callers bear zero overhead on typical batches that contain
+    only trade transactions.
+
+    Cross-batch case: if a parent arrived in a prior sync run it will not be
+    in *rows*, so its children's ``parent_oanda_id`` will remain ``None`` here.
+    The sync layer's ``_resolve_parent_id`` DB lookup handles that case — it
+    finds the parent's synthetic id from the transactions table.
+    """
+    child_to_parent: dict[str, str] = {}
+    for row in rows:
+        if row.type != "DAILY_FINANCING":
+            continue
+        raw: dict[str, Any] = json.loads(row.raw_json)
+        for child_id in raw.get("relatedTransactionIDs", []):
+            child_to_parent[str(child_id)] = row.oanda_id
+
+    if not child_to_parent:
+        return rows
+
+    return [
+        replace(row, parent_oanda_id=child_to_parent[row.oanda_id])
+        if row.oanda_id in child_to_parent
+        else row
+        for row in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Protocol — the abstraction boundary
 # ---------------------------------------------------------------------------
 
@@ -435,9 +479,8 @@ class OandaClient:
         Raises ``httpx.HTTPStatusError`` on 4xx / 5xx responses.
         Raises ``httpx.TimeoutException`` if a request exceeds the timeout.
         """
-        if from_id is None:
-            return self._fetch_all_cold()
-        return self._fetch_since(from_id)
+        rows = self._fetch_all_cold() if from_id is None else self._fetch_since(from_id)
+        return _resolve_financing_parents(rows)
 
     def get_account_summary(self) -> AccountSummary:
         """Fetch NAV, available margin, and open trade count.
@@ -760,29 +803,21 @@ class OandaClient:
             )
 
     def _parse_transaction(self, txn: dict[str, Any]) -> TransactionRow:
-        """
-        Extract the fields we index from one Oanda transaction dict.
+        """Extract the fields we index from one Oanda transaction dict.
 
         ``raw_json`` is the compact-serialised full dict so we never lose
         fields we don't yet parse.
 
-        Parent detection: Oanda uses ``relatedTransactionIDs`` on the parent
-        to list its children.  On the child side there is no explicit
-        ``parentTransactionID`` field — children are identified by the caller
-        (sync layer) by resolving the parent's ``relatedTransactionIDs``.
-
-        For now we set ``parent_oanda_id = None`` for all rows; the sync layer
-        will handle the relationship via a post-insert pass if needed.
-
-        TODO: implement financing parent/child linking once we have live data
-        to validate the exact field names and delivery order against.
+        ``parent_oanda_id`` is always ``None`` here; the caller
+        (``get_transactions_since``) applies ``_resolve_financing_parents``
+        to the full batch afterward to stamp parent links on DAILY_FINANCING
+        children.
         """
         return TransactionRow(
             oanda_id=str(txn["id"]),
             account_id=self.account_id,
             type=txn["type"],
             time=txn["time"],
-            # Parent linking is deferred — see docstring above.
             parent_oanda_id=None,
             raw_json=json.dumps(txn, separators=(",", ":")),
         )

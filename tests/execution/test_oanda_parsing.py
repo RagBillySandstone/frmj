@@ -20,12 +20,14 @@ from frmj.execution.oanda import (
     AccountSummary,
     CloseFill,
     OpenTrade,
+    TransactionRow,
     _extract_bid_ask,
     _parse_account_summary,
     _parse_close_fill,
     _parse_instrument_spec,
     _parse_open_trade,
     _parse_order_create_txn_id,
+    _resolve_financing_parents,
 )
 from frmj.domain.sizing import InstrumentSpec
 
@@ -331,3 +333,107 @@ class TestParseOrderCreateTxnId:
         payload = {"orderFillTransaction": {"id": "99"}, "lastTransactionID": "99"}
         with pytest.raises(RuntimeError, match="No orderCreateTransaction"):
             _parse_order_create_txn_id(payload)
+
+
+# ---------------------------------------------------------------------------
+# _resolve_financing_parents
+# ---------------------------------------------------------------------------
+
+
+def _financing_row(
+    oanda_id: str,
+    related: list[str] | None = None,
+    parent_oanda_id: str | None = None,
+) -> TransactionRow:
+    """Build a DAILY_FINANCING TransactionRow with optional relatedTransactionIDs."""
+    raw: dict = {"id": oanda_id, "type": "DAILY_FINANCING"}
+    if related is not None:
+        raw["relatedTransactionIDs"] = related
+    import json as _json
+    return TransactionRow(
+        oanda_id=oanda_id,
+        account_id="acct-1",
+        type="DAILY_FINANCING",
+        time="2026-04-25T22:00:00.000000Z",
+        parent_oanda_id=parent_oanda_id,
+        raw_json=_json.dumps(raw),
+    )
+
+
+def _fill_row(oanda_id: str) -> TransactionRow:
+    """Build a non-financing TransactionRow."""
+    import json as _json
+    return TransactionRow(
+        oanda_id=oanda_id,
+        account_id="acct-1",
+        type="ORDER_FILL",
+        time="2026-04-25T10:00:00.000000Z",
+        parent_oanda_id=None,
+        raw_json=_json.dumps({"id": oanda_id, "type": "ORDER_FILL"}),
+    )
+
+
+class TestResolveFinancingParents:
+    def test_empty_list_returns_empty(self) -> None:
+        assert _resolve_financing_parents([]) == []
+
+    def test_no_financing_rows_returns_list_unchanged(self) -> None:
+        rows = [_fill_row("1"), _fill_row("2")]
+        result = _resolve_financing_parents(rows)
+        assert result == rows
+
+    def test_parent_and_children_linked(self) -> None:
+        """Children listed in parent's relatedTransactionIDs get parent_oanda_id set."""
+        parent = _financing_row("1000", related=["1001", "1002"])
+        child_a = _financing_row("1001")
+        child_b = _financing_row("1002")
+        result = _resolve_financing_parents([parent, child_a, child_b])
+        by_id = {r.oanda_id: r for r in result}
+        assert by_id["1001"].parent_oanda_id == "1000"
+        assert by_id["1002"].parent_oanda_id == "1000"
+
+    def test_parent_row_itself_unchanged(self) -> None:
+        """The parent's own parent_oanda_id must remain None."""
+        parent = _financing_row("1000", related=["1001"])
+        child = _financing_row("1001")
+        result = _resolve_financing_parents([parent, child])
+        by_id = {r.oanda_id: r for r in result}
+        assert by_id["1000"].parent_oanda_id is None
+
+    def test_multiple_financing_batches_in_one_list(self) -> None:
+        """Two independent financing batches on the same day link correctly."""
+        parent_a = _financing_row("100", related=["101"])
+        child_a = _financing_row("101")
+        parent_b = _financing_row("200", related=["201", "202"])
+        child_b1 = _financing_row("201")
+        child_b2 = _financing_row("202")
+        result = _resolve_financing_parents(
+            [parent_a, child_a, parent_b, child_b1, child_b2]
+        )
+        by_id = {r.oanda_id: r for r in result}
+        assert by_id["101"].parent_oanda_id == "100"
+        assert by_id["201"].parent_oanda_id == "200"
+        assert by_id["202"].parent_oanda_id == "200"
+
+    def test_non_financing_rows_interspersed_are_unchanged(self) -> None:
+        """ORDER_FILL rows in a mixed batch must pass through untouched."""
+        fill = _fill_row("999")
+        parent = _financing_row("1000", related=["1001"])
+        child = _financing_row("1001")
+        result = _resolve_financing_parents([fill, parent, child])
+        by_id = {r.oanda_id: r for r in result}
+        assert by_id["999"].parent_oanda_id is None
+        assert by_id["999"].type == "ORDER_FILL"
+
+    def test_financing_row_without_related_ids_left_alone(self) -> None:
+        """A DAILY_FINANCING row with no relatedTransactionIDs is treated as a child
+        from a prior batch — parent_oanda_id stays None."""
+        child_only = _financing_row("500")  # no related list → cross-batch case
+        result = _resolve_financing_parents([child_only])
+        assert result[0].parent_oanda_id is None
+
+    def test_row_count_unchanged(self) -> None:
+        parent = _financing_row("1000", related=["1001", "1002"])
+        rows = [parent, _financing_row("1001"), _financing_row("1002")]
+        result = _resolve_financing_parents(rows)
+        assert len(result) == len(rows)
