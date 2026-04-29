@@ -212,11 +212,42 @@ class OrderFill:
     trade_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CloseFill:
+    """Result of closing an open trade via PUT /trades/{id}/close.
+
+    ``transaction_id`` is Oanda's closing fill-transaction ID.
+
+    ``close_price`` is the execution price at which the trade was closed.
+
+    ``realised_pl`` is the net profit or loss on the trade in home currency,
+    as reported by Oanda's ``pl`` field.  Negative for a losing trade.
+    """
+
+    transaction_id: str
+    close_price: Decimal
+    realised_pl: Decimal
+
+
 # ---------------------------------------------------------------------------
 # Module-level parsing helpers  (pure functions — tested directly)
 # ---------------------------------------------------------------------------
 # Separating parsing from HTTP means tests can feed sample dicts without
 # spinning up an HTTP server, while the OandaClient methods stay thin.
+
+
+def _parse_close_fill(payload: dict[str, Any]) -> CloseFill:
+    """Parse PUT /trades/{id}/close response into a CloseFill.
+
+    Oanda returns the closing fill under ``orderFillTransaction``.  The ``pl``
+    field is the net realised P/L for this trade in the account's home currency.
+    """
+    fill = payload["orderFillTransaction"]
+    return CloseFill(
+        transaction_id=str(fill["id"]),
+        close_price=Decimal(fill["price"]),
+        realised_pl=Decimal(fill["pl"]),
+    )
 
 
 def _parse_open_trade(trade: dict[str, Any]) -> OpenTrade:
@@ -517,6 +548,20 @@ class OandaClient:
         )
         resp.raise_for_status()
         return [_parse_open_trade(t) for t in resp.json().get("trades", [])]
+
+    def close_trade(self, trade_id: str) -> CloseFill:
+        """Close an open trade in full.
+
+        Uses PUT /accounts/{id}/trades/{tradeID}/close with no body, which
+        always closes the complete position.  Returns the closing fill details.
+        Raises ``httpx.HTTPStatusError`` on Oanda errors (e.g. 404 if the
+        trade is already closed or the ID is wrong).
+        """
+        resp = self._http.put(
+            f"{self._base_url}/accounts/{self.account_id}/trades/{trade_id}/close"
+        )
+        resp.raise_for_status()
+        return _parse_close_fill(resp.json())
 
     def place_market_order(
         self,

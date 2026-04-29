@@ -25,7 +25,7 @@ from typer.testing import CliRunner
 from frmj.app import get_db, set_config
 from frmj.cli import app
 from frmj.domain.sizing import Direction, InstrumentSpec, PriceQuote
-from frmj.execution.oanda import AccountSummary, OpenTrade, OrderFill, TransactionRow
+from frmj.execution.oanda import AccountSummary, CloseFill, OpenTrade, OrderFill, TransactionRow
 
 runner = CliRunner()
 
@@ -387,9 +387,21 @@ class FakeFullClient:
         return "100002"
 
     open_trades: list[OpenTrade] = field(default_factory=list)
+    close_should_fail: bool = False
+    closed_trade_ids: list[str] = field(default_factory=list)
 
     def get_open_trades(self) -> list[OpenTrade]:
         return self.open_trades
+
+    def close_trade(self, trade_id: str) -> CloseFill:
+        if self.close_should_fail:
+            raise RuntimeError("Close rejected by Oanda")
+        self.closed_trade_ids.append(trade_id)
+        return CloseFill(
+            transaction_id=str(int(trade_id) + 1000),
+            close_price=Decimal("1.10095"),
+            realised_pl=Decimal("45.23"),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -846,5 +858,132 @@ class TestPositionsCommand:
         fake.get_open_trades = _fail  # type: ignore[method-assign]
         monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
         result = runner.invoke(app, ["positions"])
+        assert result.exit_code == 1
+        assert "Error" in result.output + result.stderr
+
+
+# ---------------------------------------------------------------------------
+# close command
+# ---------------------------------------------------------------------------
+
+
+class TestCloseCommand:
+    @pytest.fixture()
+    def close_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "close_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        conn.close()
+        return path
+
+    def _invoke(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeFullClient,
+        inputs: str = "",
+    ) -> object:
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        return runner.invoke(app, ["close", "EUR_USD"], input=inputs)
+
+    def test_no_open_positions_message(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self._invoke(monkeypatch, FakeFullClient(open_trades=[]))
+        assert result.exit_code == 0, result.output
+        assert "No open positions" in result.output
+
+    def test_shows_ticket_details_before_confirm(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(open_trades=[_open_trade(trade_id="6368", units=10_000)])
+        result = self._invoke(monkeypatch, fake, inputs="n\n")
+        assert "6368" in result.output
+        assert "10,000" in result.output
+
+    def test_cancel_does_not_close(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(open_trades=[_open_trade(trade_id="6368")])
+        result = self._invoke(monkeypatch, fake, inputs="n\n")
+        assert result.exit_code == 0, result.output
+        assert fake.closed_trade_ids == []
+        assert "Cancelled" in result.output
+
+    def test_confirm_calls_close_trade(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(open_trades=[_open_trade(trade_id="6368")])
+        result = self._invoke(monkeypatch, fake, inputs="y\n")
+        assert result.exit_code == 0, result.output
+        assert "6368" in fake.closed_trade_ids
+        assert "closed at" in result.output
+
+    def test_multiple_tickets_all_closed(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(
+            open_trades=[
+                _open_trade(trade_id="100"),
+                _open_trade(trade_id="101"),
+            ]
+        )
+        result = self._invoke(monkeypatch, fake, inputs="y\n")
+        assert result.exit_code == 0, result.output
+        assert fake.closed_trade_ids == ["100", "101"]
+
+    def test_multiple_tickets_shows_total_pl(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(
+            open_trades=[
+                _open_trade(trade_id="100", unrealised_pl="20.00"),
+                _open_trade(trade_id="101", unrealised_pl="30.00"),
+            ]
+        )
+        result = self._invoke(monkeypatch, fake, inputs="n\n")
+        assert "Total P/L" in result.output
+
+    def test_only_closes_matching_instrument(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Trades on other instruments must not be touched."""
+        fake = FakeFullClient(
+            open_trades=[
+                _open_trade(trade_id="200", instrument="EUR_USD"),
+                _open_trade(trade_id="201", instrument="USD_JPY"),
+            ]
+        )
+        result = self._invoke(monkeypatch, fake, inputs="y\n")
+        assert result.exit_code == 0, result.output
+        assert fake.closed_trade_ids == ["200"]
+
+    def test_close_failure_reports_error_and_continues(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed close on one ticket should not prevent closing the next."""
+        fake = FakeFullClient(
+            open_trades=[
+                _open_trade(trade_id="300"),
+                _open_trade(trade_id="301"),
+            ],
+            close_should_fail=True,
+        )
+        result = self._invoke(monkeypatch, fake, inputs="y\n")
+        assert result.exit_code == 0, result.output
+        assert "failed to close" in result.output + result.stderr
+
+    def test_api_error_fetching_trades_exits_1(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+
+        def _fail() -> list:
+            raise RuntimeError("Oanda unreachable")
+
+        fake.get_open_trades = _fail  # type: ignore[method-assign]
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["close", "EUR_USD"])
         assert result.exit_code == 1
         assert "Error" in result.output + result.stderr

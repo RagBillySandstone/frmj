@@ -18,9 +18,11 @@ import pytest
 
 from frmj.execution.oanda import (
     AccountSummary,
+    CloseFill,
     OpenTrade,
     _extract_bid_ask,
     _parse_account_summary,
+    _parse_close_fill,
     _parse_instrument_spec,
     _parse_open_trade,
     _parse_order_create_txn_id,
@@ -181,6 +183,47 @@ class TestExtractBidAsk:
         bid, ask = _extract_bid_ask(payload)
         assert bid == Decimal("149.990")
         assert ask == Decimal("150.010")
+
+
+# ---------------------------------------------------------------------------
+# _parse_close_fill
+# ---------------------------------------------------------------------------
+
+
+def _close_payload(
+    txn_id: str = "6372",
+    price: str = "1.10095",
+    pl: str = "45.23",
+) -> dict:
+    return {
+        "orderFillTransaction": {
+            "id": txn_id,
+            "price": price,
+            "pl": pl,
+        }
+    }
+
+
+class TestParseCloseFill:
+    def test_parses_transaction_id(self) -> None:
+        result = _parse_close_fill(_close_payload(txn_id="6372"))
+        assert result.transaction_id == "6372"
+
+    def test_parses_close_price(self) -> None:
+        result = _parse_close_fill(_close_payload(price="1.10095"))
+        assert result.close_price == Decimal("1.10095")
+
+    def test_parses_realised_pl(self) -> None:
+        result = _parse_close_fill(_close_payload(pl="45.23"))
+        assert result.realised_pl == Decimal("45.23")
+
+    def test_negative_pl_for_losing_trade(self) -> None:
+        result = _parse_close_fill(_close_payload(pl="-32.10"))
+        assert result.realised_pl == Decimal("-32.10")
+
+    def test_returns_close_fill_dataclass(self) -> None:
+        result = _parse_close_fill(_close_payload())
+        assert isinstance(result, CloseFill)
 
 
 # ---------------------------------------------------------------------------

@@ -31,6 +31,12 @@ Commands
     units, entry price, unrealised P/L, margin, TP/SL levels.  Trades that
     have journal notes in the local DB are flagged with ``[note]``.
 
+``frmj close <INSTRUMENT>``
+    Close all open tickets for an instrument.  Shows each ticket's current
+    P/L and prompts for confirmation before sending any close requests.
+    Runs an incremental sync after closing so the local journal reflects
+    the closing transactions immediately.
+
 ``frmj note <OANDA_ID> <TEXT>``
     Attach a free-text note to any locally-synced transaction by its Oanda
     transaction ID.  Run ``frmj sync`` first if the transaction is not yet
@@ -77,7 +83,7 @@ from frmj.domain.pricing import (
 )
 from frmj.domain.risk import MaxTradesExceeded, ScaleInForbidden, evaluate_trade
 from frmj.domain.sizing import Direction, compute_units
-from frmj.execution.oanda import OpenTrade
+from frmj.execution.oanda import CloseFill, OpenTrade
 from frmj.execution.sync import sync_cold, sync_incremental
 
 # ---------------------------------------------------------------------------
@@ -164,6 +170,84 @@ def positions() -> None:
 
     for trade in trades:
         _display_open_trade(conn, trade)
+
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# close command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def close(
+    instrument: str = typer.Argument(..., help="Instrument to close, e.g. EUR_USD"),
+) -> None:
+    """Close all open tickets for an instrument."""
+    conn = get_db()
+    try:
+        client = get_client(conn)
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        conn.close()
+        raise typer.Exit(1)
+
+    try:
+        all_trades = client.get_open_trades()
+    except Exception as exc:
+        typer.echo(f"Error fetching open trades: {exc}", err=True)
+        conn.close()
+        raise typer.Exit(1)
+
+    trades = [t for t in all_trades if t.instrument == instrument]
+
+    if not trades:
+        typer.echo(f"No open positions for {instrument}.")
+        conn.close()
+        return
+
+    label = "ticket" if len(trades) == 1 else "tickets"
+    typer.echo(f"{len(trades)} open {label} for {instrument}:")
+    typer.echo("─" * 40)
+    for t in trades:
+        pl_sign = "+" if t.unrealised_pl >= 0 else ""
+        typer.echo(
+            f"  #{t.trade_id}  {t.direction}  {t.units:,} units"
+            f"  @ {t.open_price}  P/L: {pl_sign}${t.unrealised_pl:,.2f}"
+        )
+
+    if len(trades) > 1:
+        total_pl = sum(t.unrealised_pl for t in trades)
+        pl_sign = "+" if total_pl >= 0 else ""
+        typer.echo(f"\n  Total P/L: {pl_sign}${total_pl:,.2f}")
+
+    typer.echo("")
+    if not typer.confirm(f"Close {len(trades)} {label}?", default=False):
+        typer.echo("Cancelled.")
+        conn.close()
+        return
+
+    closed = 0
+    for t in trades:
+        try:
+            result = client.close_trade(t.trade_id)
+            pl_sign = "+" if result.realised_pl >= 0 else ""
+            typer.echo(
+                f"  #{t.trade_id} closed at {result.close_price}"
+                f"  P/L: {pl_sign}${result.realised_pl:,.2f}"
+                f"  (txn #{result.transaction_id})"
+            )
+            closed += 1
+        except Exception as exc:
+            typer.echo(f"  #{t.trade_id} failed to close: {exc}", err=True)
+
+    if closed:
+        try:
+            sync_result = sync_incremental(conn, client)
+            if sync_result.rows_ingested:
+                typer.echo(f"[sync] +{sync_result.rows_ingested} transactions")
+        except Exception as exc:
+            typer.echo(f"[sync] Warning: sync failed — {exc}", err=True)
 
     conn.close()
 
