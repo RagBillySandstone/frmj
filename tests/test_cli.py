@@ -14,11 +14,13 @@ confirmation and live Oanda data; those paths are covered by integration tests.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 
+import httpx
 import pytest
 from typer.testing import CliRunner
 
@@ -1055,3 +1057,274 @@ class TestCloseCommand:
         result = runner.invoke(app, ["close", "EUR_USD"])
         assert result.exit_code == 1
         assert "Error" in result.output + result.stderr
+
+
+# ---------------------------------------------------------------------------
+# trade — order failure with retry / save / abort
+# ---------------------------------------------------------------------------
+
+
+class TestTradeFailureAndRetry:
+    """Tests for the retry loop triggered when place_market_order raises."""
+
+    @pytest.fixture()
+    def trade_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "trade_fail_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        set_config(conn, "max_open_trades", "5")
+        conn.close()
+        return path
+
+    @pytest.fixture()
+    def plan_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Redirect draft plan writes to a temp path."""
+        path = tmp_path / "saved_plan.json"
+        monkeypatch.setattr("frmj.app._DRAFT_PLAN_PATH", path)
+        return path
+
+    def _invoke_with_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        action_input: str,
+        *,
+        fail_count: int = 1,
+        use_timeout: bool = False,
+    ) -> object:
+        """Invoke ``frmj trade EUR_USD long`` where place_market_order fails
+        *fail_count* times before succeeding.  *action_input* is the retry
+        prompt response (r/s/a).
+        """
+        fake = FakeFullClient()
+        calls: list[int] = []
+
+        def _flaky_order(instrument: str, units_signed: int) -> "OrderFill":
+            calls.append(1)
+            if len(calls) <= fail_count:
+                if use_timeout:
+                    raise httpx.TimeoutException("timed out")
+                raise RuntimeError("Network error")
+            fake.order_placed = True
+            return OrderFill(
+                transaction_id="99999",
+                fill_price=Decimal("1.10005"),
+                units_filled=units_signed,
+                trade_id="99999",
+            )
+
+        fake.place_market_order = _flaky_order  # type: ignore[method-assign]
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+
+        # TP=50p, SL=30p, confirm=y, retry prompt=action_input, note=skip
+        inputs = f"50\n30\ny\n{action_input}\n\n"
+        return runner.invoke(app, ["trade", "EUR_USD", "long"], input=inputs)
+
+    def test_failure_shows_retry_prompt(
+        self, trade_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self._invoke_with_failure(monkeypatch, "a")
+        assert "[R]etry" in result.output + result.stderr
+        assert "[S]ave" in result.output + result.stderr
+
+    def test_abort_exits_0(
+        self, trade_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self._invoke_with_failure(monkeypatch, "a")
+        assert result.exit_code == 0, result.output
+        assert "aborted" in result.output.lower()
+
+    def test_abort_does_not_fill(
+        self, trade_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        fake.place_market_order = lambda i, u: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            RuntimeError("fail")
+        )
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        runner.invoke(app, ["trade", "EUR_USD", "long"], input="50\n30\ny\na\n")
+        assert not fake.order_placed
+
+    def test_retry_places_order_again(
+        self, trade_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Choosing R loops back and the second attempt succeeds."""
+        result = self._invoke_with_failure(monkeypatch, "r", fail_count=1)
+        assert result.exit_code == 0, result.output
+        assert "filled" in result.output
+
+    def test_save_writes_plan_file(
+        self, trade_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._invoke_with_failure(monkeypatch, "s")
+        assert plan_file.exists()
+
+    def test_saved_plan_contains_expected_fields(
+        self, trade_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._invoke_with_failure(monkeypatch, "s")
+        plan = json.loads(plan_file.read_text())
+        assert plan["instrument"] == "EUR_USD"
+        assert plan["direction"] == "long"
+        assert isinstance(plan["units_signed"], int)
+        assert plan["tp_price"] is not None
+        assert plan["sl_price"] is not None
+
+    def test_save_exits_0_and_prints_resume_hint(
+        self, trade_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self._invoke_with_failure(monkeypatch, "s")
+        assert result.exit_code == 0, result.output
+        assert "--resume" in result.output
+
+    def test_timeout_shows_double_fill_warning(
+        self, trade_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """httpx.TimeoutException prints an extra caution about possible double fill."""
+        result = self._invoke_with_failure(monkeypatch, "a", use_timeout=True)
+        combined = result.output + result.stderr
+        assert "double fill" in combined or "may have been placed" in combined
+
+    def test_successful_retry_clears_draft_plan(
+        self, trade_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the retry eventually succeeds, any stale plan file is cleared."""
+        # Pre-seed a plan file to simulate a prior failed attempt.
+        plan_file.write_text('{"instrument": "EUR_USD"}')
+        result = self._invoke_with_failure(monkeypatch, "r", fail_count=1)
+        assert result.exit_code == 0, result.output
+        assert not plan_file.exists()
+
+
+# ---------------------------------------------------------------------------
+# trade --resume
+# ---------------------------------------------------------------------------
+
+
+class TestTradeResume:
+    """Tests for ``frmj trade --resume`` executing a saved draft plan."""
+
+    @pytest.fixture()
+    def resume_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "resume_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        # Note: max_open_trades is NOT set — resume skips risk eval.
+        conn.close()
+        return path
+
+    @pytest.fixture()
+    def plan_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "saved_plan.json"
+        monkeypatch.setattr("frmj.app._DRAFT_PLAN_PATH", path)
+        return path
+
+    def _seed_plan(
+        self,
+        plan_file: Path,
+        instrument: str = "EUR_USD",
+        direction: str = "long",
+        units_signed: int = 10000,
+        tp_price: str | None = "1.10550",
+        sl_price: str | None = "1.09750",
+    ) -> None:
+        plan_file.write_text(json.dumps({
+            "instrument": instrument,
+            "direction": direction,
+            "units_signed": units_signed,
+            "tp_price": tp_price,
+            "sl_price": sl_price,
+        }))
+
+    def test_no_plan_exits_1(
+        self, resume_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["trade", "--resume"], input="")
+        assert result.exit_code == 1
+        assert "No saved plan" in result.output + result.stderr
+
+    def test_resume_shows_plan_details(
+        self, resume_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_plan(plan_file, instrument="GBP_USD", tp_price="1.25500")
+        fake = FakeFullClient()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["trade", "--resume"], input="n\n")
+        assert "GBP_USD" in result.output
+        assert "1.25500" in result.output
+
+    def test_resume_cancel_does_not_place_order(
+        self, resume_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_plan(plan_file)
+        fake = FakeFullClient()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        runner.invoke(app, ["trade", "--resume"], input="n\n")
+        assert not fake.order_placed
+
+    def test_resume_confirm_places_order(
+        self, resume_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_plan(plan_file)
+        fake = FakeFullClient()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["trade", "--resume"], input="y\n\n")
+        assert result.exit_code == 0, result.output
+        assert fake.order_placed
+
+    def test_resume_attaches_tp_and_sl(
+        self, resume_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_plan(plan_file, tp_price="1.10550", sl_price="1.09750")
+        fake = FakeFullClient()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        runner.invoke(app, ["trade", "--resume"], input="y\n\n")
+        assert fake.tp_attached is not None
+        assert fake.sl_attached is not None
+
+    def test_resume_with_no_instrument_arg_works(
+        self, resume_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--resume with no positional args must not raise a validation error."""
+        self._seed_plan(plan_file)
+        fake = FakeFullClient()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["trade", "--resume"], input="n\n")
+        assert result.exit_code == 0, result.output
+
+    def test_resume_clears_plan_after_success(
+        self, resume_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After a successful fill via --resume, the plan file must be removed."""
+        self._seed_plan(plan_file)
+        fake = FakeFullClient()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        runner.invoke(app, ["trade", "--resume"], input="y\n\n")
+        assert not plan_file.exists()
+
+    def test_resume_skips_risk_eval(
+        self, resume_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--resume must succeed even when max_open_trades is not configured."""
+        self._seed_plan(plan_file)
+        # resume_db fixture deliberately omits max_open_trades config.
+        fake = FakeFullClient()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["trade", "--resume"], input="y\n\n")
+        assert result.exit_code == 0, result.output
+
+    def test_instrument_arg_with_resume_errors(
+        self, resume_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Passing instrument alongside --resume must exit 1 with a clear message."""
+        self._seed_plan(plan_file)
+        fake = FakeFullClient()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["trade", "EUR_USD", "--resume"])
+        assert result.exit_code == 1
+        assert "not used with --resume" in result.output + result.stderr

@@ -41,6 +41,7 @@ Config table keys
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from decimal import Decimal
@@ -64,6 +65,11 @@ from frmj.persistence.schema import ensure_schema
 
 _DEFAULT_DB_PATH: Path = (
     Path.home() / ".local" / "share" / "frmj" / "frmj.db"
+)
+
+# Path for the draft plan saved when an order attempt fails mid-flow.
+_DRAFT_PLAN_PATH: Path = (
+    Path.home() / ".local" / "share" / "frmj" / "saved_plan.json"
 )
 
 # Keyring entry coordinates — single source of truth used by get/store/delete.
@@ -191,6 +197,44 @@ def delete_token() -> None:
         ) from exc
     except keyring.errors.PasswordDeleteError:
         # Token was never stored — not an error from the user's perspective.
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Draft plan helpers (order-failure recovery)
+# ---------------------------------------------------------------------------
+
+
+def save_draft_plan(data: dict) -> Path:
+    """Write *data* as JSON to the draft plan file and return the path.
+
+    The file is created (or overwritten) at ``_DRAFT_PLAN_PATH``.  The parent
+    directory is created if absent.
+    """
+    _DRAFT_PLAN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _DRAFT_PLAN_PATH.write_text(json.dumps(data, indent=2))
+    return _DRAFT_PLAN_PATH
+
+
+def load_draft_plan() -> dict | None:
+    """Return the saved draft plan as a dict, or ``None`` if no file exists.
+
+    Returns ``None`` on any read/parse error so callers see a clean "no plan"
+    state instead of a traceback.
+    """
+    if not _DRAFT_PLAN_PATH.exists():
+        return None
+    try:
+        return json.loads(_DRAFT_PLAN_PATH.read_text())
+    except Exception:
+        return None
+
+
+def clear_draft_plan() -> None:
+    """Delete the draft plan file if it exists; no-op otherwise."""
+    try:
+        _DRAFT_PLAN_PATH.unlink()
+    except FileNotFoundError:
         pass
 
 

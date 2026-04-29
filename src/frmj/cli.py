@@ -62,9 +62,11 @@ import os
 import sqlite3
 from decimal import Decimal
 
+import httpx
 import typer
 
 from frmj.app import (
+    clear_draft_plan,
     delete_token,
     get_all_config,
     get_client,
@@ -72,6 +74,8 @@ from frmj.app import (
     get_db,
     get_risk_config,
     get_token,
+    load_draft_plan,
+    save_draft_plan,
     set_config,
     store_token,
 )
@@ -334,227 +338,309 @@ def config_unset_token() -> None:
 
 @app.command()
 def trade(
-    instrument: str = typer.Argument(..., help="Oanda instrument, e.g. EUR_USD"),
-    direction_str: str = typer.Argument(..., metavar="DIRECTION", help="long or short"),
+    instrument: str | None = typer.Argument(
+        None, help="Oanda instrument, e.g. EUR_USD (omit with --resume)"
+    ),
+    direction_str: str | None = typer.Argument(
+        None, metavar="DIRECTION", help="long or short (omit with --resume)"
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
         help="Show the full trade plan without placing an order.",
     ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help="Execute the previously saved draft plan (after a failed order attempt).",
+    ),
 ) -> None:
     """Plan and (optionally) execute a trade."""
-    # --- Parse direction -----------------------------------------------------
-    direction_str = direction_str.lower()
-    if direction_str not in ("long", "short"):
-        typer.echo("DIRECTION must be 'long' or 'short'.", err=True)
-        raise typer.Exit(1)
-    direction = Direction.LONG if direction_str == "long" else Direction.SHORT
+    # --- Validate argument combinations --------------------------------------
+    if resume:
+        if instrument is not None or direction_str is not None:
+            typer.echo(
+                "Error: instrument and direction are not used with --resume.", err=True
+            )
+            raise typer.Exit(1)
+    else:
+        if instrument is None or direction_str is None:
+            typer.echo("Error: instrument and direction are required.", err=True)
+            raise typer.Exit(1)
+        direction_str = direction_str.lower()
+        if direction_str not in ("long", "short"):
+            typer.echo("DIRECTION must be 'long' or 'short'.", err=True)
+            raise typer.Exit(1)
+        direction = Direction.LONG if direction_str == "long" else Direction.SHORT
 
     conn = get_db()
     try:
         client = get_client(conn)
-        risk_config = get_risk_config(conn)
     except RuntimeError as exc:
         typer.echo(f"Error: {exc}", err=True)
         conn.close()
         raise typer.Exit(1)
 
-    # --- Auto-sync (silent unless error) -------------------------------------
-    try:
-        sync_result = sync_incremental(conn, client)
-        if sync_result.rows_ingested:
-            typer.echo(f"[sync] +{sync_result.rows_ingested} transactions")
-    except Exception as exc:
-        typer.echo(f"[sync] Warning: sync failed — {exc}", err=True)
-        # Non-fatal: proceed with potentially stale data.
+    # These are set by either the normal or resume path before the shared section.
+    units_signed: int
+    tp_price: Decimal | None
+    sl_price: Decimal | None
 
-    # --- Fetch live account state --------------------------------------------
-    try:
-        summary = client.get_account_summary()
-        open_on_instr = client.get_open_tickets_on_instrument(instrument)
-        spec = client.get_instrument(instrument)
-        quote = client.get_price(instrument)
-    except Exception as exc:
-        typer.echo(f"Error fetching market data: {exc}", err=True)
-        conn.close()
-        raise typer.Exit(1)
+    if resume:
+        # --- Resume path: skip planning; load the saved draft and confirm ----
+        plan = load_draft_plan()
+        if plan is None:
+            typer.echo(
+                "No saved plan found. "
+                "Run 'frmj trade <INSTRUMENT> <DIRECTION>' to create one.",
+                err=True,
+            )
+            conn.close()
+            raise typer.Exit(1)
 
-    # --- Risk model ----------------------------------------------------------
-    try:
-        sizing_decision = evaluate_trade(
-            config=risk_config,
-            open_trades=summary.open_trade_count,
-            open_tickets_on_instrument=open_on_instr,
-            available_margin=summary.margin_available,
-            equity=summary.nav,
-        )
-    except MaxTradesExceeded as exc:
-        typer.echo(f"Cannot trade: {exc}", err=True)
-        conn.close()
-        raise typer.Exit(1)
-    except ScaleInForbidden as exc:
-        typer.echo(f"Cannot trade: {exc}", err=True)
-        conn.close()
-        raise typer.Exit(1)
+        instrument = plan["instrument"]
+        direction_str = plan["direction"]
+        units_signed = plan["units_signed"]
+        tp_price = Decimal(plan["tp_price"]) if plan.get("tp_price") else None
+        sl_price = Decimal(plan["sl_price"]) if plan.get("sl_price") else None
 
-    # --- Display any risk warnings -------------------------------------------
-    for warn in sizing_decision.warnings:
-        typer.echo(f"Warning: {warn}", err=True)
+        typer.echo(f"Resuming saved plan: {instrument} {direction_str.upper()}")
+        typer.echo("─" * 40)
+        direction_label = "LONG" if units_signed > 0 else "SHORT"
+        typer.echo(f"  Units:     {abs(units_signed):,} ({direction_label})")
+        if tp_price is not None:
+            typer.echo(f"  Take-profit: {tp_price}")
+        if sl_price is not None:
+            typer.echo(f"  Stop-loss:   {sl_price}")
+        typer.echo("")
 
-    # --- Sizing --------------------------------------------------------------
-    try:
-        units_calc = compute_units(
-            capital_to_deploy=sizing_decision.capital_to_deploy,
-            spec=spec,
-            quote=quote,
-            direction=direction,
-        )
-    except Exception as exc:
-        typer.echo(f"Error computing units: {exc}", err=True)
-        conn.close()
-        raise typer.Exit(1)
-
-    entry_price = quote.entry_price(direction)
-
-    # --- Trade plan header ---------------------------------------------------
-    typer.echo("")
-    typer.echo(f"Trade plan: {instrument} {direction_str.upper()}")
-    typer.echo("─" * 40)
-    typer.echo(f"  Account NAV:     ${summary.nav:,.2f}")
-    typer.echo(
-        f"  Open trades:     {summary.open_trade_count} / {risk_config.max_open_trades}"
-    )
-    if sizing_decision.size_fraction is not None:
-        frac = sizing_decision.size_fraction
-        typer.echo(
-            f"  Size fraction:   {frac.numerator}/{frac.denominator}"
-        )
-    typer.echo(f"  Capital at risk: ${sizing_decision.capital_to_deploy:,.2f}")
-    typer.echo("")
-    typer.echo(f"  Units:   {units_calc.units:,}")
-    typer.echo(f"  Margin:  ${units_calc.margin_used:,.2f}")
-    typer.echo(f"  Entry:   {entry_price} ({direction_str})")
-    typer.echo(f"  Unused:  ${units_calc.capital_unused:,.2f}")
-    typer.echo("")
-
-    # --- TP/SL prompts -------------------------------------------------------
-    tp_spec = _prompt_tpsl("Take-profit")
-    sl_spec = _prompt_tpsl("Stop-loss  ")
-
-    # --- Exit levels ---------------------------------------------------------
-    exits = compute_exit_levels(
-        entry_price=entry_price,
-        units=units_calc.units,
-        direction=direction,
-        spec=spec,
-        quote=quote,
-        margin_used=units_calc.margin_used,
-        take_profit=tp_spec,
-        stop_loss=sl_spec,
-    )
-
-    _display_exits(exits, units_calc.margin_used)
-
-    # Display R:R when both sides are available.
-    if exits.projected_profit_home is not None and exits.projected_loss_home is not None:
-        if exits.projected_loss_home != 0:
-            rr = abs(exits.projected_profit_home / exits.projected_loss_home)
-            typer.echo(f"  R:R  {rr:.2f}")
-    typer.echo("")
-
-    # --- Dry-run exit --------------------------------------------------------
-    if dry_run:
-        typer.echo("[DRY RUN] Plan complete. No order placed.")
-        conn.close()
-        return
-
-    # --- Confirm -------------------------------------------------------------
-    while True:
-        answer = typer.prompt("Confirm order? [y/N/e=edit]").strip().lower()
-        if answer in ("n", ""):
-            typer.echo("Order cancelled.")
+        if not typer.confirm("Place order?", default=False):
+            typer.echo("Cancelled.")
             conn.close()
             return
-        if answer == "y":
-            break
-        if answer == "e":
-            tp_spec = _prompt_tpsl("Take-profit (new)")
-            sl_spec = _prompt_tpsl("Stop-loss   (new)")
-            exits = compute_exit_levels(
-                entry_price=entry_price,
-                units=units_calc.units,
-                direction=direction,
+
+    else:
+        # --- Normal path: risk + sizing + TP/SL prompts + confirmation -------
+        try:
+            risk_config = get_risk_config(conn)
+        except RuntimeError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            conn.close()
+            raise typer.Exit(1)
+
+        # Auto-sync (silent unless error)
+        try:
+            sync_result = sync_incremental(conn, client)
+            if sync_result.rows_ingested:
+                typer.echo(f"[sync] +{sync_result.rows_ingested} transactions")
+        except Exception as exc:
+            typer.echo(f"[sync] Warning: sync failed — {exc}", err=True)
+
+        # Fetch live account state
+        try:
+            summary = client.get_account_summary()
+            open_on_instr = client.get_open_tickets_on_instrument(instrument)
+            spec = client.get_instrument(instrument)
+            quote = client.get_price(instrument)
+        except Exception as exc:
+            typer.echo(f"Error fetching market data: {exc}", err=True)
+            conn.close()
+            raise typer.Exit(1)
+
+        # Risk model
+        try:
+            sizing_decision = evaluate_trade(
+                config=risk_config,
+                open_trades=summary.open_trade_count,
+                open_tickets_on_instrument=open_on_instr,
+                available_margin=summary.margin_available,
+                equity=summary.nav,
+            )
+        except MaxTradesExceeded as exc:
+            typer.echo(f"Cannot trade: {exc}", err=True)
+            conn.close()
+            raise typer.Exit(1)
+        except ScaleInForbidden as exc:
+            typer.echo(f"Cannot trade: {exc}", err=True)
+            conn.close()
+            raise typer.Exit(1)
+
+        for warn in sizing_decision.warnings:
+            typer.echo(f"Warning: {warn}", err=True)
+
+        # Sizing
+        try:
+            units_calc = compute_units(
+                capital_to_deploy=sizing_decision.capital_to_deploy,
                 spec=spec,
                 quote=quote,
-                margin_used=units_calc.margin_used,
-                take_profit=tp_spec,
-                stop_loss=sl_spec,
+                direction=direction,
             )
-            _display_exits(exits, units_calc.margin_used)
+        except Exception as exc:
+            typer.echo(f"Error computing units: {exc}", err=True)
+            conn.close()
+            raise typer.Exit(1)
 
-    # --- Place order ---------------------------------------------------------
-    units_signed = units_calc.units if direction is Direction.LONG else -units_calc.units
-    try:
-        fill = client.place_market_order(instrument, units_signed)
-    except Exception as exc:
-        typer.echo(f"Error placing order: {exc}", err=True)
-        conn.close()
-        raise typer.Exit(1)
+        entry_price = quote.entry_price(direction)
+
+        # Trade plan header
+        typer.echo("")
+        typer.echo(f"Trade plan: {instrument} {direction_str.upper()}")
+        typer.echo("─" * 40)
+        typer.echo(f"  Account NAV:     ${summary.nav:,.2f}")
+        typer.echo(
+            f"  Open trades:     {summary.open_trade_count} / {risk_config.max_open_trades}"
+        )
+        if sizing_decision.size_fraction is not None:
+            frac = sizing_decision.size_fraction
+            typer.echo(f"  Size fraction:   {frac.numerator}/{frac.denominator}")
+        typer.echo(f"  Capital at risk: ${sizing_decision.capital_to_deploy:,.2f}")
+        typer.echo("")
+        typer.echo(f"  Units:   {units_calc.units:,}")
+        typer.echo(f"  Margin:  ${units_calc.margin_used:,.2f}")
+        typer.echo(f"  Entry:   {entry_price} ({direction_str})")
+        typer.echo(f"  Unused:  ${units_calc.capital_unused:,.2f}")
+        typer.echo("")
+
+        # TP/SL prompts
+        tp_spec = _prompt_tpsl("Take-profit")
+        sl_spec = _prompt_tpsl("Stop-loss  ")
+
+        # Exit levels
+        exits = compute_exit_levels(
+            entry_price=entry_price,
+            units=units_calc.units,
+            direction=direction,
+            spec=spec,
+            quote=quote,
+            margin_used=units_calc.margin_used,
+            take_profit=tp_spec,
+            stop_loss=sl_spec,
+        )
+
+        _display_exits(exits, units_calc.margin_used)
+
+        if exits.projected_profit_home is not None and exits.projected_loss_home is not None:
+            if exits.projected_loss_home != 0:
+                rr = abs(exits.projected_profit_home / exits.projected_loss_home)
+                typer.echo(f"  R:R  {rr:.2f}")
+        typer.echo("")
+
+        # Dry-run exit
+        if dry_run:
+            typer.echo("[DRY RUN] Plan complete. No order placed.")
+            conn.close()
+            return
+
+        # Confirm
+        while True:
+            answer = typer.prompt("Confirm order? [y/N/e=edit]").strip().lower()
+            if answer in ("n", ""):
+                typer.echo("Order cancelled.")
+                conn.close()
+                return
+            if answer == "y":
+                break
+            if answer == "e":
+                tp_spec = _prompt_tpsl("Take-profit (new)")
+                sl_spec = _prompt_tpsl("Stop-loss   (new)")
+                exits = compute_exit_levels(
+                    entry_price=entry_price,
+                    units=units_calc.units,
+                    direction=direction,
+                    spec=spec,
+                    quote=quote,
+                    margin_used=units_calc.margin_used,
+                    take_profit=tp_spec,
+                    stop_loss=sl_spec,
+                )
+                _display_exits(exits, units_calc.margin_used)
+
+        units_signed = units_calc.units if direction is Direction.LONG else -units_calc.units
+        tp_price = exits.take_profit_price
+        sl_price = exits.stop_loss_price
+
+    # =========================================================================
+    # Shared post-planning section: place order, attach TP/SL, sync, note
+    # =========================================================================
+
+    # --- Place order with retry loop -----------------------------------------
+    while True:
+        try:
+            fill = client.place_market_order(instrument, units_signed)
+            clear_draft_plan()
+            break
+        except httpx.TimeoutException as exc:
+            typer.echo(
+                f"Warning: request timed out ({exc}). "
+                "The order may have been placed — check Oanda before retrying "
+                "to avoid a double fill.",
+                err=True,
+            )
+        except Exception as exc:
+            typer.echo(f"Error placing order: {exc}", err=True)
+
+        action = _prompt_retry_save_abort()
+        if action == "r":
+            continue
+        elif action == "s":
+            plan_path = save_draft_plan({
+                "instrument": instrument,
+                "direction": direction_str,
+                "units_signed": units_signed,
+                "tp_price": str(tp_price) if tp_price is not None else None,
+                "sl_price": str(sl_price) if sl_price is not None else None,
+            })
+            typer.echo(f"Plan saved to {plan_path}.")
+            typer.echo("Resume later with:  frmj trade --resume")
+            conn.close()
+            return
+        else:  # "a"
+            typer.echo("Order aborted.")
+            conn.close()
+            return
 
     typer.echo(f"Order filled at {fill.fill_price} — transaction #{fill.transaction_id}")
 
     # --- Attach TP/SL to the open trade on Oanda -----------------------------
     if fill.trade_id is None:
-        # Shouldn't happen for a fresh position, but defend against it rather
-        # than crashing — the fill already succeeded and cannot be undone.
-        if exits.take_profit_price is not None or exits.stop_loss_price is not None:
+        if tp_price is not None or sl_price is not None:
             typer.echo(
                 "Warning: Oanda did not return a trade ID — cannot attach TP/SL. "
                 "Set them manually in the Oanda interface.",
                 err=True,
             )
     else:
-        if exits.take_profit_price is not None:
+        if tp_price is not None:
             try:
-                tp_txn = client.attach_take_profit(fill.trade_id, exits.take_profit_price)
-                typer.echo(
-                    f"Take-profit set at {exits.take_profit_price}"
-                    f" — order #{tp_txn}"
-                )
+                tp_txn = client.attach_take_profit(fill.trade_id, tp_price)
+                typer.echo(f"Take-profit set at {tp_price} — order #{tp_txn}")
             except Exception as exc:
                 typer.echo(f"Warning: failed to attach take-profit — {exc}", err=True)
 
-        if exits.stop_loss_price is not None:
+        if sl_price is not None:
             try:
-                sl_txn = client.attach_stop_loss(fill.trade_id, exits.stop_loss_price)
-                typer.echo(
-                    f"Stop-loss set at {exits.stop_loss_price}"
-                    f" — order #{sl_txn}"
-                )
+                sl_txn = client.attach_stop_loss(fill.trade_id, sl_price)
+                typer.echo(f"Stop-loss set at {sl_price} — order #{sl_txn}")
             except Exception as exc:
-                typer.echo(
-                    f"Warning: failed to attach stop-loss — {exc}", err=True
-                )
+                typer.echo(f"Warning: failed to attach stop-loss — {exc}", err=True)
                 typer.echo(
                     "  Position is unprotected — set SL in Oanda immediately.",
                     err=True,
                 )
 
     # --- Post-fill sync -------------------------------------------------------
-    # Brings the fill transaction into the local DB so the plan and any note
-    # can be saved with a proper FK reference in the same session.
     try:
         sync_incremental(conn, client)
     except Exception as exc:
         typer.echo(f"[sync] Warning: post-fill sync failed — {exc}", err=True)
 
-    # --- Save trade plan ------------------------------------------------------
-    _save_trade_plan(conn, fill.transaction_id, client.account_id, exits)
+    # --- Save trade plan to DB ------------------------------------------------
+    _save_trade_plan(conn, fill.transaction_id, client.account_id, tp_price, sl_price)
 
     # --- Optional entry note -------------------------------------------------
     note_text = typer.prompt("Add a note (Enter to skip)", default="").strip()
     if note_text:
-        # Resolve fill transaction to our synthetic DB id so we can attach.
         row = conn.execute(
             "SELECT id FROM transactions WHERE oanda_id = ? AND account_id = ?",
             (fill.transaction_id, client.account_id),
@@ -790,11 +876,24 @@ def _display_open_trade(conn: sqlite3.Connection, trade: OpenTrade) -> None:
     typer.echo("")
 
 
+def _prompt_retry_save_abort() -> str:
+    """Prompt the user after a failed order attempt.
+
+    Returns 'r' (retry), 's' (save plan), or 'a' (abort).
+    """
+    while True:
+        raw = typer.prompt("[R]etry / [S]ave plan / [A]bort").strip().lower()
+        if raw in ("r", "s", "a"):
+            return raw
+        typer.echo("  Enter R, S, or A.")
+
+
 def _save_trade_plan(
     conn: sqlite3.Connection,
     fill_oanda_id: str,
     account_id: str,
-    exits: ExitLevels,
+    tp_price: Decimal | None,
+    sl_price: Decimal | None,
 ) -> None:
     """Persist the intended TP/SL for a fill transaction if either side was set.
 
@@ -802,7 +901,7 @@ def _save_trade_plan(
     transaction is not yet in the local DB (post-fill sync may have failed).
     Uses INSERT OR IGNORE so a duplicate call (e.g. from a retry) is harmless.
     """
-    if exits.take_profit_price is None and exits.stop_loss_price is None:
+    if tp_price is None and sl_price is None:
         return
     row = conn.execute(
         "SELECT id FROM transactions WHERE oanda_id = ? AND account_id = ?",
@@ -810,8 +909,8 @@ def _save_trade_plan(
     ).fetchone()
     if not row:
         return
-    tp_str = str(exits.take_profit_price) if exits.take_profit_price is not None else None
-    sl_str = str(exits.stop_loss_price) if exits.stop_loss_price is not None else None
+    tp_str = str(tp_price) if tp_price is not None else None
+    sl_str = str(sl_price) if sl_price is not None else None
     conn.execute(
         "INSERT OR IGNORE INTO trade_plans (transaction_id, tp_price, sl_price) "
         "VALUES (?, ?, ?)",

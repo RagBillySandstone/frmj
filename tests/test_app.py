@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from frmj.app import (
+    clear_draft_plan,
     delete_token,
     get_all_config,
     get_client,
@@ -23,6 +24,8 @@ from frmj.app import (
     get_db,
     get_risk_config,
     get_token,
+    load_draft_plan,
+    save_draft_plan,
     set_config,
     store_token,
 )
@@ -331,6 +334,71 @@ class TestStoreToken:
         )
         with pytest.raises(RuntimeError, match="No system keyring"):
             store_token("my-secret-token")
+
+
+# ---------------------------------------------------------------------------
+# save_draft_plan / load_draft_plan / clear_draft_plan
+# ---------------------------------------------------------------------------
+
+
+class TestDraftPlan:
+    @pytest.fixture()
+    def plan_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Redirect _DRAFT_PLAN_PATH to a temp location for isolation."""
+        path = tmp_path / "saved_plan.json"
+        monkeypatch.setattr("frmj.app._DRAFT_PLAN_PATH", path)
+        return path
+
+    def test_save_creates_file(self, plan_path: Path) -> None:
+        save_draft_plan({"instrument": "EUR_USD"})
+        assert plan_path.exists()
+
+    def test_save_returns_path(self, plan_path: Path) -> None:
+        result = save_draft_plan({"instrument": "EUR_USD"})
+        assert result == plan_path
+
+    def test_save_and_load_roundtrip(self, plan_path: Path) -> None:
+        data = {
+            "instrument": "EUR_USD",
+            "direction": "long",
+            "units_signed": 10000,
+            "tp_price": "1.10550",
+            "sl_price": None,
+        }
+        save_draft_plan(data)
+        loaded = load_draft_plan()
+        assert loaded == data
+
+    def test_load_returns_none_when_absent(self, plan_path: Path) -> None:
+        assert load_draft_plan() is None
+
+    def test_clear_removes_file(self, plan_path: Path) -> None:
+        save_draft_plan({"instrument": "EUR_USD"})
+        clear_draft_plan()
+        assert not plan_path.exists()
+
+    def test_clear_is_noop_when_absent(self, plan_path: Path) -> None:
+        """clear_draft_plan must not raise when no file exists."""
+        clear_draft_plan()  # must not raise
+
+    def test_load_returns_none_on_corrupt_file(self, plan_path: Path) -> None:
+        plan_path.write_text("not valid json{{{")
+        assert load_draft_plan() is None
+
+    def test_save_overwrites_existing_plan(self, plan_path: Path) -> None:
+        save_draft_plan({"instrument": "EUR_USD"})
+        save_draft_plan({"instrument": "GBP_USD"})
+        loaded = load_draft_plan()
+        assert loaded is not None
+        assert loaded["instrument"] == "GBP_USD"
+
+    def test_save_creates_parent_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        nested = tmp_path / "a" / "b" / "saved_plan.json"
+        monkeypatch.setattr("frmj.app._DRAFT_PLAN_PATH", nested)
+        save_draft_plan({"instrument": "EUR_USD"})
+        assert nested.exists()
 
 
 class TestDeleteToken:
