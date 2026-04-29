@@ -21,9 +21,10 @@ Commands
     Remove the stored token from the OS keychain.
 
 ``frmj trade <INSTRUMENT> <long|short> [--dry-run]``
-    Interactive trade flow: risk → sizing → TP/SL → confirm → execute → note.
-    ``--dry-run`` shows the full plan (including exit levels) without placing
-    the order or prompting for confirmation.
+    Interactive trade flow: risk → sizing → TP/SL → confirm → execute →
+    attach TP/SL on Oanda → note.  ``--dry-run`` shows the full plan
+    (including exit levels) without placing the order or prompting for
+    confirmation.
 
 ``frmj note <OANDA_ID> <TEXT>``
     Attach a free-text note to any locally-synced transaction by its Oanda
@@ -373,6 +374,43 @@ def trade(
         raise typer.Exit(1)
 
     typer.echo(f"Order filled at {fill.fill_price} — transaction #{fill.transaction_id}")
+
+    # --- Attach TP/SL to the open trade on Oanda -----------------------------
+    if fill.trade_id is None:
+        # Shouldn't happen for a fresh position, but defend against it rather
+        # than crashing — the fill already succeeded and cannot be undone.
+        if exits.take_profit_price is not None or exits.stop_loss_price is not None:
+            typer.echo(
+                "Warning: Oanda did not return a trade ID — cannot attach TP/SL. "
+                "Set them manually in the Oanda interface.",
+                err=True,
+            )
+    else:
+        if exits.take_profit_price is not None:
+            try:
+                tp_txn = client.attach_take_profit(fill.trade_id, exits.take_profit_price)
+                typer.echo(
+                    f"Take-profit set at {exits.take_profit_price}"
+                    f" — order #{tp_txn}"
+                )
+            except Exception as exc:
+                typer.echo(f"Warning: failed to attach take-profit — {exc}", err=True)
+
+        if exits.stop_loss_price is not None:
+            try:
+                sl_txn = client.attach_stop_loss(fill.trade_id, exits.stop_loss_price)
+                typer.echo(
+                    f"Stop-loss set at {exits.stop_loss_price}"
+                    f" — order #{sl_txn}"
+                )
+            except Exception as exc:
+                typer.echo(
+                    f"Warning: failed to attach stop-loss — {exc}", err=True
+                )
+                typer.echo(
+                    "  Position is unprotected — set SL in Oanda immediately.",
+                    err=True,
+                )
 
     # --- Optional entry note -------------------------------------------------
     note_text = typer.prompt("Add a note (Enter to skip)", default="").strip()

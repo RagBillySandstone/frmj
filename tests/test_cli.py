@@ -321,10 +321,17 @@ class FakeFullClient:
     All methods are no-ops or return safe default values.  ``order_placed``
     is set to True when ``place_market_order`` is called, letting tests
     assert that dry-run skips order placement.
+
+    ``tp_should_fail`` / ``sl_should_fail`` cause the attach methods to raise,
+    simulating a network error after the fill.
     """
 
     account_id: str = "acct-1"
     order_placed: bool = False
+    tp_attached: str | None = None   # price string passed to attach_take_profit
+    sl_attached: str | None = None   # price string passed to attach_stop_loss
+    tp_should_fail: bool = False
+    sl_should_fail: bool = False
 
     # --- ClientProtocol (for the auto-sync step) ----------------------------
     def get_transactions_since(self, from_id: str | None = None) -> list:
@@ -364,7 +371,20 @@ class FakeFullClient:
             transaction_id="99999",
             fill_price=Decimal("1.10005"),
             units_filled=units_signed,
+            trade_id="99999",
         )
+
+    def attach_take_profit(self, trade_id: str, price: Decimal) -> str:
+        if self.tp_should_fail:
+            raise RuntimeError("TP order rejected by Oanda")
+        self.tp_attached = str(price)
+        return "100001"
+
+    def attach_stop_loss(self, trade_id: str, price: Decimal) -> str:
+        if self.sl_should_fail:
+            raise RuntimeError("SL order rejected by Oanda")
+        self.sl_attached = str(price)
+        return "100002"
 
 
 # ---------------------------------------------------------------------------
@@ -582,3 +602,103 @@ class TestJournalCommand:
         result = runner.invoke(app, ["journal"])
         assert "EUR_USD" in result.output
         assert "LONG" in result.output
+
+
+# ---------------------------------------------------------------------------
+# trade — confirmed execution path with TP/SL attachment
+# ---------------------------------------------------------------------------
+
+
+class TestTradeExecute:
+    """Confirmed trade path (non-dry-run) with TP/SL attachment."""
+
+    @pytest.fixture()
+    def trade_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "trade_exec_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        set_config(conn, "max_open_trades", "5")
+        conn.close()
+        return path
+
+    def _invoke(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeFullClient,
+        inputs: str,
+    ) -> object:
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        return runner.invoke(app, ["trade", "EUR_USD", "long"], input=inputs)
+
+    def test_tpsl_both_attached_after_fill(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both TP and SL are sent to Oanda after a confirmed fill."""
+        fake = FakeFullClient()
+        # TP=50 pips, SL=30 pips, confirm=y, note=skip
+        result = self._invoke(monkeypatch, fake, "50\n30\ny\n\n")
+        assert result.exit_code == 0, result.output
+        assert fake.tp_attached is not None
+        assert fake.sl_attached is not None
+        assert "Take-profit set" in result.output
+        assert "Stop-loss set" in result.output
+
+    def test_no_tpsl_skipped_means_no_attachment(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Skipping both TP and SL means neither attach method is called."""
+        fake = FakeFullClient()
+        # skip TP, skip SL, confirm=y, note=skip
+        result = self._invoke(monkeypatch, fake, "\n\ny\n\n")
+        assert result.exit_code == 0, result.output
+        assert fake.tp_attached is None
+        assert fake.sl_attached is None
+        # The prompt labels contain these words, so check for the post-fill confirmation.
+        assert "Take-profit set" not in result.output
+        assert "Stop-loss set" not in result.output
+
+    def test_sl_failure_warns_unprotected(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SL attachment failure prints an 'unprotected' warning but does not crash."""
+        fake = FakeFullClient(sl_should_fail=True)
+        result = self._invoke(monkeypatch, fake, "50\n30\ny\n\n")
+        assert result.exit_code == 0, result.output
+        # TP still goes through
+        assert fake.tp_attached is not None
+        assert "Take-profit set" in result.output
+        # SL warning is emitted
+        assert "unprotected" in result.output + result.stderr
+
+    def test_tp_failure_does_not_block_sl(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """TP failure is a warning only; SL attachment still proceeds."""
+        fake = FakeFullClient(tp_should_fail=True)
+        result = self._invoke(monkeypatch, fake, "50\n30\ny\n\n")
+        assert result.exit_code == 0, result.output
+        assert fake.sl_attached is not None
+        assert "Stop-loss set" in result.output
+
+    def test_missing_trade_id_warns_gracefully(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If Oanda returns no trade_id, a warning is shown instead of a crash."""
+        fake = FakeFullClient()
+
+        # Override place_market_order to return fill with no trade_id.
+        def _no_trade_id_fill(instrument: str, units_signed: int) -> OrderFill:
+            fake.order_placed = True
+            return OrderFill(
+                transaction_id="99999",
+                fill_price=Decimal("1.10005"),
+                units_filled=units_signed,
+                trade_id=None,
+            )
+
+        fake.place_market_order = _no_trade_id_fill  # type: ignore[method-assign]
+        result = self._invoke(monkeypatch, fake, "50\n30\ny\n\n")
+        assert result.exit_code == 0, result.output
+        assert "trade ID" in result.output + result.stderr

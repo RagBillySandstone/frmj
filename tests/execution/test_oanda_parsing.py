@@ -21,6 +21,7 @@ from frmj.execution.oanda import (
     _extract_bid_ask,
     _parse_account_summary,
     _parse_instrument_spec,
+    _parse_order_create_txn_id,
 )
 from frmj.domain.sizing import InstrumentSpec
 
@@ -178,3 +179,31 @@ class TestExtractBidAsk:
         bid, ask = _extract_bid_ask(payload)
         assert bid == Decimal("149.990")
         assert ask == Decimal("150.010")
+
+
+# ---------------------------------------------------------------------------
+# _parse_order_create_txn_id
+# ---------------------------------------------------------------------------
+
+
+class TestParseOrderCreateTxnId:
+    def test_extracts_id_from_order_create_transaction(self) -> None:
+        payload = {"orderCreateTransaction": {"id": "12345", "type": "TAKE_PROFIT_ORDER"}}
+        assert _parse_order_create_txn_id(payload) == "12345"
+
+    def test_id_coerced_to_string(self) -> None:
+        """Oanda IDs are numeric strings; an int value must still work."""
+        payload = {"orderCreateTransaction": {"id": 12345}}
+        result = _parse_order_create_txn_id(payload)
+        assert isinstance(result, str)
+        assert result == "12345"
+
+    def test_raises_on_missing_key(self) -> None:
+        with pytest.raises(RuntimeError, match="No orderCreateTransaction"):
+            _parse_order_create_txn_id({})
+
+    def test_raises_with_unrelated_keys_present(self) -> None:
+        """A response with orderFillTransaction but no orderCreateTransaction raises."""
+        payload = {"orderFillTransaction": {"id": "99"}, "lastTransactionID": "99"}
+        with pytest.raises(RuntimeError, match="No orderCreateTransaction"):
+            _parse_order_create_txn_id(payload)

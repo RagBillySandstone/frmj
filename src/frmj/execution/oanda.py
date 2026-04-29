@@ -172,11 +172,18 @@ class OrderFill:
     ``fill_price`` is the actual execution price reported by Oanda.
 
     ``units_filled`` is signed: positive for long fills, negative for short.
+
+    ``trade_id`` is the Oanda trade ID from ``tradeOpened.tradeID`` in the fill
+    response.  Used to attach TP/SL orders to the newly-opened position.
+    ``None`` in the rare case where the fill did not open a new trade (e.g.
+    a partial close that is modelled as a fill — not currently reachable via the
+    CLI, but defended against so callers don't have to guess).
     """
 
     transaction_id: str
     fill_price: Decimal
     units_filled: int
+    trade_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +201,22 @@ def _parse_account_summary(payload: dict[str, Any]) -> AccountSummary:
         margin_available=Decimal(acct["marginAvailable"]),
         open_trade_count=int(acct["openTradeCount"]),
     )
+
+
+def _parse_order_create_txn_id(payload: dict[str, Any]) -> str:
+    """Extract the transaction ID from a POST /orders success response.
+
+    Oanda wraps the created-order transaction under ``orderCreateTransaction``.
+    Returns its ``id`` as a string.  Raises ``RuntimeError`` when the key is
+    absent — that would mean an undocumented response shape and should surface
+    loudly rather than silently swallowing.
+    """
+    txn = payload.get("orderCreateTransaction")
+    if txn is None:
+        raise RuntimeError(
+            f"No orderCreateTransaction in Oanda response: {json.dumps(payload)}"
+        )
+    return str(txn["id"])
 
 
 def _parse_instrument_spec(instr: dict[str, Any]) -> InstrumentSpec:
@@ -470,11 +493,29 @@ class OandaClient:
             )
 
         fill = payload["orderFillTransaction"]
+        trade_opened = fill.get("tradeOpened")
         return OrderFill(
             transaction_id=str(fill["id"]),
             fill_price=Decimal(fill["price"]),
             units_filled=int(Decimal(fill["units"])),
+            trade_id=str(trade_opened["tradeID"]) if trade_opened else None,
         )
+
+    def attach_take_profit(self, trade_id: str, price: Decimal) -> str:
+        """Attach a GTC take-profit order to an existing open trade.
+
+        Returns the ``orderCreateTransaction.id`` from Oanda's response.
+        Raises ``httpx.HTTPStatusError`` on 4xx / 5xx responses.
+        """
+        return self._attach_exit_order("TAKE_PROFIT", trade_id, price)
+
+    def attach_stop_loss(self, trade_id: str, price: Decimal) -> str:
+        """Attach a GTC stop-loss order to an existing open trade.
+
+        Returns the ``orderCreateTransaction.id`` from Oanda's response.
+        Raises ``httpx.HTTPStatusError`` on 4xx / 5xx responses.
+        """
+        return self._attach_exit_order("STOP_LOSS", trade_id, price)
 
     def close(self) -> None:
         """Release the underlying httpx connection pool."""
@@ -489,6 +530,33 @@ class OandaClient:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _attach_exit_order(
+        self,
+        order_type: str,
+        trade_id: str,
+        price: Decimal,
+    ) -> str:
+        """POST a TAKE_PROFIT or STOP_LOSS order linked to *trade_id*.
+
+        Both order types share identical request/response shapes; the only
+        difference is the ``type`` field.  GTC (good-till-cancelled) is the
+        only time-in-force that makes sense for exit orders on an open trade —
+        DAY orders would expire at session end, leaving the position unprotected.
+        """
+        resp = self._http.post(
+            f"{self._base_url}/accounts/{self.account_id}/orders",
+            json={
+                "order": {
+                    "type": order_type,
+                    "tradeID": trade_id,
+                    "price": str(price),
+                    "timeInForce": "GTC",
+                }
+            },
+        )
+        resp.raise_for_status()
+        return _parse_order_create_txn_id(resp.json())
 
     def _fetch_all_cold(self) -> list[TransactionRow]:
         """
