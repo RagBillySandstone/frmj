@@ -10,8 +10,15 @@ Commands
 ``frmj config set <key> <value>``
     Write a config key/value to the database.
 
-``frmj config get <key>``
-    Read a config key from the database.
+``frmj config get [<key>]``
+    Read a config key from the database.  Omit the key to display all
+    currently configured values (token status is shown but never the value).
+
+``frmj config set-token``
+    Securely store the Oanda API token in the OS keychain (prompted, hidden).
+
+``frmj config unset-token``
+    Remove the stored token from the OS keychain.
 
 ``frmj trade <INSTRUMENT> <long|short> [--dry-run]``
     Interactive trade flow: risk → sizing → TP/SL → confirm → execute → note.
@@ -39,12 +46,23 @@ to 2dp, percentages to 1dp.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from decimal import Decimal
 
 import typer
 
-from frmj.app import get_client, get_config, get_db, get_risk_config, set_config
+from frmj.app import (
+    delete_token,
+    get_all_config,
+    get_client,
+    get_config,
+    get_db,
+    get_risk_config,
+    get_token,
+    set_config,
+    store_token,
+)
 from frmj.domain.pricing import (
     ExitLevels,
     TPSLKind,
@@ -126,18 +144,58 @@ def config_set(
 
 @config_app.command("get")
 def config_get(
-    key: str = typer.Argument(..., help="Config key to retrieve"),
+    key: str | None = typer.Argument(
+        None,
+        help="Config key to retrieve. Omit to show all configured values.",
+    ),
 ) -> None:
-    """Read a configuration value."""
+    """Read a configuration value, or show all values if no key is given."""
     conn = get_db()
     try:
-        value = get_config(conn, key)
+        if key is None:
+            pairs = get_all_config(conn)
+        else:
+            value = get_config(conn, key)
     finally:
         conn.close()
+
+    if key is None:
+        if not pairs:
+            typer.echo("No configuration values set.")
+        else:
+            width = max(len(k) for k, _ in pairs)
+            for k, v in pairs:
+                typer.echo(f"{k:<{width}}  =  {v}")
+        _print_token_status()
+        return
+
     if value is None:
         typer.echo(f"{key} is not set.")
         raise typer.Exit(1)
     typer.echo(value)
+
+
+@config_app.command("set-token")
+def config_set_token() -> None:
+    """Store the Oanda API token securely in the OS keychain."""
+    token = typer.prompt("Oanda API token", hide_input=True)
+    try:
+        store_token(token)
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1)
+    typer.echo("Token stored in OS keychain.")
+
+
+@config_app.command("unset-token")
+def config_unset_token() -> None:
+    """Remove the Oanda API token from the OS keychain."""
+    try:
+        delete_token()
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1)
+    typer.echo("Token removed from OS keychain.")
 
 
 # ---------------------------------------------------------------------------
@@ -418,6 +476,21 @@ def journal(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _print_token_status() -> None:
+    """Print a single line showing where (or whether) the API token is set.
+
+    Called by ``config_get`` when showing all values.  The token value itself
+    is never printed — only its source.
+    """
+    token_label = "API token"
+    if os.environ.get("OANDA_API_TOKEN"):
+        typer.echo(f"{token_label}  =  (set via OANDA_API_TOKEN env var)")
+    elif get_token() is not None:
+        typer.echo(f"{token_label}  =  (stored in OS keychain)")
+    else:
+        typer.echo(f"{token_label}  =  (not set — run: frmj config set-token)")
 
 
 def _display_transaction(txn: sqlite3.Row) -> None:

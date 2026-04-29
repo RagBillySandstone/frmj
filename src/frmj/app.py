@@ -1,15 +1,27 @@
 """
 Application-level wiring: database factory, client factory, config helpers.
 
-This module is the only place in the codebase that reads environment variables
-or touches the filesystem.  The domain layer (risk, sizing, pricing) and the
-execution layer (oanda, sync) are all pure functions / classes that accept
-their dependencies as arguments; this module assembles those arguments from
-the environment and hands them to the CLI commands.
+This module is the only place in the codebase that reads environment variables,
+touches the filesystem, or accesses the OS keychain.  The domain layer (risk,
+sizing, pricing) and the execution layer (oanda, sync) are all pure functions /
+classes that accept their dependencies as arguments; this module assembles those
+arguments from the environment and hands them to the CLI commands.
 
-Environment variables
----------------------
-``OANDA_API_TOKEN``   (required) — Oanda personal access token.
+API token storage
+-----------------
+The Oanda API token is resolved in this priority order:
+
+1. ``OANDA_API_TOKEN`` environment variable — checked first so CI/container
+   environments and existing shell-profile setups work with no changes.
+2. OS keychain — set once with ``frmj config set-token``; read automatically
+   on every subsequent invocation with no prompt.  Backed by GNOME Keyring /
+   KWallet on Linux, Keychain on macOS, Credential Locker on Windows.
+
+Store the token:    ``frmj config set-token``
+Remove the token:   ``frmj config unset-token``
+
+Other environment variables
+---------------------------
 ``FRMJ_DB_PATH``      (optional) — path to the SQLite file; defaults to
                        ``~/.local/share/frmj/frmj.db``.
 
@@ -34,6 +46,9 @@ import sqlite3
 from decimal import Decimal
 from pathlib import Path
 
+import keyring
+import keyring.errors
+
 from frmj.domain.risk import (
     BlockingMode,
     RiskConfig,
@@ -50,6 +65,10 @@ from frmj.persistence.schema import ensure_schema
 _DEFAULT_DB_PATH: Path = (
     Path.home() / ".local" / "share" / "frmj" / "frmj.db"
 )
+
+# Keyring entry coordinates — single source of truth used by get/store/delete.
+_KEYRING_SERVICE: str = "frmj"
+_KEYRING_TOKEN_KEY: str = "oanda_api_token"
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +119,81 @@ def set_config(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.commit()
 
 
+def get_all_config(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    """Return all config rows as ``(key, value)`` pairs sorted by key."""
+    rows = conn.execute(
+        "SELECT key, value FROM config ORDER BY key"
+    ).fetchall()
+    return [(row[0], row[1]) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Token helpers (OS keyring)
+# ---------------------------------------------------------------------------
+
+
+def get_token() -> str | None:
+    """
+    Resolve the Oanda API token using the priority order:
+
+    1. ``OANDA_API_TOKEN`` environment variable — preserved for CI / containers
+       and so a locally-exported variable always overrides a stale keyring entry.
+    2. OS keychain — set once with ``frmj config set-token``.
+
+    Returns ``None`` when neither source has the token.  Also returns ``None``
+    (rather than raising) when the keyring backend is unavailable so that the
+    caller (``get_client``) can surface the same unified missing-token message
+    regardless of platform.
+    """
+    env_token = os.environ.get("OANDA_API_TOKEN")
+    if env_token:
+        return env_token
+
+    # Treat any keyring error as "not available" — the missing-token error
+    # from get_client is more actionable than a raw keyring exception.
+    try:
+        return keyring.get_password(_KEYRING_SERVICE, _KEYRING_TOKEN_KEY)
+    except keyring.errors.KeyringError:
+        return None
+
+
+def store_token(token: str) -> None:
+    """
+    Save *token* to the OS keychain under the ``"frmj"`` service.
+
+    Raises ``RuntimeError`` when no keyring backend is available (headless Linux
+    without a Secret Service daemon running).  The CLI layer catches this and
+    suggests the env-var alternative.
+    """
+    try:
+        keyring.set_password(_KEYRING_SERVICE, _KEYRING_TOKEN_KEY, token)
+    except keyring.errors.NoKeyringError as exc:
+        raise RuntimeError(
+            "No system keyring is available on this machine. "
+            "Set the OANDA_API_TOKEN environment variable instead."
+        ) from exc
+
+
+def delete_token() -> None:
+    """
+    Remove the stored token from the OS keychain, if present.
+
+    A no-op when the token was never stored — ``PasswordDeleteError`` is
+    swallowed intentionally so the command is idempotent.
+    Raises ``RuntimeError`` when no keyring backend is available.
+    """
+    try:
+        keyring.delete_password(_KEYRING_SERVICE, _KEYRING_TOKEN_KEY)
+    except keyring.errors.NoKeyringError as exc:
+        raise RuntimeError(
+            "No system keyring is available on this machine. "
+            "Set the OANDA_API_TOKEN environment variable instead."
+        ) from exc
+    except keyring.errors.PasswordDeleteError:
+        # Token was never stored — not an error from the user's perspective.
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Client factory
 # ---------------------------------------------------------------------------
@@ -113,11 +207,12 @@ def get_client(conn: sqlite3.Connection) -> OandaClient:
     missing so the CLI can surface it as a user-facing error rather than a
     traceback.
     """
-    token = os.environ.get("OANDA_API_TOKEN")
+    token = get_token()
     if not token:
         raise RuntimeError(
-            "OANDA_API_TOKEN environment variable is not set. "
-            "Set it to your Oanda personal access token."
+            "No API token found. Store it with:\n"
+            "  frmj config set-token\n"
+            "Or set the OANDA_API_TOKEN environment variable."
         )
 
     account_id = get_config(conn, "account_id")

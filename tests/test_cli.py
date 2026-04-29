@@ -195,6 +195,119 @@ class TestConfigCommands:
             result = runner.invoke(app, ["config", "get", key])
             assert result.output.strip() == val
 
+    def test_config_get_all_shows_all_keys(self, db_path: Path) -> None:
+        """``frmj config get`` with no argument shows every configured key."""
+        for key, val in [("max_open_trades", "6"), ("scale_in", "never")]:
+            runner.invoke(app, ["config", "set", key, val])
+        result = runner.invoke(app, ["config", "get"])
+        assert result.exit_code == 0, result.output
+        assert "max_open_trades" in result.output
+        assert "6" in result.output
+        assert "scale_in" in result.output
+        assert "never" in result.output
+
+    def test_config_get_all_empty_db_shows_message(self, db_path: Path) -> None:
+        """``frmj config get`` on a fresh DB (only account_id seeded) shows it."""
+        result = runner.invoke(app, ["config", "get"])
+        assert result.exit_code == 0, result.output
+        # The db_path fixture seeds account_id, so it must appear.
+        assert "account_id" in result.output
+
+    def test_config_get_all_shows_token_status(self, db_path: Path) -> None:
+        """``frmj config get`` always prints an API token status line."""
+        result = runner.invoke(app, ["config", "get"])
+        assert result.exit_code == 0, result.output
+        assert "API token" in result.output
+
+    def test_config_get_all_token_not_set(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When no token is configured, the status line says 'not set'."""
+        monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
+        result = runner.invoke(app, ["config", "get"])
+        assert "not set" in result.output
+
+    def test_config_get_all_token_from_env(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OANDA_API_TOKEN", "env-tok")
+        result = runner.invoke(app, ["config", "get"])
+        assert "env var" in result.output
+        assert "env-tok" not in result.output  # value must not be printed
+
+    def test_config_get_all_token_from_keyring(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
+        monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: "kr-tok")
+        result = runner.invoke(app, ["config", "get"])
+        assert "keychain" in result.output
+        assert "kr-tok" not in result.output  # value must not be printed
+
+
+# ---------------------------------------------------------------------------
+# config set-token / config unset-token
+# ---------------------------------------------------------------------------
+
+
+class TestConfigTokenCommands:
+    def test_set_token_stores_and_confirms(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stored: list[str] = []
+        monkeypatch.setattr(
+            "frmj.app.keyring.set_password",
+            lambda s, u, p: stored.append(p),
+        )
+        result = runner.invoke(app, ["config", "set-token"], input="my-api-key\n")
+        assert result.exit_code == 0, result.output
+        assert "stored" in result.output.lower()
+        assert stored == ["my-api-key"]
+
+    def test_set_token_hides_input(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The token value must not appear in the command output."""
+        monkeypatch.setattr("frmj.app.keyring.set_password", lambda s, u, p: None)
+        result = runner.invoke(app, ["config", "set-token"], input="super-secret\n")
+        assert "super-secret" not in result.output
+
+    def test_set_token_exits_1_on_no_keyring(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import keyring.errors
+        monkeypatch.setattr(
+            "frmj.app.keyring.set_password",
+            lambda s, u, p: (_ for _ in ()).throw(keyring.errors.NoKeyringError()),
+        )
+        result = runner.invoke(app, ["config", "set-token"], input="tok\n")
+        assert result.exit_code == 1
+        assert "No system keyring" in result.output + result.stderr
+
+    def test_unset_token_confirms(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        deleted: list[bool] = []
+        monkeypatch.setattr(
+            "frmj.app.keyring.delete_password",
+            lambda s, u: deleted.append(True),
+        )
+        result = runner.invoke(app, ["config", "unset-token"])
+        assert result.exit_code == 0, result.output
+        assert "removed" in result.output.lower()
+        assert deleted == [True]
+
+    def test_unset_token_exits_1_on_no_keyring(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import keyring.errors
+        monkeypatch.setattr(
+            "frmj.app.keyring.delete_password",
+            lambda s, u: (_ for _ in ()).throw(keyring.errors.NoKeyringError()),
+        )
+        result = runner.invoke(app, ["config", "unset-token"])
+        assert result.exit_code == 1
+
 
 # ---------------------------------------------------------------------------
 # FakeFullClient — satisfies all OandaClient methods used by the trade command
