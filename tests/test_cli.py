@@ -953,6 +953,122 @@ class TestNoteCommand:
 
 
 # ---------------------------------------------------------------------------
+# tag command
+# ---------------------------------------------------------------------------
+
+
+class TestTagCommand:
+    """Tests for ``frmj tag``."""
+
+    @pytest.fixture()
+    def tag_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "tag_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        get_db(path=path).close()
+        _seed_transaction(path, oanda_id="99")
+        return path
+
+    def test_tag_added_to_transaction(self, tag_db: Path) -> None:
+        """A valid tag is persisted and confirmation is printed."""
+        result = runner.invoke(app, ["tag", "99", "breakout"])
+        assert result.exit_code == 0, result.output
+        assert "99" in result.output
+
+        conn = sqlite3.connect(str(tag_db))
+        row = conn.execute("SELECT tag FROM tags LIMIT 1").fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == "breakout"
+
+    def test_tag_normalised_to_lowercase(self, tag_db: Path) -> None:
+        """Tags are stored in lowercase regardless of input case."""
+        runner.invoke(app, ["tag", "99", "Momentum"])
+        conn = sqlite3.connect(str(tag_db))
+        row = conn.execute("SELECT tag FROM tags LIMIT 1").fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == "momentum"
+
+    def test_multiple_tags_in_one_call(self, tag_db: Path) -> None:
+        """Multiple space-separated tags can be attached in one command."""
+        result = runner.invoke(app, ["tag", "99", "breakout", "momentum"])
+        assert result.exit_code == 0, result.output
+        conn = sqlite3.connect(str(tag_db))
+        rows = conn.execute("SELECT tag FROM tags ORDER BY tag").fetchall()
+        conn.close()
+        assert {r[0] for r in rows} == {"breakout", "momentum"}
+
+    def test_duplicate_tag_silently_ignored(self, tag_db: Path) -> None:
+        """Attaching the same tag twice leaves only one row in the DB."""
+        runner.invoke(app, ["tag", "99", "breakout"])
+        runner.invoke(app, ["tag", "99", "breakout"])
+        conn = sqlite3.connect(str(tag_db))
+        count = conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0]
+        conn.close()
+        assert count == 1
+
+    def test_tag_on_missing_transaction_exits_1(self, tag_db: Path) -> None:
+        """Referencing an unknown Oanda ID must exit 1."""
+        result = runner.invoke(app, ["tag", "99999", "breakout"])
+        assert result.exit_code == 1
+
+    def test_invalid_tag_skipped_with_warning(self, tag_db: Path) -> None:
+        """A tag containing invalid characters is skipped with a warning."""
+        result = runner.invoke(app, ["tag", "99", "bad tag"])
+        # "bad tag" is two args here; let's test a single arg with a space via the CLI
+        # Actually CLI splits on whitespace, so "bad tag" would be two args.
+        # Test an invalid character in a single token instead.
+        result = runner.invoke(app, ["tag", "99", "bad@tag"])
+        assert "Skipped" in result.output + result.stderr
+
+    def test_journal_shows_tags(self, tag_db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Tags appear under the transaction in journal output."""
+        runner.invoke(app, ["tag", "99", "breakout"])
+        monkeypatch.setattr(
+            "frmj.cli.get_client",
+            lambda conn: FakeClient(account_id="acct-1"),
+        )
+        result = runner.invoke(app, ["journal"])
+        assert "Tags: breakout" in result.output
+
+    def test_journal_tag_filter(self, tag_db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--tag filter shows only transactions with that tag."""
+        _seed_transaction(tag_db, oanda_id="100")
+        runner.invoke(app, ["tag", "99", "breakout"])
+        # oanda_id 100 has no tag
+        monkeypatch.setattr(
+            "frmj.cli.get_client",
+            lambda conn: FakeClient(account_id="acct-1"),
+        )
+        result = runner.invoke(app, ["journal", "--tag", "breakout"])
+        assert result.exit_code == 0
+        assert "#99" in result.output
+        assert "#100" not in result.output
+
+    def test_stats_by_tag_section(self, tag_db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When closed trades have tags, the stats output includes a 'By tag' section."""
+        # Seed a closing ORDER_FILL with P/L.
+        conn = get_db(path=tag_db)
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+            "VALUES ('200', 'acct-1', 'ORDER_FILL', '2026-04-25T10:00:00.000000Z', "
+            """'{"instrument":"EUR_USD","units":"-10000","pl":"30.00"}')"""
+        )
+        conn.commit()
+        # Tag the closing fill with "breakout".
+        row = conn.execute("SELECT id FROM transactions WHERE oanda_id='200'").fetchone()
+        conn.execute("INSERT INTO tags (transaction_id, tag) VALUES (?, 'breakout')", (row[0],))
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeClient(account_id="acct-1"))
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        assert "By tag" in result.output
+        assert "breakout" in result.output
+
+
+# ---------------------------------------------------------------------------
 # journal command
 # ---------------------------------------------------------------------------
 
@@ -1225,8 +1341,8 @@ class TestTradeExecute:
     ) -> None:
         """Both TP and SL are sent to Oanda after a confirmed fill."""
         fake = FakeFullClient()
-        # TP=50 pips, SL=30 pips, confirm=y, note=skip
-        result = self._invoke(monkeypatch, fake, "50\n30\ny\n\n")
+        # TP=50 pips, SL=30 pips, confirm=y, note=skip, tags=skip
+        result = self._invoke(monkeypatch, fake, "50\n30\ny\n\n\n")
         assert result.exit_code == 0, result.output
         assert fake.tp_attached is not None
         assert fake.sl_attached is not None
@@ -1238,8 +1354,8 @@ class TestTradeExecute:
     ) -> None:
         """Skipping both TP and SL means neither attach method is called."""
         fake = FakeFullClient()
-        # skip TP, skip SL, confirm=y, note=skip
-        result = self._invoke(monkeypatch, fake, "\n\ny\n\n")
+        # skip TP, skip SL, confirm=y, note=skip, tags=skip
+        result = self._invoke(monkeypatch, fake, "\n\ny\n\n\n")
         assert result.exit_code == 0, result.output
         assert fake.tp_attached is None
         assert fake.sl_attached is None
@@ -1252,7 +1368,7 @@ class TestTradeExecute:
     ) -> None:
         """SL attachment failure prints an 'unprotected' warning but does not crash."""
         fake = FakeFullClient(sl_should_fail=True)
-        result = self._invoke(monkeypatch, fake, "50\n30\ny\n\n")
+        result = self._invoke(monkeypatch, fake, "50\n30\ny\n\n\n")
         assert result.exit_code == 0, result.output
         # TP still goes through
         assert fake.tp_attached is not None
@@ -1265,7 +1381,7 @@ class TestTradeExecute:
     ) -> None:
         """TP failure is a warning only; SL attachment still proceeds."""
         fake = FakeFullClient(tp_should_fail=True)
-        result = self._invoke(monkeypatch, fake, "50\n30\ny\n\n")
+        result = self._invoke(monkeypatch, fake, "50\n30\ny\n\n\n")
         assert result.exit_code == 0, result.output
         assert fake.sl_attached is not None
         assert "Stop-loss set" in result.output
@@ -1287,7 +1403,7 @@ class TestTradeExecute:
             )
 
         fake.place_market_order = _no_trade_id_fill  # type: ignore[method-assign]
-        result = self._invoke(monkeypatch, fake, "50\n30\ny\n\n")
+        result = self._invoke(monkeypatch, fake, "50\n30\ny\n\n\n")
         assert result.exit_code == 0, result.output
         assert "trade ID" in result.output + result.stderr
 
@@ -1305,7 +1421,7 @@ class TestTradeExecute:
         conn.close()
 
         fake = FakeFullClient()
-        result = self._invoke(monkeypatch, fake, "50\n30\ny\n\n")
+        result = self._invoke(monkeypatch, fake, "50\n30\ny\n\n\n")
         assert result.exit_code == 0, result.output
 
         conn = get_db(path=trade_db)
@@ -1324,8 +1440,8 @@ class TestTradeExecute:
     ) -> None:
         """Skipping both TP and SL leaves no row in trade_plans."""
         fake = FakeFullClient()
-        # skip TP, skip SL, confirm=y, note=skip
-        result = self._invoke(monkeypatch, fake, "\n\ny\n\n")
+        # skip TP, skip SL, confirm=y, note=skip, tags=skip
+        result = self._invoke(monkeypatch, fake, "\n\ny\n\n\n")
         assert result.exit_code == 0, result.output
 
         conn = get_db(path=trade_db)
@@ -2053,8 +2169,8 @@ class TestTradeFailureAndRetry:
         fake.place_market_order = _flaky_order  # type: ignore[method-assign]
         monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
 
-        # TP=50p, SL=30p, confirm=y, retry prompt=action_input, note=skip
-        inputs = f"50\n30\ny\n{action_input}\n\n"
+        # TP=50p, SL=30p, confirm=y, retry prompt=action_input, note=skip, tags=skip
+        inputs = f"50\n30\ny\n{action_input}\n\n\n"
         return runner.invoke(app, ["trade", "EUR_USD", "long"], input=inputs)
 
     def test_failure_shows_retry_prompt(
@@ -2209,7 +2325,7 @@ class TestTradeResume:
         self._seed_plan(plan_file)
         fake = FakeFullClient()
         monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
-        result = runner.invoke(app, ["trade", "--resume"], input="y\n\n")
+        result = runner.invoke(app, ["trade", "--resume"], input="y\n\n\n")
         assert result.exit_code == 0, result.output
         assert fake.order_placed
 
@@ -2251,7 +2367,7 @@ class TestTradeResume:
         # resume_db fixture deliberately omits max_open_trades config.
         fake = FakeFullClient()
         monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
-        result = runner.invoke(app, ["trade", "--resume"], input="y\n\n")
+        result = runner.invoke(app, ["trade", "--resume"], input="y\n\n\n")
         assert result.exit_code == 0, result.output
 
     def test_instrument_arg_with_resume_errors(

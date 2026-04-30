@@ -185,6 +185,32 @@ CREATE INDEX IF NOT EXISTS idx_trade_plans_transaction
 
 
 -- -------------------------------------------------------------------------
+-- Tags — short labels attachable to transactions for grouping in stats
+-- -------------------------------------------------------------------------
+-- One tag per row; a transaction can have many tags. Tags are stored
+-- lowercase (normalised at write time by the CLI) so lookups are
+-- case-insensitive without needing COLLATE NOCASE.
+CREATE TABLE IF NOT EXISTS tags (
+    id              INTEGER PRIMARY KEY,
+    transaction_id  INTEGER NOT NULL REFERENCES transactions(id),
+    tag             TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Prevent the same tag being attached twice to the same transaction.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_transaction_tag
+    ON tags (transaction_id, tag);
+
+-- "Show all tags for this transaction" — journal display.
+CREATE INDEX IF NOT EXISTS idx_tags_transaction
+    ON tags (transaction_id);
+
+-- "Show all transactions with this tag" — stats / filter queries.
+CREATE INDEX IF NOT EXISTS idx_tags_tag
+    ON tags (tag);
+
+
+-- -------------------------------------------------------------------------
 -- Config — flat key/value store for account settings
 -- -------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS config (

@@ -44,6 +44,12 @@ Commands
     Runs an incremental sync after closing so the local journal reflects
     the closing transactions immediately.
 
+``frmj tag <OANDA_ID> <TAG> [<TAG2>...]``
+    Attach one or more short labels to a transaction.  Tags are normalised
+    to lowercase and must be non-empty tokens (alphanumeric, hyphens, or
+    underscores).  Duplicate tags on the same transaction are silently
+    ignored.
+
 ``frmj note <OANDA_ID> <TEXT>``
     Attach a free-text note to any locally-synced transaction by its Oanda
     transaction ID.  Run ``frmj sync`` first if the transaction is not yet
@@ -923,17 +929,19 @@ def trade(
     # --- Save trade plan to DB ------------------------------------------------
     _save_trade_plan(conn, fill.transaction_id, client.account_id, tp_price, sl_price)
 
-    # --- Optional entry note -------------------------------------------------
+    # --- Optional entry note and tags ----------------------------------------
+    # Resolve the fill's synthetic DB id once; used for both note and tags.
+    fill_row = conn.execute(
+        "SELECT id FROM transactions WHERE oanda_id = ? AND account_id = ?",
+        (fill.transaction_id, client.account_id),
+    ).fetchone()
+
     note_text = typer.prompt("Add a note (Enter to skip)", default="").strip()
     if note_text:
-        row = conn.execute(
-            "SELECT id FROM transactions WHERE oanda_id = ? AND account_id = ?",
-            (fill.transaction_id, client.account_id),
-        ).fetchone()
-        if row:
+        if fill_row:
             conn.execute(
                 "INSERT INTO notes (transaction_id, body) VALUES (?, ?)",
-                (row["id"], note_text),
+                (fill_row["id"], note_text),
             )
             conn.commit()
             typer.echo("Note saved.")
@@ -943,6 +951,19 @@ def trade(
                 "Run 'frmj sync' then add the note manually.",
                 err=True,
             )
+
+    tags_raw = typer.prompt("Tags (space-separated, Enter to skip)", default="").strip()
+    if tags_raw and fill_row:
+        attached = _attach_tags(conn, fill_row["id"], tags_raw.split())
+        label = "tag" if attached == 1 else "tags"
+        if attached:
+            typer.echo(f"{attached} {label} saved.")
+    elif tags_raw and not fill_row:
+        typer.echo(
+            "Tags not saved: fill transaction not yet in local DB. "
+            "Run 'frmj sync' then add tags with 'frmj tag'.",
+            err=True,
+        )
 
     conn.close()
 
@@ -1082,7 +1103,20 @@ def stats() -> None:
 
     try:
         rows = conn.execute(
-            "SELECT oanda_id, time, raw_json FROM transactions WHERE type = 'ORDER_FILL'"
+            """
+            SELECT t.id, t.oanda_id, t.time, t.raw_json
+            FROM transactions t
+            WHERE t.type = 'ORDER_FILL'
+            """
+        ).fetchall()
+        # Tag breakdown: for each tag, collect P/L values of tagged closing fills.
+        tag_rows = conn.execute(
+            """
+            SELECT tg.tag, tx.raw_json
+            FROM tags tg
+            JOIN transactions tx ON tg.transaction_id = tx.id
+            WHERE tx.type = 'ORDER_FILL'
+            """
         ).fetchall()
     finally:
         conn.close()
@@ -1111,7 +1145,18 @@ def stats() -> None:
         typer.echo("No closed trades in local database.")
         return
 
-    _display_stats(trades)
+    # Build tag → list[Decimal] map from tag_rows (skip opening fills).
+    tag_pl: dict[str, list[Decimal]] = {}
+    for tr in tag_rows:
+        try:
+            data = json.loads(tr["raw_json"])
+            pl_val = Decimal(data.get("pl", "0") or "0")
+            if pl_val != 0:
+                tag_pl.setdefault(tr["tag"], []).append(pl_val)
+        except Exception:
+            continue
+
+    _display_stats(trades, tag_pl)
 
 
 # ---------------------------------------------------------------------------
@@ -1146,6 +1191,37 @@ def note(
     finally:
         conn.close()
     typer.echo(f"Note added to transaction {oanda_id}.")
+
+
+# ---------------------------------------------------------------------------
+# tag command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def tag(
+    oanda_id: str = typer.Argument(..., help="Oanda transaction ID to tag"),
+    tags: list[str] = typer.Argument(..., help="One or more tags to attach"),
+) -> None:
+    """Attach one or more labels to a locally-synced transaction."""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT id FROM transactions WHERE oanda_id = ?",
+            (oanda_id,),
+        ).fetchone()
+        if not row:
+            typer.echo(
+                f"Transaction {oanda_id!r} not found in local database. "
+                f"Run 'frmj sync' first.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        attached = _attach_tags(conn, row["id"], tags)
+    finally:
+        conn.close()
+    label = "tag" if attached == 1 else "tags"
+    typer.echo(f"{attached} {label} added to transaction {oanda_id}.")
 
 
 # ---------------------------------------------------------------------------
@@ -1184,8 +1260,14 @@ def journal(
         "--with-notes",
         help="Only show transactions that have at least one note.",
     ),
+    filter_tag: str | None = typer.Option(
+        None,
+        "--tag",
+        help="Filter to transactions tagged with this label.",
+        show_default=False,
+    ),
 ) -> None:
-    """Show recent transactions with their notes."""
+    """Show recent transactions with their notes and tags."""
     conn = get_db()
 
     # Auto-sync: best-effort; journal display proceeds even if sync fails.
@@ -1216,6 +1298,9 @@ def journal(
             params.append(instrument)
         if with_notes:
             where.append("id IN (SELECT DISTINCT transaction_id FROM notes)")
+        if filter_tag:
+            where.append("id IN (SELECT DISTINCT transaction_id FROM tags WHERE tag = ?)")
+            params.append(filter_tag.lower())
 
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
         params.append(n)
@@ -1237,6 +1322,7 @@ def journal(
                 f"type={txn_type}" if txn_type else "",
                 f"since={since}" if since else "",
                 "with-notes" if with_notes else "",
+                f"tag={filter_tag}" if filter_tag else "",
             ] if f
         ]
         if active_filters:
@@ -1267,6 +1353,13 @@ def journal(
             ).fetchall()
             for note_row in notes:
                 typer.echo(f"    Note: {note_row['body']}")
+            txn_tags = conn.execute(
+                "SELECT tag FROM tags WHERE transaction_id = ? ORDER BY tag",
+                (txn["id"],),
+            ).fetchall()
+            if txn_tags:
+                tag_list = "  ".join(r["tag"] for r in txn_tags)
+                typer.echo(f"    Tags: {tag_list}")
     finally:
         conn.close()
 
@@ -1274,6 +1367,55 @@ def journal(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _validate_tag(raw: str) -> str | None:
+    """Normalise *raw* to a lowercase tag string, or return None if invalid.
+
+    Valid tags are non-empty and contain only ASCII letters, digits, hyphens,
+    and underscores.  Spaces are NOT allowed (they act as delimiters in the
+    CLI prompts).
+    """
+    t = raw.strip().lower()
+    if not t:
+        return None
+    import re
+    if not re.fullmatch(r"[a-z0-9_-]+", t):
+        return None
+    return t
+
+
+def _attach_tags(
+    conn: sqlite3.Connection,
+    transaction_id: int,
+    raw_tags: list[str],
+) -> int:
+    """Insert *raw_tags* for *transaction_id*, skipping duplicates and invalids.
+
+    Returns the count of tags actually inserted (duplicates and invalids not
+    counted).  Uses INSERT OR IGNORE so idempotent re-tagging is harmless.
+    """
+    attached = 0
+    for raw in raw_tags:
+        t = _validate_tag(raw)
+        if t is None:
+            typer.echo(
+                f"  Skipped invalid tag {raw!r} "
+                "(only letters, digits, hyphens, underscores allowed).",
+                err=True,
+            )
+            continue
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO tags (transaction_id, tag) VALUES (?, ?)",
+                (transaction_id, t),
+            )
+            if conn.execute("SELECT changes()").fetchone()[0]:
+                attached += 1
+        except Exception:
+            pass
+    conn.commit()
+    return attached
 
 
 def _watch_loop(interval: int) -> None:
@@ -1342,7 +1484,10 @@ def _watch_loop(interval: int) -> None:
         conn.close()
 
 
-def _display_stats(trades: list[ClosedTrade]) -> None:
+def _display_stats(
+    trades: list[ClosedTrade],
+    tag_pl: dict[str, list[Decimal]] | None = None,
+) -> None:
     """Render the full stats report for the given closed trades."""
     summary = compute_summary(trades)
     assert summary is not None  # trades is guaranteed non-empty by caller
@@ -1385,6 +1530,18 @@ def _display_stats(trades: list[ClosedTrade]) -> None:
         typer.echo("─" * 50)
         for hour, count, total in by_hour:
             typer.echo(f"  {hour:02d}:00  {count:>4}  {_color_pl(total)}")
+
+    if tag_pl:
+        by_tag: list[tuple[str, int, Decimal]] = []
+        for t, pls in tag_pl.items():
+            by_tag.append((t, len(pls), sum(pls, Decimal(0))))
+        by_tag.sort(key=lambda r: r[2], reverse=True)
+        typer.echo("")
+        typer.echo("By tag")
+        typer.echo("─" * 50)
+        tw = max(len(r[0]) for r in by_tag)
+        for t, count, total in by_tag:
+            typer.echo(f"  {t:<{tw}}  {count:>4}  {_color_pl(total)}")
 
 
 def _make_export_record(
