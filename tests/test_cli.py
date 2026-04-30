@@ -469,6 +469,193 @@ class TestConfigCommands:
 
 
 # ---------------------------------------------------------------------------
+# config check
+# ---------------------------------------------------------------------------
+
+
+class TestConfigCheck:
+    """Tests for ``frmj config check``."""
+
+    def test_all_checks_pass_with_full_config(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fully configured setup exits 0 and reports all checks passed."""
+        for key, val in [
+            ("max_open_trades", "5"),
+            ("risk_strategy", "remaining_margin_fraction"),
+            ("blocking_mode", "hard_block"),
+            ("scale_in", "never"),
+            ("safety_reserve_pct", "0.05"),
+            ("practice_mode", "true"),
+        ]:
+            runner.invoke(app, ["config", "set", key, val])
+
+        result = runner.invoke(app, ["config", "check"])
+        assert result.exit_code == 0, result.output
+        assert "All checks passed" in result.output
+
+    def test_missing_token_exits_1(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Missing token shows MISSING status and exits 1."""
+        monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
+        monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: None)
+        result = runner.invoke(app, ["config", "check"])
+        assert result.exit_code == 1
+        assert "MISSING" in result.output
+
+    def test_missing_account_id_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Missing account_id shows MISSING and exits 1."""
+        path = tmp_path / "check_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        # token is present via db_path fixture env setup in test
+        monkeypatch.setenv("OANDA_API_TOKEN", "tok")
+        result = runner.invoke(app, ["config", "check"])
+        assert result.exit_code == 1
+        assert "account_id" in result.output
+        assert "MISSING" in result.output
+
+    def test_missing_max_open_trades_is_warning(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Missing max_open_trades shows WARN but exits 0 (trading is optional)."""
+        result = runner.invoke(app, ["config", "check"])
+        assert result.exit_code == 0
+        assert "WARN" in result.output
+        assert "max_open_trades" in result.output
+
+    def test_invalid_risk_strategy_exits_1(
+        self, db_path: Path
+    ) -> None:
+        """An unknown risk_strategy value shows INVALID and exits 1."""
+        runner.invoke(app, ["config", "set", "risk_strategy", "bogus_strategy"])
+        result = runner.invoke(app, ["config", "check"])
+        assert result.exit_code == 1
+        assert "INVALID" in result.output
+        assert "risk_strategy" in result.output
+
+    def test_invalid_blocking_mode_exits_1(
+        self, db_path: Path
+    ) -> None:
+        """An unknown blocking_mode value shows INVALID and exits 1."""
+        runner.invoke(app, ["config", "set", "blocking_mode", "not_valid"])
+        result = runner.invoke(app, ["config", "check"])
+        assert result.exit_code == 1
+        assert "blocking_mode" in result.output
+
+    def test_invalid_scale_in_exits_1(
+        self, db_path: Path
+    ) -> None:
+        """An unknown scale_in value shows INVALID and exits 1."""
+        runner.invoke(app, ["config", "set", "scale_in", "sometimes"])
+        result = runner.invoke(app, ["config", "check"])
+        assert result.exit_code == 1
+        assert "scale_in" in result.output
+
+    def test_safety_reserve_out_of_range_exits_1(
+        self, db_path: Path
+    ) -> None:
+        """safety_reserve_pct >= 1 shows INVALID and exits 1."""
+        runner.invoke(app, ["config", "set", "safety_reserve_pct", "1.5"])
+        result = runner.invoke(app, ["config", "check"])
+        assert result.exit_code == 1
+        assert "safety_reserve_pct" in result.output
+
+    def test_percent_of_equity_strategy_requires_field(
+        self, db_path: Path
+    ) -> None:
+        """risk_strategy=percent_of_equity without percent_of_equity → MISSING."""
+        runner.invoke(app, ["config", "set", "risk_strategy", "percent_of_equity"])
+        result = runner.invoke(app, ["config", "check"])
+        assert result.exit_code == 1
+        assert "percent_of_equity" in result.output
+        assert "MISSING" in result.output
+
+    def test_percent_of_equity_with_field_is_ok(
+        self, db_path: Path
+    ) -> None:
+        """risk_strategy=percent_of_equity with percent_of_equity set → no error."""
+        runner.invoke(app, ["config", "set", "risk_strategy", "percent_of_equity"])
+        runner.invoke(app, ["config", "set", "percent_of_equity", "0.02"])
+        runner.invoke(app, ["config", "set", "max_open_trades", "5"])
+        result = runner.invoke(app, ["config", "check"])
+        # Should pass (no errors), may have no warnings
+        assert "MISSING" not in result.output
+        assert "INVALID" not in result.output
+
+    def test_fixed_dollar_strategy_requires_field(
+        self, db_path: Path
+    ) -> None:
+        """risk_strategy=fixed_dollar without fixed_dollar → MISSING."""
+        runner.invoke(app, ["config", "set", "risk_strategy", "fixed_dollar"])
+        result = runner.invoke(app, ["config", "check"])
+        assert result.exit_code == 1
+        assert "fixed_dollar" in result.output
+
+    def test_connectivity_flag_skipped_without_token(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--connectivity is skipped with a WARN when token is missing."""
+        monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
+        monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: None)
+        result = runner.invoke(app, ["config", "check", "--connectivity"])
+        # Connectivity check itself is WARN (skipped), not causing an extra error
+        assert "skipped" in result.output or "connectivity" in result.output
+
+    def test_connectivity_flag_with_working_api(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--connectivity shows NAV when API responds successfully."""
+        runner.invoke(app, ["config", "set", "max_open_trades", "5"])
+
+        fake = FakeFullClient()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+
+        result = runner.invoke(app, ["config", "check", "--connectivity"])
+        assert result.exit_code == 0, result.output
+        assert "connectivity" in result.output
+        assert "NAV" in result.output or "OK" in result.output
+
+    def test_connectivity_flag_with_api_error(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--connectivity shows INVALID when the API call fails."""
+        runner.invoke(app, ["config", "set", "max_open_trades", "5"])
+
+        class BadClient:
+            account_id = "acct-1"
+
+            def get_account_summary(self):
+                raise RuntimeError("connection refused")
+
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: BadClient())
+
+        result = runner.invoke(app, ["config", "check", "--connectivity"])
+        assert result.exit_code == 1
+        assert "INVALID" in result.output
+        assert "connection refused" in result.output
+
+    def test_token_from_env_shows_ok(
+        self, db_path: Path
+    ) -> None:
+        """When token is in env, check shows OK with 'env var' detail."""
+        result = runner.invoke(app, ["config", "check"])
+        assert "token" in result.output
+        assert "env var" in result.output
+
+    def test_default_values_shown_when_not_set(
+        self, db_path: Path
+    ) -> None:
+        """Unset optional keys display their defaults."""
+        result = runner.invoke(app, ["config", "check"])
+        assert "remaining_margin_fraction (default)" in result.output
+        assert "hard_block (default)" in result.output
+        assert "never (default)" in result.output
+
+
+# ---------------------------------------------------------------------------
 # config set-token / config unset-token
 # ---------------------------------------------------------------------------
 

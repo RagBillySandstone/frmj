@@ -16,6 +16,11 @@ Commands
     Read a config key from the database.  Omit the key to display all
     currently configured values (token status is shown but never the value).
 
+``frmj config check [--connectivity]``
+    Validate all configuration keys and report missing or invalid values.
+    ``--connectivity`` additionally calls the Oanda API to verify the token
+    and account_id are accepted.  Exits 0 on success, 1 if any errors.
+
 ``frmj config set-token``
     Securely store the Oanda API token in the OS keychain (prompted, hidden).
 
@@ -109,7 +114,14 @@ from frmj.domain.pricing import (
     compute_exit_levels,
     pip_value_home,
 )
-from frmj.domain.risk import MaxTradesExceeded, ScaleInForbidden, evaluate_trade
+from frmj.domain.risk import (
+    BlockingMode,
+    MaxTradesExceeded,
+    RiskStrategy,
+    ScaleInForbidden,
+    ScaleInPolicy,
+    evaluate_trade,
+)
 from frmj.domain.sizing import Direction, compute_units
 from frmj.execution.oanda import CloseFill, OpenTrade
 from frmj.execution.sync import sync_cold, sync_incremental
@@ -418,6 +430,182 @@ def config_unset_token() -> None:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1)
     typer.echo("Token removed from OS keychain.")
+
+
+@config_app.command("check")
+def config_check(
+    connectivity: bool = typer.Option(
+        False,
+        "--connectivity",
+        help="Also verify the token and account_id are accepted by Oanda.",
+    ),
+) -> None:
+    """Validate configuration and report any issues."""
+    conn = get_db()
+    try:
+        all_cfg = dict(get_all_config(conn))
+        account_id_val = all_cfg.get("account_id")
+
+        # Each item is (label, status, detail).
+        # status: "OK" | "WARN" | "MISSING" | "INVALID"
+        checks: list[tuple[str, str, str]] = []
+
+        # --- Token -----------------------------------------------------------
+        token_val = get_token()
+        if os.environ.get("OANDA_API_TOKEN"):
+            checks.append(("token", "OK", "env var"))
+        elif token_val:
+            checks.append(("token", "OK", "OS keychain"))
+        else:
+            checks.append(("token", "MISSING", "run: frmj config set-token"))
+
+        # --- account_id ------------------------------------------------------
+        if account_id_val:
+            checks.append(("account_id", "OK", account_id_val))
+        else:
+            checks.append(("account_id", "MISSING",
+                           "run: frmj config set account_id <ID>"))
+
+        # --- max_open_trades (required for trading) --------------------------
+        mot = all_cfg.get("max_open_trades")
+        if mot is None:
+            checks.append(("max_open_trades", "WARN",
+                           "not set — trading disabled; run: frmj config set max_open_trades <N>"))
+        else:
+            try:
+                if int(mot) <= 0:
+                    raise ValueError
+                checks.append(("max_open_trades", "OK", mot))
+            except ValueError:
+                checks.append(("max_open_trades", "INVALID",
+                               f"{mot!r} — must be a positive integer"))
+
+        # --- risk_strategy ---------------------------------------------------
+        rs_val = all_cfg.get("risk_strategy")
+        valid_strategies = [s.value for s in RiskStrategy]
+        if rs_val is None:
+            checks.append(("risk_strategy", "OK",
+                           f"remaining_margin_fraction (default)"))
+        elif rs_val in valid_strategies:
+            checks.append(("risk_strategy", "OK", rs_val))
+        else:
+            checks.append(("risk_strategy", "INVALID",
+                           f"{rs_val!r} — must be one of: {', '.join(valid_strategies)}"))
+
+        # --- percent_of_equity (required when strategy=percent_of_equity) ----
+        effective_strategy = rs_val or "remaining_margin_fraction"
+        if effective_strategy == RiskStrategy.PERCENT_OF_EQUITY.value:
+            poe = all_cfg.get("percent_of_equity")
+            if poe is None:
+                checks.append(("percent_of_equity", "MISSING",
+                               "required when risk_strategy = percent_of_equity"))
+            else:
+                checks.append(("percent_of_equity", "OK", poe))
+
+        # --- fixed_dollar (required when strategy=fixed_dollar) --------------
+        if effective_strategy == RiskStrategy.FIXED_DOLLAR.value:
+            fd = all_cfg.get("fixed_dollar")
+            if fd is None:
+                checks.append(("fixed_dollar", "MISSING",
+                               "required when risk_strategy = fixed_dollar"))
+            else:
+                checks.append(("fixed_dollar", "OK", fd))
+
+        # --- blocking_mode ---------------------------------------------------
+        bm_val = all_cfg.get("blocking_mode")
+        valid_modes = [m.value for m in BlockingMode]
+        if bm_val is None:
+            checks.append(("blocking_mode", "OK", "hard_block (default)"))
+        elif bm_val in valid_modes:
+            checks.append(("blocking_mode", "OK", bm_val))
+        else:
+            checks.append(("blocking_mode", "INVALID",
+                           f"{bm_val!r} — must be one of: {', '.join(valid_modes)}"))
+
+        # --- scale_in --------------------------------------------------------
+        si_val = all_cfg.get("scale_in")
+        valid_si = [p.value for p in ScaleInPolicy]
+        if si_val is None:
+            checks.append(("scale_in", "OK", "never (default)"))
+        elif si_val in valid_si:
+            checks.append(("scale_in", "OK", si_val))
+        else:
+            checks.append(("scale_in", "INVALID",
+                           f"{si_val!r} — must be one of: {', '.join(valid_si)}"))
+
+        # --- safety_reserve_pct ----------------------------------------------
+        sr_val = all_cfg.get("safety_reserve_pct")
+        if sr_val is None:
+            checks.append(("safety_reserve_pct", "OK", "0 (default)"))
+        else:
+            try:
+                sr = Decimal(sr_val)
+                if not (0 <= sr < 1):
+                    raise ValueError
+                checks.append(("safety_reserve_pct", "OK", sr_val))
+            except Exception:
+                checks.append(("safety_reserve_pct", "INVALID",
+                               f"{sr_val!r} — must be a decimal in [0, 1)"))
+
+        # --- practice_mode ---------------------------------------------------
+        pm_val = all_cfg.get("practice_mode")
+        if pm_val is None:
+            checks.append(("practice_mode", "OK", "true (default)"))
+        elif pm_val.lower() in ("true", "false", "1", "0", "yes", "no"):
+            checks.append(("practice_mode", "OK", pm_val))
+        else:
+            checks.append(("practice_mode", "INVALID",
+                           f"{pm_val!r} — must be true or false"))
+
+        # --- Connectivity (opt-in) -------------------------------------------
+        if connectivity:
+            if token_val and account_id_val:
+                try:
+                    client = get_client(conn)
+                    summary = client.get_account_summary()
+                    checks.append(("connectivity", "OK",
+                                   f"Oanda responded — NAV ${summary.nav:,.2f}"))
+                except Exception as exc:
+                    checks.append(("connectivity", "INVALID",
+                                   f"API call failed: {exc}"))
+            else:
+                checks.append(("connectivity", "WARN",
+                               "skipped — token or account_id not configured"))
+
+    finally:
+        conn.close()
+
+    # --- Render --------------------------------------------------------------
+    typer.echo("Configuration check")
+    typer.echo("─" * 56)
+
+    label_w = max(len(c[0]) for c in checks)
+    status_w = max(len(c[1]) for c in checks)
+
+    for label, status, detail in checks:
+        if status == "OK":
+            badge = typer.style(f"{status:<{status_w}}", fg=typer.colors.GREEN)
+        elif status == "WARN":
+            badge = typer.style(f"{status:<{status_w}}", fg=typer.colors.YELLOW)
+        else:  # MISSING / INVALID
+            badge = typer.style(f"{status:<{status_w}}", fg=typer.colors.RED)
+
+        typer.echo(f"  {label:<{label_w}}  {badge}  {detail}")
+
+    errors = [c for c in checks if c[1] in ("MISSING", "INVALID")]
+    warnings = [c for c in checks if c[1] == "WARN"]
+
+    typer.echo("")
+    if not errors and not warnings:
+        typer.echo(typer.style("All checks passed.", fg=typer.colors.GREEN))
+    elif not errors:
+        typer.echo(f"{len(warnings)} warning(s). Configuration is usable but incomplete.")
+    else:
+        count = len(errors) + len(warnings)
+        typer.echo(
+            typer.style(f"{count} issue(s) found.", fg=typer.colors.RED)
+        )
+        raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------------------
