@@ -971,6 +971,138 @@ def _closing_fill_json(
     return _json.dumps({"instrument": instrument, "units": units, "pl": pl})
 
 
+# ---------------------------------------------------------------------------
+# journal command — filtering
+# ---------------------------------------------------------------------------
+
+
+class TestJournalFiltering:
+    """Tests for --instrument, --type, --since, and --with-notes filters."""
+
+    @pytest.fixture()
+    def filter_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "filter_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        monkeypatch.setattr(
+            "frmj.cli.get_client",
+            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+        )
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        # Three fills: EUR_USD on Apr-25, GBP_USD on Apr-26, EUR_USD on Apr-27
+        rows = [
+            ("101", "2026-04-25T09:00:00Z", "EUR_USD"),
+            ("102", "2026-04-26T10:00:00Z", "GBP_USD"),
+            ("103", "2026-04-27T11:00:00Z", "EUR_USD"),
+        ]
+        raw_conn = sqlite3.connect(str(path))
+        raw_conn.execute("PRAGMA foreign_keys = ON")
+        for oid, ts, instr in rows:
+            raw_conn.execute(
+                "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json)"
+                " VALUES (?, 'acct-1', 'ORDER_FILL', ?, ?)",
+                (oid, ts, json.dumps({"instrument": instr, "units": "10000"})),
+            )
+        # One DAILY_FINANCING row
+        raw_conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json)"
+            " VALUES ('200', 'acct-1', 'DAILY_FINANCING', '2026-04-25T22:00:00Z',"
+            " '{\"financing\":\"-1.50\"}')"
+        )
+        raw_conn.commit()
+        raw_conn.close()
+        return path
+
+    def test_filter_by_instrument_shows_only_matching(
+        self, filter_db: Path
+    ) -> None:
+        result = runner.invoke(app, ["journal", "--instrument", "EUR_USD"])
+        assert result.exit_code == 0, result.output
+        assert "101" in result.output
+        assert "103" in result.output
+        assert "102" not in result.output  # GBP_USD row excluded
+
+    def test_filter_by_instrument_shows_filter_label(
+        self, filter_db: Path
+    ) -> None:
+        result = runner.invoke(app, ["journal", "--instrument", "EUR_USD"])
+        assert "instrument=EUR_USD" in result.output
+
+    def test_filter_by_type_shows_only_matching(self, filter_db: Path) -> None:
+        result = runner.invoke(app, ["journal", "--type", "DAILY_FINANCING"])
+        assert result.exit_code == 0, result.output
+        assert "200" in result.output
+        assert "101" not in result.output  # ORDER_FILL excluded
+
+    def test_filter_by_type_shows_filter_label(self, filter_db: Path) -> None:
+        result = runner.invoke(app, ["journal", "--type", "ORDER_FILL"])
+        assert "type=ORDER_FILL" in result.output
+
+    def test_filter_since_excludes_earlier_rows(self, filter_db: Path) -> None:
+        result = runner.invoke(app, ["journal", "--since", "2026-04-26"])
+        assert result.exit_code == 0, result.output
+        assert "102" in result.output
+        assert "103" in result.output
+        assert "101" not in result.output  # Apr-25 before cutoff
+
+    def test_filter_since_shows_filter_label(self, filter_db: Path) -> None:
+        result = runner.invoke(app, ["journal", "--since", "2026-04-26"])
+        assert "since=2026-04-26" in result.output
+
+    def test_filter_with_notes_shows_only_annotated(
+        self, filter_db: Path
+    ) -> None:
+        # Attach a note to row 102
+        conn = sqlite3.connect(str(filter_db))
+        txn_id = conn.execute(
+            "SELECT id FROM transactions WHERE oanda_id = '102'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO notes (transaction_id, body) VALUES (?, 'test note')",
+            (txn_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        result = runner.invoke(app, ["journal", "--with-notes"])
+        assert result.exit_code == 0, result.output
+        assert "102" in result.output
+        assert "101" not in result.output
+        assert "103" not in result.output
+
+    def test_filter_with_notes_label_shown(self, filter_db: Path) -> None:
+        result = runner.invoke(app, ["journal", "--with-notes"])
+        assert "with-notes" in result.output
+
+    def test_combined_filters(self, filter_db: Path) -> None:
+        """--instrument + --since together narrow results to intersection."""
+        result = runner.invoke(
+            app,
+            ["journal", "--instrument", "EUR_USD", "--since", "2026-04-26"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "103" in result.output   # EUR_USD on Apr-27 ✓
+        assert "101" not in result.output  # EUR_USD on Apr-25 before since
+        assert "102" not in result.output  # GBP_USD excluded by instrument
+
+    def test_no_matching_rows_shows_no_transactions_message(
+        self, filter_db: Path
+    ) -> None:
+        result = runner.invoke(app, ["journal", "--instrument", "USD_JPY"])
+        assert result.exit_code == 0, result.output
+        assert "No transactions" in result.output
+
+    def test_n_still_limits_after_filter(self, filter_db: Path) -> None:
+        """--n 1 with matching rows returns only the most recent match."""
+        result = runner.invoke(
+            app, ["journal", "--instrument", "EUR_USD", "--n", "1"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "103" in result.output   # most recent EUR_USD
+        assert "101" not in result.output
+
+
 class TestStatsCommand:
     @pytest.fixture()
     def stats_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:

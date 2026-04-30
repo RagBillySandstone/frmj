@@ -827,6 +827,32 @@ def journal(
     n: int = typer.Option(
         20, "--n", "-n", help="Number of recent transactions to show."
     ),
+    instrument: str | None = typer.Option(
+        None,
+        "--instrument",
+        "-i",
+        help="Filter to one instrument, e.g. EUR_USD.",
+        autocompletion=_complete_instrument,
+        show_default=False,
+    ),
+    txn_type: str | None = typer.Option(
+        None,
+        "--type",
+        "-t",
+        help="Filter by transaction type, e.g. ORDER_FILL.",
+        show_default=False,
+    ),
+    since: str | None = typer.Option(
+        None,
+        "--since",
+        help="Show transactions on or after this date, e.g. 2026-04-01.",
+        show_default=False,
+    ),
+    with_notes: bool = typer.Option(
+        False,
+        "--with-notes",
+        help="Only show transactions that have at least one note.",
+    ),
 ) -> None:
     """Show recent transactions with their notes."""
     conn = get_db()
@@ -843,15 +869,47 @@ def journal(
         typer.echo(f"[sync] Warning: sync failed — {exc}", err=True)
 
     try:
+        where: list[str] = []
+        params: list[object] = []
+
+        if txn_type:
+            where.append("type = ?")
+            params.append(txn_type)
+        if since:
+            where.append("time >= ?")
+            params.append(since)
+        if instrument:
+            # json_extract is available in SQLite ≥ 3.9 (2015); safe on all
+            # target platforms.
+            where.append("json_extract(raw_json, '$.instrument') = ?")
+            params.append(instrument)
+        if with_notes:
+            where.append("id IN (SELECT DISTINCT transaction_id FROM notes)")
+
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+        params.append(n)
+
         txns = conn.execute(
-            """
+            f"""
             SELECT id, oanda_id, type, time, raw_json
             FROM transactions
+            {where_sql}
             ORDER BY time DESC
             LIMIT ?
             """,
-            (n,),
+            params,
         ).fetchall()
+
+        active_filters = [
+            f for f in [
+                f"instrument={instrument}" if instrument else "",
+                f"type={txn_type}" if txn_type else "",
+                f"since={since}" if since else "",
+                "with-notes" if with_notes else "",
+            ] if f
+        ]
+        if active_filters:
+            typer.echo(f"Filter: {', '.join(active_filters)}")
 
         if not txns:
             typer.echo("No transactions in local database.")
