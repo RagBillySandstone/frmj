@@ -42,9 +42,14 @@ Commands
     transaction ID.  Run ``frmj sync`` first if the transaction is not yet
     in the local database.
 
+``frmj stats``
+    Show trade performance: win rate, avg P/L, total P/L, best/worst, and
+    breakdowns by instrument, weekday, and hour (UTC).  Auto-syncs before
+    displaying.
+
 ``frmj journal [--n N]``
     Show the most recent N transactions (default 20) with any attached notes.
-    Reads only from the local database — no network call.
+    Auto-syncs before displaying.
 
 All commands open the database, perform their work, and close.  Network errors
 propagate as plain RuntimeError or httpx exceptions and are caught at the
@@ -78,6 +83,13 @@ from frmj.app import (
     save_draft_plan,
     set_config,
     store_token,
+)
+from frmj.domain.analytics import (
+    ClosedTrade,
+    compute_summary,
+    pl_by_hour,
+    pl_by_instrument,
+    pl_by_weekday,
 )
 from frmj.domain.pricing import (
     ExitLevels,
@@ -718,6 +730,60 @@ def trade(
 
 
 # ---------------------------------------------------------------------------
+# stats command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def stats() -> None:
+    """Show trade performance statistics from the local journal."""
+    conn = get_db()
+
+    try:
+        client = get_client(conn)
+        sync_result = sync_incremental(conn, client)
+        if sync_result.rows_ingested:
+            typer.echo(f"[sync] +{sync_result.rows_ingested} transactions")
+    except RuntimeError as exc:
+        typer.echo(f"[sync] Warning: {exc}", err=True)
+    except Exception as exc:
+        typer.echo(f"[sync] Warning: sync failed — {exc}", err=True)
+
+    try:
+        rows = conn.execute(
+            "SELECT oanda_id, time, raw_json FROM transactions WHERE type = 'ORDER_FILL'"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    trades: list[ClosedTrade] = []
+    for row in rows:
+        try:
+            data = json.loads(row["raw_json"])
+            pl_val = Decimal(data.get("pl", "0") or "0")
+            if pl_val == 0:
+                continue  # opening fill — no realised P/L
+            units_raw = int(Decimal(data.get("units", "0")))
+            trades.append(ClosedTrade(
+                oanda_id=row["oanda_id"],
+                instrument=data.get("instrument", ""),
+                time=row["time"],
+                pl=pl_val,
+                units=abs(units_raw),
+                # Closing a long = negative units in close txn; short = positive.
+                direction="LONG" if units_raw < 0 else "SHORT",
+            ))
+        except Exception:
+            continue
+
+    if not trades:
+        typer.echo("No closed trades in local database.")
+        return
+
+    _display_stats(trades)
+
+
+# ---------------------------------------------------------------------------
 # note command
 # ---------------------------------------------------------------------------
 
@@ -821,6 +887,51 @@ def journal(
 # ---------------------------------------------------------------------------
 
 
+def _display_stats(trades: list[ClosedTrade]) -> None:
+    """Render the full stats report for the given closed trades."""
+    summary = compute_summary(trades)
+    assert summary is not None  # trades is guaranteed non-empty by caller
+
+    typer.echo(f"Trade summary  ({summary.total} closed trades)")
+    typer.echo("─" * 50)
+    typer.echo(
+        f"  Win rate:   {summary.win_rate * 100:.1f}%"
+        f"  ({summary.wins}W / {summary.losses}L)"
+    )
+    typer.echo(f"  Avg P/L:    {_color_pl(summary.avg_pl)}")
+    typer.echo(f"  Total P/L:  {_color_pl(summary.total_pl)}")
+    typer.echo(f"  Best:       {_color_pl(summary.best_pl)}")
+    typer.echo(f"  Worst:      {_color_pl(summary.worst_pl)}")
+
+    by_instr = pl_by_instrument(trades)
+    if by_instr:
+        typer.echo("")
+        typer.echo("By instrument")
+        typer.echo("─" * 50)
+        iw = max(len(r[0]) for r in by_instr)
+        for instr, count, total, avg in by_instr:
+            typer.echo(
+                f"  {instr:<{iw}}  {count:>4}  {_color_pl(total)}"
+                f"    avg {_color_pl(avg)}"
+            )
+
+    by_day = pl_by_weekday(trades)
+    if by_day:
+        typer.echo("")
+        typer.echo("By weekday")
+        typer.echo("─" * 50)
+        for day, count, total in by_day:
+            typer.echo(f"  {day}  {count:>4}  {_color_pl(total)}")
+
+    by_hour = pl_by_hour(trades)
+    if by_hour:
+        typer.echo("")
+        typer.echo("By hour (UTC)")
+        typer.echo("─" * 50)
+        for hour, count, total in by_hour:
+            typer.echo(f"  {hour:02d}:00  {count:>4}  {_color_pl(total)}")
+
+
 def _print_token_status() -> None:
     """Print a single line showing where (or whether) the API token is set.
 
@@ -837,9 +948,9 @@ def _print_token_status() -> None:
 
 
 def _color_pl(pl: Decimal) -> str:
-    """Return a P/L string colored green (profit) or red (loss)."""
+    """Return a colored P/L string like '+$45.23' or '-$3.50' (no leading spaces)."""
     sign = "+" if pl > 0 else ""
-    text = f"  {sign}${pl:,.2f}"
+    text = f"{sign}${pl:,.2f}"
     if pl > 0:
         return typer.style(text, fg=typer.colors.GREEN)
     if pl < 0:
@@ -883,7 +994,7 @@ def _display_transaction(txn: sqlite3.Row) -> None:
         except Exception:
             pass
 
-    pl_str = _color_pl(pl) if pl is not None else ""
+    pl_str = f"  {_color_pl(pl)}" if pl is not None else ""
     typer.echo(f"{time_short}  {txn['type']:<24}  #{txn['oanda_id']}{extra}{pl_str}")
 
 

@@ -956,6 +956,135 @@ def _open_trade(
     )
 
 
+# ---------------------------------------------------------------------------
+# stats command
+# ---------------------------------------------------------------------------
+
+
+def _closing_fill_json(
+    instrument: str = "EUR_USD",
+    units: str = "-10000",
+    pl: str = "45.23",
+) -> str:
+    """Build a compact raw_json string for a closing ORDER_FILL."""
+    import json as _json
+    return _json.dumps({"instrument": instrument, "units": units, "pl": pl})
+
+
+class TestStatsCommand:
+    @pytest.fixture()
+    def stats_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "stats_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        monkeypatch.setattr(
+            "frmj.cli.get_client",
+            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+        )
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        conn.close()
+        return path
+
+    def _seed_fills(self, path: Path, fills: list[tuple[str, str, str, str]]) -> None:
+        """Seed ORDER_FILL rows: each tuple is (oanda_id, time, units, pl)."""
+        conn = sqlite3.connect(str(path))
+        conn.execute("PRAGMA foreign_keys = ON")
+        for oanda_id, time, units, pl in fills:
+            conn.execute(
+                "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+                "VALUES (?, 'acct-1', 'ORDER_FILL', ?, ?)",
+                (oanda_id, time, _closing_fill_json(units=units, pl=pl)),
+            )
+        conn.commit()
+        conn.close()
+
+    def test_no_closed_trades_shows_message(
+        self, stats_db: Path
+    ) -> None:
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        assert "No closed trades" in result.output
+
+    def test_opening_fills_excluded(self, stats_db: Path) -> None:
+        """ORDER_FILL rows with pl=0 (opening fills) must not count as trades."""
+        conn = sqlite3.connect(str(stats_db))
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+            "VALUES ('1', 'acct-1', 'ORDER_FILL', '2026-04-25T09:00:00Z', "
+            "'{\"instrument\":\"EUR_USD\",\"units\":\"10000\",\"pl\":\"0\"}')"
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        assert "No closed trades" in result.output
+
+    def test_shows_trade_count(self, stats_db: Path) -> None:
+        self._seed_fills(stats_db, [
+            ("1", "2026-04-25T09:00:00Z", "-10000", "30.00"),
+            ("2", "2026-04-26T10:00:00Z", "-10000", "-15.00"),
+        ])
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        assert "2 closed trades" in result.output
+
+    def test_shows_win_rate(self, stats_db: Path) -> None:
+        self._seed_fills(stats_db, [
+            ("1", "2026-04-25T09:00:00Z", "-10000", "30.00"),
+            ("2", "2026-04-26T10:00:00Z", "-10000", "20.00"),
+            ("3", "2026-04-27T11:00:00Z", "-10000", "-10.00"),
+        ])
+        result = runner.invoke(app, ["stats"])
+        assert "Win rate" in result.output
+        # 2 wins / 3 total = 66.7%
+        assert "66.7%" in result.output
+
+    def test_shows_instrument_breakdown(self, stats_db: Path) -> None:
+        self._seed_fills(stats_db, [
+            ("1", "2026-04-25T09:00:00Z", "-10000", "30.00"),
+            ("2", "2026-04-26T10:00:00Z", "5000", "-10.00"),  # GBP_USD short close
+        ])
+        # Override instrument for second fill
+        conn = sqlite3.connect(str(stats_db))
+        conn.execute(
+            "UPDATE transactions SET raw_json = ? WHERE oanda_id = '2'",
+            (_closing_fill_json(instrument="GBP_USD", units="5000", pl="-10.00"),),
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["stats"])
+        assert "EUR_USD" in result.output
+        assert "GBP_USD" in result.output
+        assert "By instrument" in result.output
+
+    def test_shows_weekday_breakdown(self, stats_db: Path) -> None:
+        # 2026-04-27 is Monday
+        self._seed_fills(stats_db, [
+            ("1", "2026-04-27T09:00:00Z", "-10000", "25.00"),
+        ])
+        result = runner.invoke(app, ["stats"])
+        assert "By weekday" in result.output
+        assert "Mon" in result.output
+
+    def test_shows_hour_breakdown(self, stats_db: Path) -> None:
+        self._seed_fills(stats_db, [
+            ("1", "2026-04-25T09:30:00Z", "-10000", "15.00"),
+        ])
+        result = runner.invoke(app, ["stats"])
+        assert "By hour (UTC)" in result.output
+        assert "09:00" in result.output
+
+    def test_total_pl_shown(self, stats_db: Path) -> None:
+        self._seed_fills(stats_db, [
+            ("1", "2026-04-25T09:00:00Z", "-10000", "50.00"),
+            ("2", "2026-04-26T10:00:00Z", "-10000", "-20.00"),
+        ])
+        result = runner.invoke(app, ["stats"])
+        assert "Total P/L" in result.output
+        assert "30.00" in result.output
+
+
 class TestPositionsCommand:
     @pytest.fixture()
     def pos_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
