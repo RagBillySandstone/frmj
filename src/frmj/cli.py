@@ -109,6 +109,48 @@ app.add_typer(config_app, name="config")
 
 
 # ---------------------------------------------------------------------------
+# Shell completion helpers
+# ---------------------------------------------------------------------------
+
+# All Oanda FX instruments used to drive tab completion.  This list does not
+# gate input — any instrument string is accepted regardless of whether it
+# appears here.  Sorted alphabetically within each group.
+_FX_PAIRS: tuple[str, ...] = (
+    # Majors
+    "AUD_USD", "EUR_USD", "GBP_USD", "NZD_USD",
+    "USD_CAD", "USD_CHF", "USD_JPY",
+    # Euro crosses
+    "EUR_AUD", "EUR_CAD", "EUR_CHF", "EUR_GBP",
+    "EUR_JPY", "EUR_NZD",
+    # Sterling crosses
+    "GBP_AUD", "GBP_CAD", "GBP_CHF", "GBP_JPY", "GBP_NZD",
+    # Antipodean / commodity crosses
+    "AUD_CAD", "AUD_CHF", "AUD_JPY", "AUD_NZD",
+    "CAD_CHF", "CAD_JPY",
+    "CHF_JPY",
+    "NZD_CAD", "NZD_CHF", "NZD_JPY",
+    # USD exotics
+    "USD_CNH", "USD_CZK", "USD_DKK", "USD_HKD", "USD_HUF",
+    "USD_MXN", "USD_NOK", "USD_PLN", "USD_SAR", "USD_SEK",
+    "USD_SGD", "USD_THB", "USD_TRY", "USD_ZAR",
+    # EUR exotics
+    "EUR_CZK", "EUR_DKK", "EUR_HUF", "EUR_NOK",
+    "EUR_PLN", "EUR_SEK", "EUR_TRY", "EUR_ZAR",
+    # Metals / spot commodities
+    "XAG_USD", "XAU_USD", "XCU_USD", "XPD_USD", "XPT_USD",
+)
+
+
+def _complete_instrument(incomplete: str) -> list[str]:
+    """Return FX pairs whose names start with *incomplete* (case-insensitive)."""
+    return [p for p in _FX_PAIRS if p.startswith(incomplete.upper())]
+
+
+def _complete_direction(incomplete: str) -> list[str]:
+    return [d for d in ("long", "short") if d.startswith(incomplete.lower())]
+
+
+# ---------------------------------------------------------------------------
 # sync command
 # ---------------------------------------------------------------------------
 
@@ -185,7 +227,11 @@ def positions() -> None:
 
 @app.command()
 def close(
-    instrument: str = typer.Argument(..., help="Instrument to close, e.g. EUR_USD"),
+    instrument: str = typer.Argument(
+        ...,
+        help="Instrument to close, e.g. EUR_USD",
+        autocompletion=_complete_instrument,
+    ),
 ) -> None:
     """Close all open tickets for an instrument."""
     conn = get_db()
@@ -339,10 +385,15 @@ def config_unset_token() -> None:
 @app.command()
 def trade(
     instrument: str | None = typer.Argument(
-        None, help="Oanda instrument, e.g. EUR_USD (omit with --resume)"
+        None,
+        help="Oanda instrument, e.g. EUR_USD (omit with --resume)",
+        autocompletion=_complete_instrument,
     ),
     direction_str: str | None = typer.Argument(
-        None, metavar="DIRECTION", help="long or short (omit with --resume)"
+        None,
+        metavar="DIRECTION",
+        help="long or short (omit with --resume)",
+        autocompletion=_complete_direction,
     ),
     dry_run: bool = typer.Option(
         False,
