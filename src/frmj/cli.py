@@ -764,6 +764,18 @@ def journal(
 ) -> None:
     """Show recent transactions with their notes."""
     conn = get_db()
+
+    # Auto-sync: best-effort; journal display proceeds even if sync fails.
+    try:
+        client = get_client(conn)
+        sync_result = sync_incremental(conn, client)
+        if sync_result.rows_ingested:
+            typer.echo(f"[sync] +{sync_result.rows_ingested} transactions")
+    except RuntimeError as exc:
+        typer.echo(f"[sync] Warning: {exc}", err=True)
+    except Exception as exc:
+        typer.echo(f"[sync] Warning: sync failed — {exc}", err=True)
+
     try:
         txns = conn.execute(
             """
@@ -776,7 +788,7 @@ def journal(
         ).fetchall()
 
         if not txns:
-            typer.echo("No transactions in local database. Run 'frmj sync' first.")
+            typer.echo("No transactions in local database.")
             return
 
         for txn in txns:
@@ -824,12 +836,25 @@ def _print_token_status() -> None:
         typer.echo(f"{token_label}  =  (not set — run: frmj config set-token)")
 
 
+def _color_pl(pl: Decimal) -> str:
+    """Return a P/L string colored green (profit) or red (loss)."""
+    sign = "+" if pl > 0 else ""
+    text = f"  {sign}${pl:,.2f}"
+    if pl > 0:
+        return typer.style(text, fg=typer.colors.GREEN)
+    if pl < 0:
+        return typer.style(text, fg=typer.colors.RED)
+    return text
+
+
 def _display_transaction(txn: sqlite3.Row) -> None:
     """Format one transaction row for journal display."""
     # Trim the ISO-8601 timestamp to seconds for readability.
     time_short = txn["time"][:19].replace("T", " ")
 
     extra = ""
+    pl: Decimal | None = None
+
     if txn["type"] == "ORDER_FILL":
         try:
             data = json.loads(txn["raw_json"])
@@ -837,10 +862,29 @@ def _display_transaction(txn: sqlite3.Row) -> None:
             units = int(Decimal(data.get("units", "0")))
             direction = "LONG" if units >= 0 else "SHORT"
             extra = f"  {instrument} {direction} {abs(units):,} units"
+            # pl is non-zero only on closing fills; opening fills carry "0".
+            pl_val = Decimal(data.get("pl", "0") or "0")
+            if pl_val != 0:
+                pl = pl_val
         except Exception:
             pass
 
-    typer.echo(f"{time_short}  {txn['type']:<24}  #{txn['oanda_id']}{extra}")
+    elif txn["type"] == "DAILY_FINANCING":
+        try:
+            data = json.loads(txn["raw_json"])
+            instrument = data.get("instrument", "")
+            if instrument:
+                extra = f"  {instrument}"
+            # Parent has "financing"; per-instrument children have "amount".
+            raw_amount = data.get("amount") or data.get("financing") or "0"
+            amount_val = Decimal(raw_amount)
+            if amount_val != 0:
+                pl = amount_val
+        except Exception:
+            pass
+
+    pl_str = _color_pl(pl) if pl is not None else ""
+    typer.echo(f"{time_short}  {txn['type']:<24}  #{txn['oanda_id']}{extra}{pl_str}")
 
 
 def _prompt_tpsl(label: str) -> TPSLSpec | None:

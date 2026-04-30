@@ -554,7 +554,15 @@ class TestJournalCommand:
     def journal_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         path = tmp_path / "journal_test.db"
         monkeypatch.setenv("FRMJ_DB_PATH", str(path))
-        get_db(path=path).close()
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        # Auto-sync is a no-op: returns 0 new rows so existing test output is stable.
+        monkeypatch.setattr(
+            "frmj.cli.get_client",
+            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+        )
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        conn.close()
         # Seed 5 transactions with distinct IDs and times.
         conn = sqlite3.connect(str(path))
         conn.execute("PRAGMA foreign_keys = ON")
@@ -592,10 +600,15 @@ class TestJournalCommand:
     ) -> None:
         path = tmp_path / "empty.db"
         monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        monkeypatch.setattr(
+            "frmj.cli.get_client",
+            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+        )
         get_db(path=path).close()
         result = runner.invoke(app, ["journal"])
         assert result.exit_code == 0
-        assert "sync" in result.output.lower()
+        assert "No transactions" in result.output
 
     def test_notes_appear_under_their_transaction(self, journal_db: Path) -> None:
         """A note seeded for transaction 1001 must appear indented below it."""
@@ -647,6 +660,128 @@ class TestJournalCommand:
         """Transactions without a plan must not show a 'Plan:' line."""
         result = runner.invoke(app, ["journal"])
         assert "Plan:" not in result.output
+
+    def test_auto_sync_ingested_count_shown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When auto-sync brings in new rows, the count is printed to stdout."""
+        path = tmp_path / "auto_sync.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        conn.close()
+        new_row = _row("9001")
+        monkeypatch.setattr(
+            "frmj.cli.get_client",
+            lambda conn: FakeClient(account_id="acct-1", responses=[[new_row]]),
+        )
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        assert "[sync] +1" in result.output
+        assert "9001" in result.output
+
+    def test_auto_sync_failure_still_shows_journal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Existing journal data is displayed even when auto-sync cannot run."""
+        path = tmp_path / "fail_sync.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
+        conn = get_db(path=path)
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+            "VALUES ('777', 'acct-1', 'ORDER_FILL', '2026-04-25T12:00:00.000000Z', '{}')"
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        assert "777" in result.output
+
+    def test_pl_shown_for_closing_order_fill(self, journal_db: Path) -> None:
+        """A closing ORDER_FILL (non-zero pl) shows the realised P/L amount."""
+        conn = sqlite3.connect(str(journal_db))
+        conn.execute(
+            "UPDATE transactions SET raw_json = ? WHERE oanda_id = '1001'",
+            ('{"instrument":"EUR_USD","units":"1000","pl":"45.23"}',),
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        assert "45.23" in result.output
+
+    def test_pl_not_shown_for_opening_order_fill(self, journal_db: Path) -> None:
+        """An opening ORDER_FILL (pl == 0) shows no P/L amount."""
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        # Seeded transactions have no pl / pl="0"; no dollar amounts in output.
+        assert "$" not in result.output
+
+    def test_pl_negative_shown_for_losing_trade(self, journal_db: Path) -> None:
+        """A losing closing fill (negative pl) shows the negative P/L amount."""
+        conn = sqlite3.connect(str(journal_db))
+        conn.execute(
+            "UPDATE transactions SET raw_json = ? WHERE oanda_id = '1002'",
+            ('{"instrument":"GBP_USD","units":"-2000","pl":"-18.40"}',),
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        assert "18.40" in result.output
+
+    def test_daily_financing_amount_shown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DAILY_FINANCING rows display the financing amount."""
+        path = tmp_path / "fin_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        monkeypatch.setattr(
+            "frmj.cli.get_client",
+            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+        )
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+            "VALUES ('5001', 'acct-1', 'DAILY_FINANCING', "
+            "'2026-04-25T22:00:00.000000Z', "
+            "'{\"financing\":\"-3.50\"}')"
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        assert "3.50" in result.output
+
+    def test_daily_financing_child_shows_instrument(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Per-instrument DAILY_FINANCING children show instrument and amount."""
+        path = tmp_path / "fin_child.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        monkeypatch.setattr(
+            "frmj.cli.get_client",
+            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+        )
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+            "VALUES ('5002', 'acct-1', 'DAILY_FINANCING', "
+            "'2026-04-25T22:00:00.000000Z', "
+            "'{\"instrument\":\"EUR_USD\",\"amount\":\"-1.25\"}')"
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        assert "EUR_USD" in result.output
+        assert "1.25" in result.output
 
 
 # ---------------------------------------------------------------------------
