@@ -3,9 +3,11 @@ FRoMaJ CLI — typer application.
 
 Commands
 --------
-``frmj sync [--cold]``
+``frmj sync [--cold] [--watch [--interval N]]``
     Sync transactions from Oanda. Incremental by default; ``--cold`` fetches
-    the full account history.
+    the full account history.  ``--watch`` enters a polling loop that runs
+    ``sync_incremental`` every *N* seconds (default 60) and prints new
+    transactions as they arrive.  Exits cleanly on Ctrl+C.
 
 ``frmj config set <key> <value>``
     Write a config key/value to the database.
@@ -72,6 +74,8 @@ import io
 import json
 import os
 import sqlite3
+import time
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import httpx
@@ -182,8 +186,27 @@ def sync(
         "--cold",
         help="Full history re-fetch instead of incremental.",
     ),
+    watch: bool = typer.Option(
+        False,
+        "--watch",
+        "-w",
+        help="Poll for new transactions continuously (incremental only).",
+    ),
+    interval: int = typer.Option(
+        60,
+        "--interval",
+        help="Polling interval in seconds when --watch is active.",
+    ),
 ) -> None:
     """Sync transactions from Oanda."""
+    if watch and cold:
+        typer.echo("Error: --watch and --cold cannot be used together.", err=True)
+        raise typer.Exit(1)
+
+    if watch:
+        _watch_loop(interval)
+        return
+
     conn = get_db()
     try:
         client = get_client(conn)
@@ -1063,6 +1086,72 @@ def journal(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _watch_loop(interval: int) -> None:
+    """Poll ``sync_incremental`` every *interval* seconds until Ctrl+C.
+
+    New transactions are printed as they arrive using ``_display_transaction``.
+    When no cursor exists (first run), only the count is reported to avoid
+    flooding the terminal with historical rows.
+    Sync errors are printed to stderr but the loop continues.
+    """
+    conn = get_db()
+    try:
+        client = get_client(conn)
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        conn.close()
+        raise typer.Exit(1)
+
+    typer.echo(
+        f"Watching for new transactions (every {interval}s) — Ctrl+C to stop."
+    )
+
+    try:
+        while True:
+            now_str = datetime.now(tz=timezone.utc).strftime("%H:%M:%S")
+            # Read cursor before sync so we can identify new rows afterwards.
+            cursor_row = conn.execute(
+                "SELECT last_oanda_id FROM sync_cursors WHERE account_id = ?",
+                (client.account_id,),
+            ).fetchone()
+            prev_id: str | None = cursor_row[0] if cursor_row else None
+
+            try:
+                result = sync_incremental(conn, client)
+            except Exception as exc:
+                typer.echo(f"[{now_str}] Sync error: {exc}", err=True)
+                time.sleep(interval)
+                continue
+
+            if result.rows_ingested:
+                if prev_id is not None:
+                    new_txns = conn.execute(
+                        """
+                        SELECT id, oanda_id, type, time, raw_json
+                        FROM transactions
+                        WHERE account_id = ?
+                          AND CAST(oanda_id AS INTEGER) > CAST(? AS INTEGER)
+                        ORDER BY time ASC
+                        """,
+                        (client.account_id, prev_id),
+                    ).fetchall()
+                    typer.echo(f"[{now_str}] +{result.rows_ingested} new:")
+                    for txn in new_txns:
+                        _display_transaction(txn)
+                else:
+                    # First run was a cold sync — don't flood the terminal.
+                    typer.echo(
+                        f"[{now_str}] Initial sync: {result.rows_ingested} "
+                        "transactions loaded. Run 'frmj journal' to view."
+                    )
+
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        typer.echo("\nStopped.")
+    finally:
+        conn.close()
 
 
 def _display_stats(trades: list[ClosedTrade]) -> None:
