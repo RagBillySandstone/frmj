@@ -342,6 +342,36 @@ def _extract_bid_ask(payload: dict[str, Any]) -> tuple[Decimal, Decimal]:
 # ---------------------------------------------------------------------------
 
 
+def _compute_conversion_rate(
+    currency: str,
+    home: str,
+    mids: dict[str, Decimal],
+) -> Decimal:
+    """Pure: convert one unit of *currency* into *home* currency.
+
+    Consults *mids* (a ``{instrument_name: mid_price}`` dict) to find the
+    rate.  Tries the direct quote ``{currency}_{home}`` first; falls back to
+    the inverted quote ``{home}_{currency}``.  Returns ``Decimal("1")`` when
+    ``currency == home`` — no lookup required.
+
+    Raises ``ValueError`` when neither pair is present in *mids*.  The HTTP
+    layer (``_currency_to_home``) is responsible for populating the dict
+    before calling this function.
+    """
+    if currency == home:
+        return Decimal("1")
+    direct = f"{currency}_{home}"
+    if direct in mids:
+        return mids[direct]
+    inverted = f"{home}_{currency}"
+    if inverted in mids:
+        return Decimal("1") / mids[inverted]
+    raise ValueError(
+        f"Cannot convert {currency} to {home}: "
+        f"neither {direct} nor {inverted} in provided mid prices"
+    )
+
+
 def _resolve_financing_parents(rows: list[TransactionRow]) -> list[TransactionRow]:
     """Stamp ``parent_oanda_id`` on DAILY_FINANCING child rows.
 
@@ -527,8 +557,8 @@ class OandaClient:
            ``quote_to_home = 1``, ``base_to_home = mid``.
         2. ``base == home`` (e.g., USD_JPY on USD account):
            ``base_to_home = 1``, ``quote_to_home = 1 / mid``.
-        3. Cross-pair (e.g., EUR_GBP on USD account): fetches two additional
-           prices to resolve both conversion rates.
+        3. Cross-pair (e.g., EUR_GBP on USD account): fetches one additional
+           price per side via ``_currency_to_home`` to resolve both rates.
 
         The cross-pair path makes extra HTTP calls. For the instruments
         Stephen typically trades (major USD pairs), path 1 or 2 is always
@@ -780,27 +810,31 @@ class OandaClient:
         return (bid + ask) / 2
 
     def _currency_to_home(self, currency: str, home: str) -> Decimal:
-        """Return how many *home*-currency units one unit of *currency* is worth.
+        """HTTP: fetch mid price(s) and delegate to ``_compute_conversion_rate``.
 
-        Tries ``{currency}_{home}`` first (direct quote).  If Oanda doesn't
-        know that pair (404 or empty), tries ``{home}_{currency}`` and inverts.
-        Raises ``ValueError`` when neither pair exists — this means we'd need a
-        three-leg conversion that we don't yet support.
+        Fetches whichever of ``{currency}_{home}`` or ``{home}_{currency}``
+        Oanda knows about, then calls the pure conversion helper.  Raises
+        ``ValueError`` when neither pair is available on this account.
         """
         if currency == home:
             return Decimal("1")
+        direct = f"{currency}_{home}"
+        inverted = f"{home}_{currency}"
+        mids: dict[str, Decimal] = {}
         try:
-            return self._fetch_mid(f"{currency}_{home}")
+            mids[direct] = self._fetch_mid(direct)
         except httpx.HTTPStatusError:
             pass
-        try:
-            return Decimal("1") / self._fetch_mid(f"{home}_{currency}")
-        except httpx.HTTPStatusError:
-            raise ValueError(
-                f"Cannot determine {currency}/{home} conversion rate: "
-                f"neither {currency}_{home} nor {home}_{currency} "
-                f"is a recognised Oanda pair for this account"
-            )
+        if direct not in mids:
+            try:
+                mids[inverted] = self._fetch_mid(inverted)
+            except httpx.HTTPStatusError:
+                raise ValueError(
+                    f"Cannot determine {currency}/{home} conversion rate: "
+                    f"neither {direct} nor {inverted} "
+                    f"is a recognised Oanda pair for this account"
+                ) from None
+        return _compute_conversion_rate(currency, home, mids)
 
     def _parse_transaction(self, txn: dict[str, Any]) -> TransactionRow:
         """Extract the fields we index from one Oanda transaction dict.

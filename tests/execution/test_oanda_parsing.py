@@ -21,6 +21,7 @@ from frmj.execution.oanda import (
     CloseFill,
     OpenTrade,
     TransactionRow,
+    _compute_conversion_rate,
     _extract_bid_ask,
     _parse_account_summary,
     _parse_close_fill,
@@ -437,3 +438,98 @@ class TestResolveFinancingParents:
         rows = [parent, _financing_row("1001"), _financing_row("1002")]
         result = _resolve_financing_parents(rows)
         assert len(result) == len(rows)
+
+
+# ---------------------------------------------------------------------------
+# _compute_conversion_rate
+# ---------------------------------------------------------------------------
+
+
+class TestComputeConversionRate:
+    # ---- trivial path -------------------------------------------------------
+
+    def test_same_currency_returns_one(self) -> None:
+        """No lookup needed when currency already is home."""
+        result = _compute_conversion_rate("USD", "USD", {})
+        assert result == Decimal("1")
+
+    def test_same_currency_ignores_mids_dict(self) -> None:
+        """The mids dict is irrelevant when currency == home."""
+        result = _compute_conversion_rate("GBP", "GBP", {"GBP_GBP": Decimal("99")})
+        assert result == Decimal("1")
+
+    # ---- direct quote -------------------------------------------------------
+
+    def test_direct_quote_eur_usd(self) -> None:
+        """EUR_USD on a USD account: direct pair exists."""
+        mids = {"EUR_USD": Decimal("1.0800")}
+        result = _compute_conversion_rate("EUR", "USD", mids)
+        assert result == Decimal("1.0800")
+
+    def test_direct_quote_gbp_usd(self) -> None:
+        mids = {"GBP_USD": Decimal("1.2700")}
+        result = _compute_conversion_rate("GBP", "USD", mids)
+        assert result == Decimal("1.2700")
+
+    def test_direct_quote_returns_decimal(self) -> None:
+        mids = {"AUD_USD": Decimal("0.6500")}
+        result = _compute_conversion_rate("AUD", "USD", mids)
+        assert isinstance(result, Decimal)
+
+    # ---- inverted quote -----------------------------------------------------
+
+    def test_inverted_quote_usd_chf(self) -> None:
+        """CHF→USD when only USD_CHF is available: invert the rate."""
+        mids = {"USD_CHF": Decimal("0.8900")}
+        result = _compute_conversion_rate("CHF", "USD", mids)
+        assert result == Decimal("1") / Decimal("0.8900")
+
+    def test_inverted_quote_usd_jpy(self) -> None:
+        """JPY→USD when only USD_JPY is available."""
+        mids = {"USD_JPY": Decimal("150.00")}
+        result = _compute_conversion_rate("JPY", "USD", mids)
+        assert result == Decimal("1") / Decimal("150.00")
+
+    def test_direct_takes_priority_over_inverted(self) -> None:
+        """When both direct and inverted are present, direct wins."""
+        mids = {
+            "EUR_USD": Decimal("1.0800"),
+            "USD_EUR": Decimal("0.9259"),
+        }
+        result = _compute_conversion_rate("EUR", "USD", mids)
+        assert result == Decimal("1.0800")
+
+    # ---- missing pair → ValueError -----------------------------------------
+
+    def test_neither_pair_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="Cannot convert"):
+            _compute_conversion_rate("EUR", "USD", {})
+
+    def test_error_message_names_both_pairs(self) -> None:
+        """The error text should name the two pairs that were tried."""
+        with pytest.raises(ValueError, match="GBP_USD") as exc_info:
+            _compute_conversion_rate("GBP", "USD", {})
+        assert "USD_GBP" in str(exc_info.value)
+
+    def test_irrelevant_pairs_do_not_help(self) -> None:
+        """Having GBP_EUR in mids does not satisfy a GBP→USD lookup."""
+        with pytest.raises(ValueError):
+            _compute_conversion_rate("GBP", "USD", {"GBP_EUR": Decimal("1.15")})
+
+    # ---- cross-pair scenario (USD account, EUR_GBP instrument) -------------
+
+    def test_cross_pair_base_leg(self) -> None:
+        """EUR→USD conversion for the base leg of EUR_GBP on a USD account."""
+        mids = {"EUR_USD": Decimal("1.0800")}
+        assert _compute_conversion_rate("EUR", "USD", mids) == Decimal("1.0800")
+
+    def test_cross_pair_quote_leg(self) -> None:
+        """GBP→USD conversion for the quote leg of EUR_GBP on a USD account."""
+        mids = {"GBP_USD": Decimal("1.2700")}
+        assert _compute_conversion_rate("GBP", "USD", mids) == Decimal("1.2700")
+
+    def test_cross_pair_quote_leg_via_inversion(self) -> None:
+        """JPY→USD for USD_JPY instrument as the quote leg (inverted)."""
+        mids = {"USD_JPY": Decimal("150.00")}
+        result = _compute_conversion_rate("JPY", "USD", mids)
+        assert result == Decimal("1") / Decimal("150.00")
