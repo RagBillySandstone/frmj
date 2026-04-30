@@ -84,6 +84,7 @@ from frmj.domain.pricing import (
     TPSLKind,
     TPSLSpec,
     compute_exit_levels,
+    pip_value_home,
 )
 from frmj.domain.risk import MaxTradesExceeded, ScaleInForbidden, evaluate_trade
 from frmj.domain.sizing import Direction, compute_units
@@ -547,8 +548,11 @@ def trade(
             typer.echo(f"  Size fraction:   {frac.numerator}/{frac.denominator}")
         typer.echo(f"  Capital at risk: ${sizing_decision.capital_to_deploy:,.2f}")
         typer.echo("")
+        pv = pip_value_home(units_calc.units, spec, quote)
+        pip_pct = pv / units_calc.margin_used * Decimal("100")
         typer.echo(f"  Units:   {units_calc.units:,}")
         typer.echo(f"  Margin:  ${units_calc.margin_used:,.2f}")
+        typer.echo(f"  Pip:     ${pv:.2f}  ({pip_pct:.2f}% of margin)")
         typer.echo(f"  Entry:   {entry_price} ({direction_str})")
         typer.echo(f"  Unused:  ${units_calc.capital_unused:,.2f}")
         typer.echo("")

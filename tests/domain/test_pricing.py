@@ -28,6 +28,7 @@ from frmj.domain.pricing import (
     TPSLSpec,
     compute_exit_levels,
     pip_size,
+    pip_value_home,
 )
 from frmj.domain.sizing import Direction, InstrumentSpec, PriceQuote
 
@@ -476,3 +477,47 @@ class TestInputValidation:
     def test_nonpositive_margin_raises(self, bad: Decimal) -> None:
         with pytest.raises(ValueError):
             _call(margin=bad)
+
+
+# ---------------------------------------------------------------------------
+# pip_value_home
+# ---------------------------------------------------------------------------
+
+
+class TestPipValueHome:
+    def test_eur_usd_usd_account(self) -> None:
+        # 10_000 units EUR_USD, quote_to_home=1: pip = 10_000 * 0.0001 * 1 = $1.00
+        result = pip_value_home(10_000, _eur_usd_spec(), _eur_usd_quote())
+        assert result == Decimal("1")
+
+    def test_scales_linearly_with_units(self) -> None:
+        # Doubling units doubles pip value.
+        small = pip_value_home(5_000, _eur_usd_spec(), _eur_usd_quote())
+        large = pip_value_home(10_000, _eur_usd_spec(), _eur_usd_quote())
+        assert large == 2 * small
+
+    def test_usd_jpy_inverted_quote_to_home(self) -> None:
+        # USD_JPY at 100.00: quote_to_home = 1/100, pip_size = 0.01
+        # pip_value = 10_000 * 0.01 * (1/100) = $1.00
+        spec = _usd_jpy_spec()
+        quote = _usd_jpy_quote(Decimal("100.00"))
+        result = pip_value_home(10_000, spec, quote)
+        assert result == Decimal("1")
+
+    def test_returns_decimal(self) -> None:
+        result = pip_value_home(1_000, _eur_usd_spec(), _eur_usd_quote())
+        assert isinstance(result, Decimal)
+
+    def test_pip_pct_of_margin_eur_usd(self) -> None:
+        # 10_000 EUR_USD units at price 1.10, margin_rate 0.02:
+        #   margin = 10_000 * 0.02 * 1.10 = $220
+        #   pip_value = $1.00
+        #   pip_pct = 1/220 * 100 ≈ 0.4545%
+        pv = pip_value_home(10_000, _eur_usd_spec(), _eur_usd_quote(Decimal("1.10")))
+        margin = Decimal("10000") * Decimal("0.02") * Decimal("1.10")
+        pip_pct = pv / margin * Decimal("100")
+        assert round(pip_pct, 4) == round(Decimal("1") / margin * 100, 4)
+
+    def test_always_positive(self) -> None:
+        result = pip_value_home(1_000, _eur_usd_spec(), _eur_usd_quote())
+        assert result > 0

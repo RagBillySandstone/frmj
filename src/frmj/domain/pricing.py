@@ -132,6 +132,19 @@ def pip_size(spec: InstrumentSpec) -> Decimal:
     return Decimal(10) ** spec.pip_location
 
 
+def pip_value_home(units: int, spec: InstrumentSpec, quote: PriceQuote) -> Decimal:
+    """Home-currency P&L of a one-pip move on a position of *units*.
+
+    Equivalent to the dollar gain/loss per pip tick:
+
+        pip_value = units × pip_size × quote_to_home
+
+    Always positive — direction (gain vs loss) depends on whether price moved
+    with or against the trade, which the caller handles separately.
+    """
+    return Decimal(units) * pip_size(spec) * quote.quote_to_home
+
+
 def _favorable_offset_in_quote(
     *,
     target: TPSLSpec,
