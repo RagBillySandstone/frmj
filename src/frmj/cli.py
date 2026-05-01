@@ -321,16 +321,14 @@ def close(
     typer.echo(f"{len(trades)} open {label} for {instrument}:")
     typer.echo("─" * 40)
     for t in trades:
-        pl_sign = "+" if t.unrealised_pl >= 0 else ""
         typer.echo(
             f"  #{t.trade_id}  {t.direction}  {t.units:,} units"
-            f"  @ {t.open_price}  P/L: {pl_sign}${t.unrealised_pl:,.2f}"
+            f"  @ {t.open_price}  P/L: {_pl_str(t.unrealised_pl)}"
         )
 
     if len(trades) > 1:
         total_pl = sum(t.unrealised_pl for t in trades)
-        pl_sign = "+" if total_pl >= 0 else ""
-        typer.echo(f"\n  Total P/L: {pl_sign}${total_pl:,.2f}")
+        typer.echo(f"\n  Total P/L: {_pl_str(total_pl)}")
 
     typer.echo("")
     if not typer.confirm(f"Close {len(trades)} {label}?", default=False):
@@ -342,10 +340,9 @@ def close(
     for t in trades:
         try:
             result = client.close_trade(t.trade_id)
-            pl_sign = "+" if result.realised_pl >= 0 else ""
             typer.echo(
                 f"  #{t.trade_id} closed at {result.close_price}"
-                f"  P/L: {pl_sign}${result.realised_pl:,.2f}"
+                f"  P/L: {_pl_str(result.realised_pl)}"
                 f"  (txn #{result.transaction_id})"
             )
             closed += 1
@@ -1721,6 +1718,13 @@ def _display_exits(exits: ExitLevels, margin_used: Decimal) -> None:
         typer.echo(f"  ! {warn}", err=True)
 
 
+def _pl_str(amount: Decimal) -> str:
+    """Return a sign-prefixed, coloured P/L string: green ≥0, red <0."""
+    sign = "+" if amount >= 0 else ""
+    color = typer.colors.GREEN if amount >= 0 else typer.colors.RED
+    return typer.style(f"{sign}${amount:,.2f}", fg=color)
+
+
 def _display_open_trade(conn: sqlite3.Connection, trade: OpenTrade) -> None:
     """Print one open trade in the positions view."""
     note_count = conn.execute(
@@ -1734,7 +1738,6 @@ def _display_open_trade(conn: sqlite3.Connection, trade: OpenTrade) -> None:
     note_flag = "  [note]" if note_count else ""
 
     time_short = trade.open_time[:19].replace("T", " ")
-    pl_sign = "+" if trade.unrealised_pl >= 0 else ""
 
     typer.echo(
         f"  #{trade.trade_id}  {trade.instrument}  {trade.direction}"
@@ -1750,7 +1753,7 @@ def _display_open_trade(conn: sqlite3.Connection, trade: OpenTrade) -> None:
     exits_str = "  ".join(exits_parts) if exits_parts else "no TP/SL set"
 
     typer.echo(
-        f"         P/L: {pl_sign}${trade.unrealised_pl:,.2f}"
+        f"         P/L: {_pl_str(trade.unrealised_pl)}"
         f"  margin: ${trade.margin_used:,.2f}"
         f"  {exits_str}"
     )
