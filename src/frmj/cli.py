@@ -159,33 +159,33 @@ app.add_typer(config_app, name="config")
 # appears here.  Sorted alphabetically within each group.
 _FX_PAIRS: tuple[str, ...] = (
     # Majors
-    "AUD_USD", "EUR_USD", "GBP_USD", "NZD_USD",
-    "USD_CAD", "USD_CHF", "USD_JPY",
+    "aud_usd", "eur_usd", "gbp_usd", "nzd_usd",
+    "usd_cad", "usd_chf", "usd_jpy",
     # Euro crosses
-    "EUR_AUD", "EUR_CAD", "EUR_CHF", "EUR_GBP",
-    "EUR_JPY", "EUR_NZD",
+    "eur_aud", "eur_cad", "eur_chf", "eur_gbp",
+    "eur_jpy", "eur_nzd",
     # Sterling crosses
-    "GBP_AUD", "GBP_CAD", "GBP_CHF", "GBP_JPY", "GBP_NZD",
+    "gbp_aud", "gbp_cad", "gbp_chf", "gbp_jpy", "gbp_nzd",
     # Antipodean / commodity crosses
-    "AUD_CAD", "AUD_CHF", "AUD_JPY", "AUD_NZD",
-    "CAD_CHF", "CAD_JPY",
-    "CHF_JPY",
-    "NZD_CAD", "NZD_CHF", "NZD_JPY",
+    "aud_cad", "aud_chf", "aud_jpy", "aud_nzd",
+    "cad_chf", "cad_jpy",
+    "chf_jpy",
+    "nzd_cad", "nzd_chf", "nzd_jpy",
     # USD exotics
-    "USD_CNH", "USD_CZK", "USD_DKK", "USD_HKD", "USD_HUF",
-    "USD_MXN", "USD_NOK", "USD_PLN", "USD_SAR", "USD_SEK",
-    "USD_SGD", "USD_THB", "USD_TRY", "USD_ZAR",
+    "usd_cnh", "usd_czk", "usd_dkk", "usd_hkd", "usd_huf",
+    "usd_mxn", "usd_nok", "usd_pln", "usd_sar", "usd_sek",
+    "usd_sgd", "usd_thb", "usd_try", "usd_zar",
     # EUR exotics
-    "EUR_CZK", "EUR_DKK", "EUR_HUF", "EUR_NOK",
-    "EUR_PLN", "EUR_SEK", "EUR_TRY", "EUR_ZAR",
+    "eur_czk", "eur_dkk", "eur_huf", "eur_nok",
+    "eur_pln", "eur_sek", "eur_try", "eur_zar",
     # Metals / spot commodities
-    "XAG_USD", "XAU_USD", "XCU_USD", "XPD_USD", "XPT_USD",
+    "xag_usd", "xau_usd", "xcu_usd", "xpd_usd", "xpt_usd",
 )
 
 
 def _complete_instrument(incomplete: str) -> list[str]:
     """Return FX pairs whose names start with *incomplete* (case-insensitive)."""
-    return [p for p in _FX_PAIRS if p.startswith(incomplete.upper())]
+    return [p for p in _FX_PAIRS if p.startswith(incomplete.lower())]
 
 
 def _complete_direction(incomplete: str) -> list[str]:
