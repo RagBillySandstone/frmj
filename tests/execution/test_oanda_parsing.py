@@ -40,12 +40,22 @@ from frmj.domain.sizing import InstrumentSpec
 
 def _account_payload(
     nav: str = "12450.00",
+    balance: str = "10000.00",
+    unrealized_pl: str = "2450.00",
+    realized_pl: str = "800.00",
+    position_value: str = "220000.00",
+    margin_used: str = "2200.00",
     margin_available: str = "5000.00",
     open_trade_count: int = 2,
 ) -> dict:
     return {
         "account": {
             "NAV": nav,
+            "balance": balance,
+            "unrealizedPL": unrealized_pl,
+            "pl": realized_pl,
+            "positionValue": position_value,
+            "marginUsed": margin_used,
             "marginAvailable": margin_available,
             "openTradeCount": open_trade_count,
         }

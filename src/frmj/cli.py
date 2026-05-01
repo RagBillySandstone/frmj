@@ -129,7 +129,7 @@ from frmj.domain.risk import (
     evaluate_trade,
 )
 from frmj.domain.sizing import Direction, compute_units
-from frmj.execution.oanda import CloseFill, OpenTrade
+from frmj.execution.oanda import AccountSummary, CloseFill, OpenTrade
 from frmj.execution.sync import sync_cold, sync_incremental
 
 # ---------------------------------------------------------------------------
@@ -261,6 +261,7 @@ def positions() -> None:
 
     try:
         trades = client.get_open_trades()
+        summary = client.get_account_summary()
     except Exception as exc:
         typer.echo(f"Error fetching open positions: {exc}", err=True)
         conn.close()
@@ -277,6 +278,9 @@ def positions() -> None:
 
     for trade in trades:
         _display_open_trade(conn, trade)
+
+    typer.echo("─" * 56)
+    _display_account_summary(summary)
 
     conn.close()
 
@@ -1759,6 +1763,23 @@ def _display_open_trade(conn: sqlite3.Connection, trade: OpenTrade) -> None:
         f"  margin: ${trade.margin_used:,.2f}"
         f"  {exits_str}"
     )
+    typer.echo("")
+
+
+def _display_account_summary(summary: AccountSummary) -> None:
+    """Print account-level summary rows beneath the positions table."""
+    rows: list[tuple[str, str]] = [
+        ("NAV",              f"${summary.nav:,.2f}"),
+        ("Unrealized P/L",  _pl_str(summary.unrealized_pl)),
+        ("Balance",         f"${summary.balance:,.2f}"),
+        ("Realized P/L",    _pl_str(summary.realized_pl)),
+        ("Position Value",  f"${summary.position_value:,.2f}"),
+        ("Margin Used",     f"${summary.margin_used:,.2f}"),
+        ("Margin Available", f"${summary.margin_available:,.2f}"),
+    ]
+    label_width = max(len(label) for label, _ in rows)
+    for label, value in rows:
+        typer.echo(f"  {label:<{label_width}}  {value}")
     typer.echo("")
 
 

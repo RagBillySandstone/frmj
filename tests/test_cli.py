@@ -751,6 +751,11 @@ class FakeFullClient:
     def get_account_summary(self) -> AccountSummary:
         return AccountSummary(
             nav=Decimal("10000.00"),
+            balance=Decimal("9500.00"),
+            unrealized_pl=Decimal("500.00"),
+            realized_pl=Decimal("1200.00"),
+            position_value=Decimal("220000.00"),
+            margin_used=Decimal("2000.00"),
             margin_available=Decimal("8000.00"),
             open_trade_count=2,
         )

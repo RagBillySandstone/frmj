@@ -184,6 +184,11 @@ class AccountSummary:
     """
 
     nav: Decimal
+    balance: Decimal
+    unrealized_pl: Decimal
+    realized_pl: Decimal
+    position_value: Decimal
+    margin_used: Decimal
     margin_available: Decimal
     open_trade_count: int
 
@@ -281,6 +286,11 @@ def _parse_account_summary(payload: dict[str, Any]) -> AccountSummary:
     acct = payload["account"]
     return AccountSummary(
         nav=Decimal(acct["NAV"]),
+        balance=Decimal(acct["balance"]),
+        unrealized_pl=Decimal(acct.get("unrealizedPL", "0")),
+        realized_pl=Decimal(acct.get("pl", "0")),
+        position_value=Decimal(acct.get("positionValue", "0")),
+        margin_used=Decimal(acct.get("marginUsed", "0")),
         margin_available=Decimal(acct["marginAvailable"]),
         open_trade_count=int(acct["openTradeCount"]),
     )
