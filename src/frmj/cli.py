@@ -295,6 +295,7 @@ def close(
     ),
 ) -> None:
     """Close all open tickets for an instrument."""
+    instrument = instrument.upper()
     conn = get_db()
     try:
         client = get_client(conn)
@@ -652,6 +653,7 @@ def trade(
         if instrument is None or direction_str is None:
             typer.echo("Error: instrument and direction are required.", err=True)
             raise typer.Exit(1)
+        instrument = instrument.upper()
         direction_str = direction_str.lower()
         if direction_str not in ("long", "short"):
             typer.echo("DIRECTION must be 'long' or 'short'.", err=True)
