@@ -125,6 +125,13 @@ def set_config(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.commit()
 
 
+def delete_config(conn: sqlite3.Connection, key: str) -> bool:
+    """Delete *key* from the config table.  Returns True if a row was removed."""
+    cursor = conn.execute("DELETE FROM config WHERE key = ?", (key,))
+    conn.commit()
+    return cursor.rowcount > 0
+
+
 def get_all_config(conn: sqlite3.Connection) -> list[tuple[str, str]]:
     """Return all config rows as ``(key, value)`` pairs sorted by key."""
     rows = conn.execute(

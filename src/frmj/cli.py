@@ -12,6 +12,9 @@ Commands
 ``frmj config set <key> <value>``
     Write a config key/value to the database.
 
+``frmj config unset <key>``
+    Remove a config key from the database.  Exits 1 if the key was not set.
+
 ``frmj config get [<key>]``
     Read a config key from the database.  Omit the key to display all
     currently configured values (token status is shown but never the value).
@@ -94,6 +97,7 @@ import typer
 
 from frmj.app import (
     clear_draft_plan,
+    delete_config,
     delete_token,
     get_all_config,
     get_client,
@@ -415,6 +419,23 @@ def config_get(
         typer.echo(f"{key} is not set.")
         raise typer.Exit(1)
     typer.echo(value)
+
+
+@config_app.command("unset")
+def config_unset(
+    key: str = typer.Argument(..., help="Config key to remove, e.g. account_id"),
+) -> None:
+    """Remove a configuration key from the database."""
+    conn = get_db()
+    try:
+        removed = delete_config(conn, key)
+    finally:
+        conn.close()
+    if removed:
+        typer.echo(f"Unset {key}.")
+    else:
+        typer.echo(f"{key} was not set.")
+        raise typer.Exit(1)
 
 
 @config_app.command("set-token")
