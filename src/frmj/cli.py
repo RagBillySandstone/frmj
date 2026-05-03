@@ -373,6 +373,20 @@ def close(
 # config sub-commands
 # ---------------------------------------------------------------------------
 
+#: Keys accepted by ``frmj config set``.  The API token is excluded because it
+#: is stored in the OS keychain via ``config set-token``, not in the DB.
+VALID_CONFIG_KEYS: frozenset[str] = frozenset({
+    "account_id",
+    "blocking_mode",
+    "fixed_dollar",
+    "max_open_trades",
+    "percent_of_equity",
+    "practice_mode",
+    "risk_strategy",
+    "safety_reserve_pct",
+    "scale_in",
+})
+
 
 @config_app.command("set")
 def config_set(
@@ -380,6 +394,11 @@ def config_set(
     value: str = typer.Argument(..., help="Config value"),
 ) -> None:
     """Set a configuration value."""
+    if key not in VALID_CONFIG_KEYS:
+        valid = ", ".join(sorted(VALID_CONFIG_KEYS))
+        typer.echo(f"Error: '{key}' is not a valid config key.", err=True)
+        typer.echo(f"Valid keys: {valid}", err=True)
+        raise typer.Exit(1)
     conn = get_db()
     try:
         set_config(conn, key, value)
