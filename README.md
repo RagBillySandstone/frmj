@@ -1,5 +1,7 @@
 # FRoMaJ
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **Forex Risk Operations, Management & Journal** — a CLI trading assistant for Oanda.
 
 FRoMaJ handles the mechanical parts of a discretionary FX trading workflow: position sizing, TP/SL planning, order execution, and a local transaction journal. The risk model is pure and decoupled so the CLI is a thin shell over it; a GUI or API layer can be wired in later without touching the domain.
