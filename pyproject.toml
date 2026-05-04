@@ -3,6 +3,7 @@ name = "frmj"
 version = "0.1.0"
 description = "FRoMaJ — Forex Risk Operations, Management & Journal (Oanda trading assistant)"
 readme = "README.md"
+license = { file = "LICENSE" }
 authors = [
     { name = "Molingus", email = "stephen.c976@gmail.com" }
 ]
