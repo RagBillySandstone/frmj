@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
+_DAY_NAMES: tuple[str, ...] = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
 
 # ---------------------------------------------------------------------------
 # Input record
@@ -71,21 +73,28 @@ def compute_summary(trades: list[ClosedTrade]) -> TradeSummary | None:
     if not trades:
         return None
     total = len(trades)
-    wins = sum(1 for t in trades if t.pl > 0)
-    losses = sum(1 for t in trades if t.pl < 0)
-    breakeven = total - wins - losses
-    total_pl = sum((t.pl for t in trades), Decimal(0))
-    avg_pl = total_pl / Decimal(total)
-    best_pl = max(t.pl for t in trades)
-    worst_pl = min(t.pl for t in trades)
-    win_rate = Decimal(wins) / Decimal(total)
+    wins = 0
+    losses = 0
+    total_pl = Decimal(0)
+    best_pl = trades[0].pl
+    worst_pl = trades[0].pl
+    for t in trades:
+        if t.pl > 0:
+            wins += 1
+        elif t.pl < 0:
+            losses += 1
+        total_pl += t.pl
+        if t.pl > best_pl:
+            best_pl = t.pl
+        if t.pl < worst_pl:
+            worst_pl = t.pl
     return TradeSummary(
         total=total,
         wins=wins,
         losses=losses,
-        breakeven=breakeven,
-        win_rate=win_rate,
-        avg_pl=avg_pl,
+        breakeven=total - wins - losses,
+        win_rate=Decimal(wins) / Decimal(total),
+        avg_pl=total_pl / Decimal(total),
         total_pl=total_pl,
         best_pl=best_pl,
         worst_pl=worst_pl,
@@ -101,15 +110,14 @@ def pl_by_instrument(
     trades: list[ClosedTrade],
 ) -> list[tuple[str, int, Decimal, Decimal]]:
     """Return ``(instrument, count, total_pl, avg_pl)`` sorted by total_pl desc."""
-    groups: dict[str, list[Decimal]] = {}
+    groups: dict[str, tuple[int, Decimal]] = {}
     for t in trades:
-        groups.setdefault(t.instrument, []).append(t.pl)
-    rows: list[tuple[str, int, Decimal, Decimal]] = []
-    for instr, pls in groups.items():
-        count = len(pls)
-        total = sum(pls, Decimal(0))
-        avg = total / Decimal(count)
-        rows.append((instr, count, total, avg))
+        count, total = groups.get(t.instrument, (0, Decimal(0)))
+        groups[t.instrument] = (count + 1, total + t.pl)
+    rows: list[tuple[str, int, Decimal, Decimal]] = [
+        (instr, count, total, total / Decimal(count))
+        for instr, (count, total) in groups.items()
+    ]
     rows.sort(key=lambda r: r[2], reverse=True)
     return rows
 
@@ -121,18 +129,16 @@ def pl_by_hour(
 
     Hours with no trades are omitted to keep the table compact.
     """
-    groups: dict[int, list[Decimal]] = {}
+    groups: dict[int, tuple[int, Decimal]] = {}
     for t in trades:
         try:
-            dt = datetime.fromisoformat(t.time.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(t.time)
         except ValueError:
             continue
-        groups.setdefault(dt.hour, []).append(t.pl)
-    return [
-        (h, len(groups[h]), sum(groups[h], Decimal(0)))
-        for h in range(24)
-        if h in groups
-    ]
+        h = dt.hour
+        count, total = groups.get(h, (0, Decimal(0)))
+        groups[h] = (count + 1, total + t.pl)
+    return [(h, groups[h][0], groups[h][1]) for h in range(24) if h in groups]
 
 
 def pl_by_weekday(
@@ -142,16 +148,13 @@ def pl_by_weekday(
 
     Days with no trades are omitted to keep the table compact.
     """
-    _DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    groups: dict[int, list[Decimal]] = {}
+    groups: dict[int, tuple[int, Decimal]] = {}
     for t in trades:
         try:
-            dt = datetime.fromisoformat(t.time.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(t.time)
         except ValueError:
             continue
-        groups.setdefault(dt.weekday(), []).append(t.pl)
-    return [
-        (_DAY_NAMES[d], len(groups[d]), sum(groups[d], Decimal(0)))
-        for d in range(7)
-        if d in groups
-    ]
+        d = dt.weekday()
+        count, total = groups.get(d, (0, Decimal(0)))
+        groups[d] = (count + 1, total + t.pl)
+    return [(_DAY_NAMES[d], groups[d][0], groups[d][1]) for d in range(7) if d in groups]
