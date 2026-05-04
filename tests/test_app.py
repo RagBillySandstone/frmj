@@ -175,11 +175,12 @@ class TestGetClient:
         with pytest.raises(RuntimeError, match="account_id"):
             get_client(db)
 
-    def test_returns_oanda_client(
+    def test_returns_oanda_client_in_practice_mode(
         self, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Default (practice=true) uses practice_account_id."""
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token")
-        set_config(db, "account_id", "101-001-12345-001")
+        set_config(db, "practice_account_id", "101-001-12345-001")
         client = get_client(db)
         assert isinstance(client, OandaClient)
         assert client.account_id == "101-001-12345-001"
@@ -190,7 +191,7 @@ class TestGetClient:
     ) -> None:
         """When practice_mode is absent, the client should use the practice URL."""
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token")
-        set_config(db, "account_id", "101-001-12345-001")
+        set_config(db, "practice_account_id", "101-001-12345-001")
         client = get_client(db)
         from frmj.execution.oanda import PRACTICE_BASE_URL
         assert client._base_url == PRACTICE_BASE_URL
@@ -199,6 +200,7 @@ class TestGetClient:
     def test_practice_mode_false_uses_live_url(
         self, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Live mode uses account_id (not practice_account_id)."""
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token")
         set_config(db, "account_id", "101-001-12345-001")
         set_config(db, "practice_mode", "false")
@@ -273,43 +275,62 @@ class TestGetRiskConfig:
 
 
 class TestGetToken:
-    def test_env_var_takes_priority_over_keyring(
+    def test_live_env_var_takes_priority_over_keyring(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Env var wins even when keyring also has a value."""
+        """OANDA_API_TOKEN env var wins over keyring in live mode."""
         monkeypatch.setenv("OANDA_API_TOKEN", "env-token")
         monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: "keyring-token")
-        assert get_token() == "env-token"
+        assert get_token(practice=False) == "env-token"
 
-    def test_falls_back_to_keyring_when_env_absent(
+    def test_live_falls_back_to_keyring_when_env_absent(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
         monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: "keyring-token")
-        assert get_token() == "keyring-token"
+        assert get_token(practice=False) == "keyring-token"
 
-    def test_returns_none_when_both_absent(
+    def test_live_returns_none_when_both_absent(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
-        # _no_real_keyring autouse fixture already returns None from get_password.
-        assert get_token() is None
+        assert get_token(practice=False) is None
+
+    def test_practice_env_var_takes_priority(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OANDA_API_TOKEN_PRACTICE wins over other sources in practice mode."""
+        monkeypatch.setenv("OANDA_API_TOKEN_PRACTICE", "practice-env")
+        monkeypatch.setenv("OANDA_API_TOKEN", "live-env")
+        monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: "keyring-token")
+        assert get_token(practice=True) == "practice-env"
+
+    def test_practice_falls_back_to_legacy_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OANDA_API_TOKEN is used as legacy fallback when no practice-specific token set."""
+        monkeypatch.delenv("OANDA_API_TOKEN_PRACTICE", raising=False)
+        monkeypatch.setenv("OANDA_API_TOKEN", "legacy-token")
+        # _no_real_keyring autouse fixture returns None from keyring.
+        assert get_token(practice=True) == "legacy-token"
 
     def test_returns_none_on_keyring_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Any KeyringError (including NoKeyringError) is treated as 'not found'."""
         monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
+        monkeypatch.delenv("OANDA_API_TOKEN_PRACTICE", raising=False)
         import keyring.errors
         monkeypatch.setattr(
             "frmj.app.keyring.get_password",
             lambda s, u: (_ for _ in ()).throw(keyring.errors.KeyringError()),
         )
-        assert get_token() is None
+        assert get_token(practice=False) is None
+        assert get_token(practice=True) is None
 
 
 class TestStoreToken:
-    def test_writes_to_keyring_with_correct_args(
+    def test_live_writes_to_correct_keyring_key(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: list[tuple[str, str, str]] = []
@@ -317,12 +338,27 @@ class TestStoreToken:
             "frmj.app.keyring.set_password",
             lambda s, u, p: calls.append((s, u, p)),
         )
-        store_token("my-secret-token")
+        store_token("my-live-token", practice=False)
         assert len(calls) == 1
         service, username, token = calls[0]
         assert service == "frmj"
-        assert username == "oanda_api_token"
-        assert token == "my-secret-token"
+        assert username == "oanda_api_token_live"
+        assert token == "my-live-token"
+
+    def test_practice_writes_to_correct_keyring_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[str, str, str]] = []
+        monkeypatch.setattr(
+            "frmj.app.keyring.set_password",
+            lambda s, u, p: calls.append((s, u, p)),
+        )
+        store_token("my-practice-token", practice=True)
+        assert len(calls) == 1
+        service, username, token = calls[0]
+        assert service == "frmj"
+        assert username == "oanda_api_token_practice"
+        assert token == "my-practice-token"
 
     def test_raises_runtime_error_on_no_keyring(
         self, monkeypatch: pytest.MonkeyPatch

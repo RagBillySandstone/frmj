@@ -68,13 +68,15 @@ def _row(oanda_id: str, account_id: str = "acct-1") -> TransactionRow:
 
 @pytest.fixture()
 def db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Set FRMJ_DB_PATH to a temp location and seed account_id + OANDA_API_TOKEN."""
+    """Set FRMJ_DB_PATH to a temp location and seed credentials for practice mode
+    (the default).  OANDA_API_TOKEN acts as the legacy practice-mode fallback.
+    """
     path = tmp_path / "frmj_test.db"
     monkeypatch.setenv("FRMJ_DB_PATH", str(path))
     monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
-    # Seed account_id so get_client doesn't raise.
+    # Seed practice_account_id so get_client doesn't raise in default practice mode.
     conn = get_db(path=path)
-    set_config(conn, "account_id", "acct-1")
+    set_config(conn, "practice_account_id", "acct-1")
     conn.close()
     return path
 
@@ -412,9 +414,14 @@ class TestConfigCommands:
 
     def test_config_set_multiple_keys(self, db_path: Path) -> None:
         """Multiple independent keys can be set without interference."""
-        for key, val in [("k1", "v1"), ("k2", "v2"), ("k3", "v3")]:
+        pairs = [
+            ("account_id", "val-1"),
+            ("practice_account_id", "val-2"),
+            ("max_open_trades", "val-3"),
+        ]
+        for key, val in pairs:
             runner.invoke(app, ["config", "set", key, val])
-        for key, val in [("k1", "v1"), ("k2", "v2"), ("k3", "v3")]:
+        for key, val in pairs:
             result = runner.invoke(app, ["config", "get", key])
             assert result.output.strip() == val
 
@@ -430,11 +437,11 @@ class TestConfigCommands:
         assert "never" in result.output
 
     def test_config_get_all_empty_db_shows_message(self, db_path: Path) -> None:
-        """``frmj config get`` on a fresh DB (only account_id seeded) shows it."""
+        """``frmj config get`` on a fresh DB (only practice_account_id seeded) shows it."""
         result = runner.invoke(app, ["config", "get"])
         assert result.exit_code == 0, result.output
-        # The db_path fixture seeds account_id, so it must appear.
-        assert "account_id" in result.output
+        # The db_path fixture seeds practice_account_id, so it must appear.
+        assert "practice_account_id" in result.output
 
     def test_config_get_all_shows_token_status(self, db_path: Path) -> None:
         """``frmj config get`` always prints an API token status line."""

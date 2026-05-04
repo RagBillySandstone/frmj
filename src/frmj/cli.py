@@ -381,6 +381,7 @@ VALID_CONFIG_KEYS: frozenset[str] = frozenset({
     "fixed_dollar",
     "max_open_trades",
     "percent_of_equity",
+    "practice_account_id",
     "practice_mode",
     "risk_strategy",
     "safety_reserve_pct",
@@ -458,26 +459,40 @@ def config_unset(
 
 
 @config_app.command("set-token")
-def config_set_token() -> None:
-    """Store the Oanda API token securely in the OS keychain."""
-    token = typer.prompt("Oanda API token", hide_input=True)
+def config_set_token(
+    practice: bool = typer.Option(
+        False,
+        "--practice",
+        help="Store the practice account token instead of the live token.",
+    ),
+) -> None:
+    """Store an Oanda API token securely in the OS keychain."""
+    mode = "practice" if practice else "live"
+    token = typer.prompt(f"Oanda API token ({mode})", hide_input=True)
     try:
-        store_token(token)
+        store_token(token, practice=practice)
     except RuntimeError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1)
-    typer.echo("Token stored in OS keychain.")
+    typer.echo(f"{mode.capitalize()} token stored in OS keychain.")
 
 
 @config_app.command("unset-token")
-def config_unset_token() -> None:
-    """Remove the Oanda API token from the OS keychain."""
+def config_unset_token(
+    practice: bool = typer.Option(
+        False,
+        "--practice",
+        help="Remove the practice account token instead of the live token.",
+    ),
+) -> None:
+    """Remove an Oanda API token from the OS keychain."""
+    mode = "practice" if practice else "live"
     try:
-        delete_token()
+        delete_token(practice=practice)
     except RuntimeError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1)
-    typer.echo("Token removed from OS keychain.")
+    typer.echo(f"{mode.capitalize()} token removed from OS keychain.")
 
 
 @config_app.command("check")
@@ -492,27 +507,68 @@ def config_check(
     conn = get_db()
     try:
         all_cfg = dict(get_all_config(conn))
-        account_id_val = all_cfg.get("account_id")
 
         # Each item is (label, status, detail).
-        # status: "OK" | "WARN" | "MISSING" | "INVALID"
+        # status: "OK" | "WARN" | "MISSING" | "INVALID" | "INFO"
+        # "INFO" entries are displayed but do not affect the exit code.
         checks: list[tuple[str, str, str]] = []
 
-        # --- Token -----------------------------------------------------------
-        token_val = get_token()
-        if os.environ.get("OANDA_API_TOKEN"):
-            checks.append(("token", "OK", "env var"))
-        elif token_val:
-            checks.append(("token", "OK", "OS keychain"))
-        else:
-            checks.append(("token", "MISSING", "run: frmj config set-token"))
+        practice_str = all_cfg.get("practice_mode") or "true"
+        practice_active = practice_str.lower() in ("true", "1", "yes")
 
-        # --- account_id ------------------------------------------------------
-        if account_id_val:
-            checks.append(("account_id", "OK", account_id_val))
+        # --- Practice credentials --------------------------------------------
+        practice_token = get_token(practice=True)
+        active_marker = " (active)" if practice_active else ""
+        if os.environ.get("OANDA_API_TOKEN_PRACTICE"):
+            checks.append(("practice token", "OK",
+                           f"OANDA_API_TOKEN_PRACTICE env var{active_marker}"))
+        elif practice_token:
+            checks.append(("practice token", "OK",
+                           f"OS keychain{active_marker}"))
+        elif practice_active:
+            checks.append(("practice token", "MISSING",
+                           "run: frmj config set-token --practice"))
         else:
+            checks.append(("practice token", "INFO",
+                           "not configured — run: frmj config set-token --practice"))
+
+        practice_account_id_val = all_cfg.get("practice_account_id")
+        if practice_account_id_val:
+            checks.append(("practice_account_id", "OK",
+                           f"{practice_account_id_val}{active_marker}"))
+        elif practice_active:
+            checks.append(("practice_account_id", "MISSING",
+                           "run: frmj config set practice_account_id <ID>"))
+        else:
+            checks.append(("practice_account_id", "INFO",
+                           "not configured — run: frmj config set practice_account_id <ID>"))
+
+        # --- Live credentials ------------------------------------------------
+        live_token = get_token(practice=False)
+        active_marker = " (active)" if not practice_active else ""
+        if os.environ.get("OANDA_API_TOKEN"):
+            checks.append(("live token", "OK",
+                           f"OANDA_API_TOKEN env var{active_marker}"))
+        elif live_token:
+            checks.append(("live token", "OK",
+                           f"OS keychain{active_marker}"))
+        elif not practice_active:
+            checks.append(("live token", "MISSING",
+                           "run: frmj config set-token"))
+        else:
+            checks.append(("live token", "INFO",
+                           "not configured — run: frmj config set-token"))
+
+        account_id_val = all_cfg.get("account_id")
+        if account_id_val:
+            checks.append(("account_id", "OK",
+                           f"{account_id_val}{active_marker}"))
+        elif not practice_active:
             checks.append(("account_id", "MISSING",
                            "run: frmj config set account_id <ID>"))
+        else:
+            checks.append(("account_id", "INFO",
+                           "not configured — run: frmj config set account_id <ID>"))
 
         # --- max_open_trades (required for trading) --------------------------
         mot = all_cfg.get("max_open_trades")
@@ -607,7 +663,9 @@ def config_check(
 
         # --- Connectivity (opt-in) -------------------------------------------
         if connectivity:
-            if token_val and account_id_val:
+            active_token = practice_token if practice_active else live_token
+            active_account_id = practice_account_id_val if practice_active else account_id_val
+            if active_token and active_account_id:
                 try:
                     client = get_client(conn)
                     summary = client.get_account_summary()
@@ -618,7 +676,7 @@ def config_check(
                                    f"API call failed: {exc}"))
             else:
                 checks.append(("connectivity", "WARN",
-                               "skipped — token or account_id not configured"))
+                               "skipped — active token or account_id not configured"))
 
     finally:
         conn.close()
@@ -635,6 +693,8 @@ def config_check(
             badge = typer.style(f"{status:<{status_w}}", fg=typer.colors.GREEN)
         elif status == "WARN":
             badge = typer.style(f"{status:<{status_w}}", fg=typer.colors.YELLOW)
+        elif status == "INFO":
+            badge = f"{status:<{status_w}}"  # neutral — inactive credential hint
         else:  # MISSING / INVALID
             badge = typer.style(f"{status:<{status_w}}", fg=typer.colors.RED)
 
@@ -642,6 +702,7 @@ def config_check(
 
     errors = [c for c in checks if c[1] in ("MISSING", "INVALID")]
     warnings = [c for c in checks if c[1] == "WARN"]
+    # INFO entries are informational only and do not affect exit code.
 
     typer.echo("")
     if not errors and not warnings:
@@ -1647,18 +1708,24 @@ def _records_to_json(records: list[dict]) -> str:
 
 
 def _print_token_status() -> None:
-    """Print a single line showing where (or whether) the API token is set.
+    """Print two lines showing where (or whether) each API token is set.
 
-    Called by ``config_get`` when showing all values.  The token value itself
-    is never printed — only its source.
+    Called by ``config_get`` when showing all values.  Token values are never
+    printed — only the source.
     """
-    token_label = "API token"
     if os.environ.get("OANDA_API_TOKEN"):
-        typer.echo(f"{token_label}  =  (set via OANDA_API_TOKEN env var)")
-    elif get_token() is not None:
-        typer.echo(f"{token_label}  =  (stored in OS keychain)")
+        typer.echo("live API token     =  (set via OANDA_API_TOKEN env var)")
+    elif get_token(practice=False) is not None:
+        typer.echo("live API token     =  (stored in OS keychain)")
     else:
-        typer.echo(f"{token_label}  =  (not set — run: frmj config set-token)")
+        typer.echo("live API token     =  (not set — run: frmj config set-token)")
+
+    if os.environ.get("OANDA_API_TOKEN_PRACTICE"):
+        typer.echo("practice API token =  (set via OANDA_API_TOKEN_PRACTICE env var)")
+    elif get_token(practice=True) is not None:
+        typer.echo("practice API token =  (stored in OS keychain)")
+    else:
+        typer.echo("practice API token =  (not set — run: frmj config set-token --practice)")
 
 
 def _color_pl(pl: Decimal) -> str:

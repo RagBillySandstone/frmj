@@ -9,16 +9,25 @@ arguments from the environment and hands them to the CLI commands.
 
 API token storage
 -----------------
-The Oanda API token is resolved in this priority order:
+Two separate tokens are stored — one for practice, one for live — so the user
+can switch modes without re-entering credentials.  Each token is resolved in
+this priority order:
 
-1. ``OANDA_API_TOKEN`` environment variable — checked first so CI/container
-   environments and existing shell-profile setups work with no changes.
-2. OS keychain — set once with ``frmj config set-token``; read automatically
-   on every subsequent invocation with no prompt.  Backed by GNOME Keyring /
-   KWallet on Linux, Keychain on macOS, Credential Locker on Windows.
+Practice mode (``practice_mode = true``):
+  1. ``OANDA_API_TOKEN_PRACTICE`` environment variable.
+  2. ``oanda_api_token_practice`` OS keychain entry.
+  3. ``OANDA_API_TOKEN`` environment variable (legacy fallback).
+  4. ``oanda_api_token`` OS keychain entry (legacy fallback).
 
-Store the token:    ``frmj config set-token``
-Remove the token:   ``frmj config unset-token``
+Live mode (``practice_mode = false``):
+  1. ``OANDA_API_TOKEN`` environment variable.
+  2. ``oanda_api_token_live`` OS keychain entry.
+  3. ``oanda_api_token`` OS keychain entry (legacy fallback).
+
+Store practice token:  ``frmj config set-token --practice``
+Store live token:      ``frmj config set-token``  (default)
+Remove practice token: ``frmj config unset-token --practice``
+Remove live token:     ``frmj config unset-token``
 
 Other environment variables
 ---------------------------
@@ -27,16 +36,17 @@ Other environment variables
 
 Config table keys
 -----------------
-``account_id``         Oanda account ID (required before any live call).
-``practice_mode``      "true" or "false"; defaults to "true" if absent.
-``max_open_trades``    Integer; required for the risk model.
-``risk_strategy``      One of the ``RiskStrategy`` enum values; defaults to
-                       "remaining_margin_fraction".
-``blocking_mode``      "hard_block" or "warning_only"; defaults to "hard_block".
-``scale_in``           "never", "warn", or "allow"; defaults to "never".
-``safety_reserve_pct`` Decimal in [0, 1]; defaults to "0".
-``percent_of_equity``  Required when risk_strategy = "percent_of_equity".
-``fixed_dollar``       Required when risk_strategy = "fixed_dollar".
+``practice_account_id``  Oanda practice account ID (required when practice_mode = true).
+``account_id``           Oanda live account ID (required when practice_mode = false).
+``practice_mode``        "true" or "false"; defaults to "true" if absent.
+``max_open_trades``      Integer; required for the risk model.
+``risk_strategy``        One of the ``RiskStrategy`` enum values; defaults to
+                         "remaining_margin_fraction".
+``blocking_mode``        "hard_block" or "warning_only"; defaults to "hard_block".
+``scale_in``             "never", "warn", or "allow"; defaults to "never".
+``safety_reserve_pct``   Decimal in [0, 1]; defaults to "0".
+``percent_of_equity``    Required when risk_strategy = "percent_of_equity".
+``fixed_dollar``         Required when risk_strategy = "fixed_dollar".
 """
 
 from __future__ import annotations
@@ -74,7 +84,10 @@ _DRAFT_PLAN_PATH: Path = (
 
 # Keyring entry coordinates — single source of truth used by get/store/delete.
 _KEYRING_SERVICE: str = "frmj"
-_KEYRING_TOKEN_KEY: str = "oanda_api_token"
+_KEYRING_TOKEN_KEY_LIVE: str = "oanda_api_token_live"
+_KEYRING_TOKEN_KEY_PRACTICE: str = "oanda_api_token_practice"
+# Legacy key written by older versions of frmj; read as a fallback, never written.
+_KEYRING_TOKEN_KEY_LEGACY: str = "oanda_api_token"
 
 
 # ---------------------------------------------------------------------------
@@ -145,62 +158,87 @@ def get_all_config(conn: sqlite3.Connection) -> list[tuple[str, str]]:
 # ---------------------------------------------------------------------------
 
 
-def get_token() -> str | None:
+def get_token(practice: bool = False) -> str | None:
     """
-    Resolve the Oanda API token using the priority order:
+    Resolve the Oanda API token for *practice* or live mode.
 
-    1. ``OANDA_API_TOKEN`` environment variable — preserved for CI / containers
-       and so a locally-exported variable always overrides a stale keyring entry.
-    2. OS keychain — set once with ``frmj config set-token``.
+    Practice mode priority:
+      1. ``OANDA_API_TOKEN_PRACTICE`` env var.
+      2. ``oanda_api_token_practice`` OS keychain.
+      3. ``OANDA_API_TOKEN`` env var (legacy fallback — works if only one token
+         was ever configured).
+      4. ``oanda_api_token`` OS keychain (legacy fallback).
 
-    Returns ``None`` when neither source has the token.  Also returns ``None``
-    (rather than raising) when the keyring backend is unavailable so that the
-    caller (``get_client``) can surface the same unified missing-token message
-    regardless of platform.
+    Live mode priority:
+      1. ``OANDA_API_TOKEN`` env var.
+      2. ``oanda_api_token_live`` OS keychain.
+      3. ``oanda_api_token`` OS keychain (legacy fallback).
+
+    Returns ``None`` when no source has the token.  Keyring errors are treated
+    as "not available" so the caller can surface a unified missing-token message.
     """
-    env_token = os.environ.get("OANDA_API_TOKEN")
-    if env_token:
-        return env_token
+    def _keyring_get(key: str) -> str | None:
+        try:
+            return keyring.get_password(_KEYRING_SERVICE, key)
+        except keyring.errors.KeyringError:
+            return None
 
-    # Treat any keyring error as "not available" — the missing-token error
-    # from get_client is more actionable than a raw keyring exception.
-    try:
-        return keyring.get_password(_KEYRING_SERVICE, _KEYRING_TOKEN_KEY)
-    except keyring.errors.KeyringError:
-        return None
+    if practice:
+        return (
+            os.environ.get("OANDA_API_TOKEN_PRACTICE")
+            or _keyring_get(_KEYRING_TOKEN_KEY_PRACTICE)
+            or os.environ.get("OANDA_API_TOKEN")       # legacy
+            or _keyring_get(_KEYRING_TOKEN_KEY_LEGACY)  # legacy
+        ) or None
+    else:
+        return (
+            os.environ.get("OANDA_API_TOKEN")
+            or _keyring_get(_KEYRING_TOKEN_KEY_LIVE)
+            or _keyring_get(_KEYRING_TOKEN_KEY_LEGACY)  # legacy
+        ) or None
 
 
-def store_token(token: str) -> None:
+def store_token(token: str, practice: bool = False) -> None:
     """
-    Save *token* to the OS keychain under the ``"frmj"`` service.
+    Save *token* to the OS keychain for the given mode.
+
+    ``practice=False`` writes to ``oanda_api_token_live``;
+    ``practice=True`` writes to ``oanda_api_token_practice``.
 
     Raises ``RuntimeError`` when no keyring backend is available (headless Linux
     without a Secret Service daemon running).  The CLI layer catches this and
     suggests the env-var alternative.
     """
+    key = _KEYRING_TOKEN_KEY_PRACTICE if practice else _KEYRING_TOKEN_KEY_LIVE
     try:
-        keyring.set_password(_KEYRING_SERVICE, _KEYRING_TOKEN_KEY, token)
+        keyring.set_password(_KEYRING_SERVICE, key, token)
     except keyring.errors.NoKeyringError as exc:
+        env_var = "OANDA_API_TOKEN_PRACTICE" if practice else "OANDA_API_TOKEN"
         raise RuntimeError(
-            "No system keyring is available on this machine. "
-            "Set the OANDA_API_TOKEN environment variable instead."
+            f"No system keyring is available on this machine. "
+            f"Set the {env_var} environment variable instead."
         ) from exc
 
 
-def delete_token() -> None:
+def delete_token(practice: bool = False) -> None:
     """
-    Remove the stored token from the OS keychain, if present.
+    Remove the stored token from the OS keychain for the given mode.
+
+    ``practice=False`` deletes ``oanda_api_token_live``;
+    ``practice=True`` deletes ``oanda_api_token_practice``.
 
     A no-op when the token was never stored — ``PasswordDeleteError`` is
     swallowed intentionally so the command is idempotent.
     Raises ``RuntimeError`` when no keyring backend is available.
     """
+    key = _KEYRING_TOKEN_KEY_PRACTICE if practice else _KEYRING_TOKEN_KEY_LIVE
     try:
-        keyring.delete_password(_KEYRING_SERVICE, _KEYRING_TOKEN_KEY)
+        keyring.delete_password(_KEYRING_SERVICE, key)
     except keyring.errors.NoKeyringError as exc:
+        env_var = "OANDA_API_TOKEN_PRACTICE" if practice else "OANDA_API_TOKEN"
         raise RuntimeError(
-            "No system keyring is available on this machine. "
-            "Set the OANDA_API_TOKEN environment variable instead."
+            f"No system keyring is available on this machine. "
+            f"Set the {env_var} environment variable instead."
         ) from exc
     except keyring.errors.PasswordDeleteError:
         # Token was never stored — not an error from the user's perspective.
@@ -254,27 +292,40 @@ def get_client(conn: sqlite3.Connection) -> OandaClient:
     """
     Build an ``OandaClient`` from environment variables and config table.
 
+    Uses ``practice_mode`` to select which account ID and token pair to use:
+    * practice=true  → ``practice_account_id`` + practice token
+    * practice=false → ``account_id`` + live token
+
     Raises ``RuntimeError`` with a clear message when a required value is
     missing so the CLI can surface it as a user-facing error rather than a
     traceback.
     """
-    token = get_token()
-    if not token:
-        raise RuntimeError(
-            "No API token found. Store it with:\n"
-            "  frmj config set-token\n"
-            "Or set the OANDA_API_TOKEN environment variable."
-        )
-
-    account_id = get_config(conn, "account_id")
-    if not account_id:
-        raise RuntimeError(
-            "account_id is not configured. "
-            "Run: frmj config set account_id <YOUR_OANDA_ACCOUNT_ID>"
-        )
-
     practice_str = get_config(conn, "practice_mode") or "true"
     practice = practice_str.lower() in ("true", "1", "yes")
+
+    token = get_token(practice=practice)
+    if not token:
+        if practice:
+            raise RuntimeError(
+                "No practice API token found. Store it with:\n"
+                "  frmj config set-token --practice\n"
+                "Or set the OANDA_API_TOKEN_PRACTICE environment variable.\n"
+                "(OANDA_API_TOKEN also works as a fallback.)"
+            )
+        else:
+            raise RuntimeError(
+                "No live API token found. Store it with:\n"
+                "  frmj config set-token\n"
+                "Or set the OANDA_API_TOKEN environment variable."
+            )
+
+    account_id_key = "practice_account_id" if practice else "account_id"
+    account_id = get_config(conn, account_id_key)
+    if not account_id:
+        raise RuntimeError(
+            f"{account_id_key} is not configured. "
+            f"Run: frmj config set {account_id_key} <YOUR_OANDA_ACCOUNT_ID>"
+        )
 
     return OandaClient(token=token, account_id=account_id, practice=practice)
 
