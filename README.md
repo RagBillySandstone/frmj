@@ -39,35 +39,45 @@ frmj --help
 
 ## Configuration
 
-### API token
+### API tokens
 
-The Oanda API token is resolved in this order:
+FRoMaJ stores separate tokens for practice and live accounts so you can switch modes without re-entering credentials.
 
-1. **OS keychain** (preferred) — stored once, read silently on every run:
-   ```sh
-   frmj config set-token     # prompted, never echoed to the terminal
-   frmj config unset-token   # remove it
-   ```
-   Backed by GNOME Keyring / KWallet on Linux, Keychain on macOS, Credential Locker on Windows. The token is encrypted by the OS using your login credentials — no master passphrase needed.
+Store tokens in the OS keychain (prompted, never echoed):
 
-2. **Environment variable** (fallback for CI / containers):
-   ```sh
-   export OANDA_API_TOKEN=your-token-here
-   ```
-   When `OANDA_API_TOKEN` is set it always takes precedence over the keychain, so existing setups require no changes.
+```sh
+frmj config set-token              # live token
+frmj config set-token --practice   # practice token
+
+frmj config unset-token            # remove live token
+frmj config unset-token --practice # remove practice token
+```
+
+Backed by GNOME Keyring / KWallet on Linux, Keychain on macOS, Credential Locker on Windows.
+
+**Environment variable fallbacks** (useful for CI / containers or headless Linux without a keyring daemon):
+
+| Variable | Used for |
+|---|---|
+| `OANDA_API_TOKEN` | Live token. Also a legacy fallback for practice mode if `OANDA_API_TOKEN_PRACTICE` is not set. |
+| `OANDA_API_TOKEN_PRACTICE` | Practice token. Takes priority over `OANDA_API_TOKEN` in practice mode. |
+
+Environment variables take precedence over the keychain within each mode.
 
 ### Environment variables
 
 | Variable | Required | Description |
 |---|---|---|
-| `OANDA_API_TOKEN` | No | Oanda personal access token. Falls back to the OS keychain if unset. |
-| `FRMJ_DB_PATH` | No | Path to the SQLite file. Defaults to `~/.local/share/frmj/frmj.db` |
+| `OANDA_API_TOKEN` | No | Live Oanda token. Falls back to OS keychain if unset. |
+| `OANDA_API_TOKEN_PRACTICE` | No | Practice Oanda token. Falls back to `OANDA_API_TOKEN` if unset. |
+| `FRMJ_DB_PATH` | No | Path to the SQLite file. Defaults to `~/.local/share/frmj/frmj.db`. |
 
 ### Config table keys (set with `frmj config set`)
 
 | Key | Required | Default | Description |
 |---|---|---|---|
-| `account_id` | Yes | — | Oanda account ID |
+| `practice_account_id` | Yes (practice) | — | Oanda practice account ID |
+| `account_id` | Yes (live) | — | Oanda live account ID |
 | `practice_mode` | No | `true` | `true` for practice, `false` for live |
 | `max_open_trades` | Yes | — | Maximum concurrent open tickets (e.g. `6`) |
 | `risk_strategy` | No | `remaining_margin_fraction` | Sizing strategy (see Risk Model) |
@@ -79,16 +89,30 @@ The Oanda API token is resolved in this order:
 
 ### First-time setup
 
+Configure both modes upfront so you can switch freely:
+
 ```sh
-# Store the API token in the OS keychain (prompted, not echoed)
-frmj config set-token
-
-# Or for CI / headless environments:
-# export OANDA_API_TOKEN=your-token-here
-
-frmj config set account_id 001-001-12345678-001
+# Practice
+frmj config set-token --practice
+frmj config set practice_account_id 101-001-XXXXXXX-001
 frmj config set practice_mode true
+
+# Live (set up now so switching requires only one command later)
+frmj config set-token
+frmj config set account_id 001-001-XXXXXXX-001
+
+# Shared risk config
 frmj config set max_open_trades 6
+
+# Switch to live when ready
+frmj config set practice_mode false
+```
+
+Validate the full configuration with:
+
+```sh
+frmj config check
+frmj config check --connectivity   # also calls the Oanda API to verify credentials
 ```
 
 ---
@@ -102,6 +126,16 @@ Pull transactions from Oanda into the local database.
 ```sh
 frmj sync               # incremental (only new transactions since last sync)
 frmj sync --cold        # full history re-fetch (safe to re-run; duplicates are skipped)
+frmj sync --watch       # poll for new transactions continuously (Ctrl+C to stop)
+frmj sync --watch --interval 30   # poll every 30 seconds (default: 60)
+```
+
+### `frmj positions`
+
+Show all open trades with live P/L, margin, and TP/SL levels, plus an account summary footer.
+
+```sh
+frmj positions
 ```
 
 ### `frmj trade`
@@ -112,6 +146,7 @@ Interactive trade planning and execution flow.
 frmj trade EUR_USD long
 frmj trade USD_JPY short
 frmj trade AUD_USD long --dry-run    # show plan only; no order placed
+frmj trade --resume                  # execute a previously saved draft plan
 ```
 
 The flow:
@@ -124,7 +159,8 @@ The flow:
 6. Prompts for take-profit and stop-loss (pips or `%` return-on-margin).
 7. Displays the full trade plan including exit prices, projected P/L, and R:R ratio.
 8. Confirms before placing a market order (`y` / `n` / `e` to edit TP/SL).
-9. Prompts for an optional trade note after fill.
+9. Attaches TP/SL to the open trade on Oanda.
+10. Prompts for an optional note and tags after fill.
 
 **TP/SL input formats:**
 
@@ -132,6 +168,55 @@ The flow:
 |---|---|
 | `50` or `50p` | 50 pips |
 | `5%` | 5% return on margin used |
+
+If the order placement request times out or fails, the plan can be saved (`s`) and resumed later with `frmj trade --resume`.
+
+### `frmj close`
+
+Close all open tickets for an instrument.
+
+```sh
+frmj close EUR_USD
+```
+
+Shows each ticket's current P/L, prompts for confirmation, then runs an incremental sync after closing.
+
+### `frmj stats`
+
+Show trade performance statistics from the local journal. Auto-syncs before displaying.
+
+```sh
+frmj stats
+```
+
+Output includes: win rate, average P/L, total P/L, best/worst trade, and breakdowns by instrument, weekday, hour (UTC), and tag.
+
+### `frmj journal`
+
+Display recent transactions with any attached notes and tags. Auto-syncs before displaying.
+
+```sh
+frmj journal                          # last 20 transactions
+frmj journal --n 50                   # last 50 transactions
+frmj journal --instrument EUR_USD     # filter by instrument
+frmj journal --type ORDER_FILL        # filter by transaction type
+frmj journal --since 2026-04-01       # on or after a date
+frmj journal --with-notes             # only transactions with notes
+frmj journal --tag breakout           # only transactions tagged 'breakout'
+```
+
+### `frmj export`
+
+Export transactions to CSV or JSON for external analysis.
+
+```sh
+frmj export                                  # CSV to stdout
+frmj export --format json                    # JSON to stdout
+frmj export --output trades.csv              # write to file
+frmj export --instrument EUR_USD --since 2026-01-01 --include-notes
+```
+
+Supports the same `--instrument`, `--type`, and `--since` filters as `journal`.
 
 ### `frmj note`
 
@@ -143,23 +228,29 @@ frmj note 12345 "Entered on 4H breakout, tight spread"
 
 Run `frmj sync` first if the transaction is not yet in the local database.
 
-### `frmj journal`
+### `frmj tag`
 
-Display recent transactions with any attached notes (reads local DB only — no network call).
+Attach one or more short labels to a transaction.
 
 ```sh
-frmj journal            # last 20 transactions
-frmj journal --n 50     # last 50 transactions
+frmj tag 12345 breakout london-open
 ```
 
-### `frmj config set` / `frmj config get` / token commands
+Tags are normalised to lowercase. Only letters, digits, hyphens, and underscores are allowed.
+
+### `frmj config`
 
 ```sh
-frmj config set max_open_trades 8
-frmj config get practice_mode
-frmj config get              # show all values + token status
-frmj config set-token        # store API token in OS keychain (prompted)
-frmj config unset-token      # remove token from OS keychain
+frmj config set practice_mode false        # set any config key
+frmj config get practice_mode              # read one key
+frmj config get                            # show all keys + token status
+frmj config unset risk_strategy            # remove a key (resets to default)
+frmj config set-token                      # store live token in OS keychain
+frmj config set-token --practice           # store practice token in OS keychain
+frmj config unset-token                    # remove live token
+frmj config unset-token --practice         # remove practice token
+frmj config check                          # validate all config, report issues
+frmj config check --connectivity           # also verify credentials against the API
 ```
 
 ---
@@ -169,7 +260,7 @@ frmj config unset-token      # remove token from OS keychain
 ```
 src/frmj/
 ├── cli.py              # Typer CLI — thin shell over domain + app layer
-├── app.py              # Wiring: DB factory, client factory, config helpers
+├── app.py              # Wiring: DB factory, client factory, config helpers, keychain
 ├── domain/
 │   ├── risk.py         # Pure risk model: trade cap, scale-in policy, sizing decision
 │   ├── sizing.py       # Pure unit sizing: capital → units respecting margin formula
@@ -187,7 +278,7 @@ The three domain modules (`risk`, `sizing`, `pricing`) are **pure functions with
 
 The execution layer (`oanda`, `sync`) handles all network and database I/O. It feeds structured data into the domain layer and writes results to SQLite.
 
-`app.py` is the only place that reads environment variables or resolves the database path. The CLI commands call `app.py` to obtain wired-up dependencies, then pass them into the execution and domain layers.
+`app.py` is the only place that reads environment variables, touches the filesystem, or accesses the OS keychain. The CLI commands call `app.py` to obtain wired-up dependencies, then pass them into the execution and domain layers.
 
 ### Risk model (`domain/risk.py`)
 
@@ -209,6 +300,8 @@ SQLite at `~/.local/share/frmj/frmj.db` (or `$FRMJ_DB_PATH`). WAL mode. Foreign 
 |---|---|
 | `transactions` | Append-only Oanda event ledger. Stores full raw JSON alongside parsed index columns. |
 | `notes` | Free-text notes attached to transactions. |
+| `tags` | Short labels attached to transactions; used in journal filters and stats breakdowns. |
+| `trade_plans` | Intended TP/SL prices recorded at order time; shown in `journal` alongside fills. |
 | `sync_cursors` | One row per account; tracks the last ingested Oanda transaction ID for incremental sync. |
 | `config` | Flat key/value store for all runtime configuration. |
 
@@ -224,11 +317,3 @@ uv run pytest
 ```
 
 Tests live in `tests/` and mirror the `src/` layout. The domain tests (`tests/domain/`) use no fixtures or mocks — pure data in, pure data out. The execution tests use lightweight test doubles that satisfy `ClientProtocol` via structural typing (no inheritance required).
-
----
-
-## Roadmap
-
-- Attach TP/SL orders to fills via Oanda's order API
-- `frmj stats` — P/L aggregates, win rate, best/worst hours and days from the journal
-- Multi-account support (the schema already has `account_id` discriminator columns)
