@@ -6,6 +6,10 @@ FRoMaJ handles the mechanical parts of a discretionary FX trading workflow: posi
 
 ---
 
+> **Disclaimer:** This software implements the author's personal risk management rules and is shared for personal and educational use only. It is **not** financial or investment advice, and nothing in this repository should be construed as a recommendation to buy, sell, or hold any financial instrument. Forex trading involves substantial risk of loss and is not suitable for all participants. Past performance is not indicative of future results. You are solely responsible for any trading decisions you make. Use at your own risk.
+
+---
+
 ## Requirements
 
 - Python 3.11+
@@ -17,7 +21,7 @@ FRoMaJ handles the mechanical parts of a discretionary FX trading workflow: posi
 ## Installation
 
 ```sh
-git clone <repo>
+git clone https://github.com/RagBillySandstone/frmj.git
 cd frmj
 uv sync
 ```
