@@ -175,6 +175,8 @@ _FX_PAIRS: tuple[str, ...] = (
     "cad_chf", "cad_jpy",
     "chf_jpy",
     "nzd_cad", "nzd_chf", "nzd_jpy",
+    # SGD crosses
+    "sgd_chf", "sgd_hkd", "sgd_jpy",
     # USD exotics
     "usd_cnh", "usd_czk", "usd_dkk", "usd_hkd", "usd_huf",
     "usd_mxn", "usd_nok", "usd_pln", "usd_sar", "usd_sek",
