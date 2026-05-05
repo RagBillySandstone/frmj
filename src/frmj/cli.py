@@ -1475,6 +1475,12 @@ def journal(
 # ---------------------------------------------------------------------------
 
 
+def _to_local_str(ts: str) -> str:
+    """Convert an Oanda UTC timestamp to local wall-clock time (YYYY-MM-DD HH:MM:SS)."""
+    dt = datetime.fromisoformat(ts[:19]).replace(tzinfo=timezone.utc).astimezone()
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _validate_tag(raw: str) -> str | None:
     """Normalise *raw* to a lowercase tag string, or return None if invalid.
 
@@ -1744,7 +1750,7 @@ def _color_pl(pl: Decimal) -> str:
 def _display_transaction(txn: sqlite3.Row) -> None:
     """Format one transaction row for journal display."""
     # Trim the ISO-8601 timestamp to seconds for readability.
-    time_short = txn["time"][:19].replace("T", " ")
+    time_short = _to_local_str(txn["time"])
 
     extra = ""
     pl: Decimal | None = None
@@ -1852,7 +1858,7 @@ def _display_open_trade(conn: sqlite3.Connection, trade: OpenTrade) -> None:
     ).fetchone()[0]
     note_flag = "  [note]" if note_count else ""
 
-    time_short = trade.open_time[:19].replace("T", " ")
+    time_short = _to_local_str(trade.open_time)
 
     typer.echo(
         f"  #{trade.trade_id}  {trade.instrument}  {trade.direction}"
