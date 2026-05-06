@@ -18,7 +18,7 @@ Pipeline
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone, tzinfo
 from decimal import Decimal
 
 _DAY_NAMES: tuple[str, ...] = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -124,17 +124,30 @@ def pl_by_instrument(
 
 def pl_by_hour(
     trades: list[ClosedTrade],
+    tz: tzinfo | None = None,
 ) -> list[tuple[int, int, Decimal]]:
-    """Return ``(hour_utc, count, total_pl)`` for hours 0-23 that have trades.
+    """Return ``(hour, count, total_pl)`` for hours 0-23 that have trades.
+
+    The Oanda timestamps stored on ``ClosedTrade.time`` are UTC.  When *tz*
+    is provided, each timestamp is converted to that timezone before its
+    hour is extracted, so the buckets reflect wall-clock hours in *tz*.
+    When *tz* is None, the parsed datetime's hour is used verbatim (UTC
+    for the typical Oanda payload, preserving the original behaviour).
 
     Hours with no trades are omitted to keep the table compact.
     """
     groups: dict[int, tuple[int, Decimal]] = {}
     for t in trades:
         try:
-            dt = datetime.fromisoformat(t.time)
+            # Oanda emits ISO-8601 with a trailing "Z"; trim to the seconds
+            # field for compatibility with Python < 3.11 fromisoformat().
+            dt = datetime.fromisoformat(t.time[:19])
         except ValueError:
             continue
+        if tz is not None:
+            # The DB stores naive UTC timestamps; tag and shift to *tz*
+            # so the resulting hour reflects wall-clock time in *tz*.
+            dt = dt.replace(tzinfo=timezone.utc).astimezone(tz)
         h = dt.hour
         count, total = groups.get(h, (0, Decimal(0)))
         groups[h] = (count + 1, total + t.pl)

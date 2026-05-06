@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -241,6 +242,30 @@ class TestPlByHour:
         ]
         rows = pl_by_hour(trades)
         assert len(rows) == 1
+
+    def test_tz_shifts_bucket_to_local_wall_clock(self) -> None:
+        # 14:30 UTC seen from a fixed UTC-6 zone should bucket as hour 8.
+        # Using a hard-coded offset keeps the assertion deterministic
+        # regardless of the system timezone the tests run under.
+        fixed_utc_minus_6 = timezone(timedelta(hours=-6))
+        rows = pl_by_hour(
+            [_trade(time="2026-04-25T14:30:00.000000Z", pl="25.00")],
+            tz=fixed_utc_minus_6,
+        )
+        assert len(rows) == 1
+        hour, count, total = rows[0]
+        assert hour == 8
+        assert count == 1
+        assert total == Decimal("25.00")
+
+    def test_tz_can_roll_hour_across_midnight(self) -> None:
+        # 02:00 UTC in UTC-5 is 21:00 the previous day → hour 21.
+        fixed_utc_minus_5 = timezone(timedelta(hours=-5))
+        rows = pl_by_hour(
+            [_trade(time="2026-04-25T02:00:00.000000Z", pl="1.00")],
+            tz=fixed_utc_minus_5,
+        )
+        assert rows[0][0] == 21
 
 
 # ---------------------------------------------------------------------------

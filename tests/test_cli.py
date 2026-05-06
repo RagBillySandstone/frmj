@@ -1736,12 +1736,13 @@ class TestStatsCommand:
         assert "Mon" in result.output
 
     def test_shows_hour_breakdown(self, stats_db: Path) -> None:
+        # The hour bucket is rendered in the system local timezone, so we
+        # only assert on the section header rather than a specific hour.
         self._seed_fills(stats_db, [
             ("1", "2026-04-25T09:30:00Z", "-10000", "15.00"),
         ])
         result = runner.invoke(app, ["stats"])
-        assert "By hour (UTC)" in result.output
-        assert "09:00" in result.output
+        assert "By hour (local)" in result.output
 
     def test_total_pl_shown(self, stats_db: Path) -> None:
         self._seed_fills(stats_db, [

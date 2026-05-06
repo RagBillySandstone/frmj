@@ -65,8 +65,8 @@ Commands
 
 ``frmj stats``
     Show trade performance: win rate, avg P/L, total P/L, best/worst, and
-    breakdowns by instrument, weekday, and hour (UTC).  Auto-syncs before
-    displaying.
+    breakdowns by instrument, weekday, and hour (local time).  Auto-syncs
+    before displaying.
 
 ``frmj journal [--n N]``
     Show the most recent N transactions (default 20) with any attached notes.
@@ -1635,10 +1635,12 @@ def _display_stats(
         for day, count, total in by_day:
             typer.echo(f"  {day}  {count:>4}  {_color_pl(total)}")
 
-    by_hour = pl_by_hour(trades)
+    # Convert UTC trade timestamps to the system local zone before
+    # bucketing so the table matches the trader's wall-clock experience.
+    by_hour = pl_by_hour(trades, tz=datetime.now().astimezone().tzinfo)
     if by_hour:
         typer.echo("")
-        typer.echo("By hour (UTC)")
+        typer.echo("By hour (local)")
         typer.echo("─" * 50)
         for hour, count, total in by_hour:
             typer.echo(f"  {hour:02d}:00  {count:>4}  {_color_pl(total)}")
