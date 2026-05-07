@@ -10,12 +10,14 @@ construction).
 from __future__ import annotations
 
 import sqlite3
+import sys
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from frmj.app import (
+    _resolve_default_data_dir,
     clear_draft_plan,
     delete_token,
     get_all_config,
@@ -36,6 +38,67 @@ from frmj.domain.risk import (
     ScaleInPolicy,
 )
 from frmj.execution.oanda import OandaClient
+
+
+# ---------------------------------------------------------------------------
+# _resolve_default_data_dir
+# ---------------------------------------------------------------------------
+
+
+class TestResolveDefaultDataDir:
+    """Tests for the platform-aware data directory resolver.
+
+    ``Path.home`` is replaced with a staticmethod returning ``tmp_path`` so the
+    test never touches the real home directory.  ``sys.platform`` is patched on
+    the global ``sys`` object, which is the same reference ``frmj.app`` holds.
+    """
+
+    @pytest.fixture()
+    def fake_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Redirect Path.home() to a controlled temp directory."""
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        return tmp_path
+
+    def test_linux_returns_xdg_path(
+        self, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On Linux the XDG convention is always used regardless of what is on disk."""
+        monkeypatch.setattr(sys, "platform", "linux")
+        assert _resolve_default_data_dir() == fake_home / ".local" / "share" / "frmj"
+
+    def test_darwin_returns_xdg_path(
+        self, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """macOS is treated identically to Linux — XDG, not ~/Library."""
+        monkeypatch.setattr(sys, "platform", "darwin")
+        assert _resolve_default_data_dir() == fake_home / ".local" / "share" / "frmj"
+
+    def test_windows_fresh_install_returns_appdata_path(
+        self, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On Windows with no legacy db the canonical AppData\\Roaming path is used."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        assert _resolve_default_data_dir() == fake_home / "AppData" / "Roaming" / "frmj"
+
+    def test_windows_existing_install_keeps_legacy_xdg_path(
+        self, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On Windows, the XDG path is preserved when frmj.db already lives there."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        # Simulate a pre-existing database at the nonstandard location.
+        legacy_db = fake_home / ".local" / "share" / "frmj" / "frmj.db"
+        legacy_db.parent.mkdir(parents=True)
+        legacy_db.touch()
+        assert _resolve_default_data_dir() == fake_home / ".local" / "share" / "frmj"
+
+    def test_windows_legacy_dir_without_db_does_not_trigger_fallback(
+        self, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The legacy directory existing on its own is not enough — the db file must be present."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        # Directory exists but contains no frmj.db.
+        (fake_home / ".local" / "share" / "frmj").mkdir(parents=True)
+        assert _resolve_default_data_dir() == fake_home / "AppData" / "Roaming" / "frmj"
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +257,7 @@ class TestGetClient:
         set_config(db, "practice_account_id", "101-001-12345-001")
         client = get_client(db)
         from frmj.execution.oanda import PRACTICE_BASE_URL
+
         assert client._base_url == PRACTICE_BASE_URL
         client.close()
 
@@ -206,6 +270,7 @@ class TestGetClient:
         set_config(db, "practice_mode", "false")
         client = get_client(db)
         from frmj.execution.oanda import LIVE_BASE_URL
+
         assert client._base_url == LIVE_BASE_URL
         client.close()
 
@@ -280,14 +345,18 @@ class TestGetToken:
     ) -> None:
         """OANDA_API_TOKEN env var wins over keyring in live mode."""
         monkeypatch.setenv("OANDA_API_TOKEN", "env-token")
-        monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: "keyring-token")
+        monkeypatch.setattr(
+            "frmj.app.keyring.get_password", lambda s, u: "keyring-token"
+        )
         assert get_token(practice=False) == "env-token"
 
     def test_live_falls_back_to_keyring_when_env_absent(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
-        monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: "keyring-token")
+        monkeypatch.setattr(
+            "frmj.app.keyring.get_password", lambda s, u: "keyring-token"
+        )
         assert get_token(practice=False) == "keyring-token"
 
     def test_live_returns_none_when_both_absent(
@@ -302,7 +371,9 @@ class TestGetToken:
         """OANDA_API_TOKEN_PRACTICE wins over other sources in practice mode."""
         monkeypatch.setenv("OANDA_API_TOKEN_PRACTICE", "practice-env")
         monkeypatch.setenv("OANDA_API_TOKEN", "live-env")
-        monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: "keyring-token")
+        monkeypatch.setattr(
+            "frmj.app.keyring.get_password", lambda s, u: "keyring-token"
+        )
         assert get_token(practice=True) == "practice-env"
 
     def test_practice_falls_back_to_legacy_env(
@@ -321,6 +392,7 @@ class TestGetToken:
         monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
         monkeypatch.delenv("OANDA_API_TOKEN_PRACTICE", raising=False)
         import keyring.errors
+
         monkeypatch.setattr(
             "frmj.app.keyring.get_password",
             lambda s, u: (_ for _ in ()).throw(keyring.errors.KeyringError()),
@@ -364,6 +436,7 @@ class TestStoreToken:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import keyring.errors
+
         monkeypatch.setattr(
             "frmj.app.keyring.set_password",
             lambda s, u, p: (_ for _ in ()).throw(keyring.errors.NoKeyringError()),
@@ -438,9 +511,7 @@ class TestDraftPlan:
 
 
 class TestDeleteToken:
-    def test_calls_delete_password(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_calls_delete_password(self, monkeypatch: pytest.MonkeyPatch) -> None:
         deleted: list[bool] = []
         monkeypatch.setattr(
             "frmj.app.keyring.delete_password",
@@ -454,6 +525,7 @@ class TestDeleteToken:
     ) -> None:
         """Deleting a token that was never stored must not raise."""
         import keyring.errors
+
         monkeypatch.setattr(
             "frmj.app.keyring.delete_password",
             lambda s, u: (_ for _ in ()).throw(keyring.errors.PasswordDeleteError()),
@@ -464,6 +536,7 @@ class TestDeleteToken:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import keyring.errors
+
         monkeypatch.setattr(
             "frmj.app.keyring.delete_password",
             lambda s, u: (_ for _ in ()).throw(keyring.errors.NoKeyringError()),
