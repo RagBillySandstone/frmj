@@ -32,10 +32,12 @@ Remove live token:     ``frmj config unset-token``
 Other environment variables
 ---------------------------
 ``FRMJ_DB_PATH``      (optional) — path to the SQLite file; defaults to
-                       ``~/.local/share/frmj/frmj.db`` on Linux/macOS and
-                       ``%APPDATA%\\frmj\\frmj.db`` on Windows (unless the
-                       legacy XDG-style path already exists, in which case
-                       that path is kept to preserve backward compatibility).
+                       ``~/.local/share/frmj/frmj.db`` on Linux,
+                       ``~/Library/Application Support/frmj/frmj.db`` on
+                       macOS, and ``%APPDATA%\\frmj\\frmj.db`` on Windows.
+                       On macOS and Windows, if the legacy XDG-style path
+                       already contains ``frmj.db`` it is used as-is to
+                       preserve backward compatibility.
 
 Config table keys
 -----------------
@@ -83,26 +85,31 @@ def _resolve_default_data_dir() -> Path:
     Return the platform-appropriate data directory for FRoMaJ.
 
     Resolution order:
-    - Linux / macOS: ``~/.local/share/frmj`` (XDG base-dir convention).
+    - Linux: ``~/.local/share/frmj`` (XDG base-dir convention).
+    - macOS (new install): ``~/Library/Application Support/frmj``.
+    - macOS (existing install): if ``frmj.db`` already exists at the legacy
+      XDG-style path (``~/.local/share/frmj/frmj.db``) created by an earlier
+      version of frmj, that directory is returned unchanged.
     - Windows (new install): ``%APPDATA%\\frmj`` (i.e.
       ``C:\\Users\\<user>\\AppData\\Roaming\\frmj``).
-    - Windows (existing install): if a database already exists at the old
-      XDG-style path (``~\\.local\\share\\frmj\\frmj.db``) created by an
-      earlier version of frmj, that directory is returned unchanged so
-      the user's data is not orphaned.
+    - Windows (existing install): same legacy-path fallback as macOS.
     """
     xdg_dir: Path = Path.home() / ".local" / "share" / "frmj"
 
-    if sys.platform != "win32":
-        return xdg_dir
+    if sys.platform == "darwin":
+        # Keep the legacy XDG path if a database is already there.
+        if (xdg_dir / "frmj.db").exists():
+            return xdg_dir
+        return Path.home() / "Library" / "Application Support" / "frmj"
 
-    # On Windows, keep the legacy XDG path if a database is already there so
-    # that existing installs continue to work without any migration step.
-    if (xdg_dir / "frmj.db").exists():
-        return xdg_dir
+    if sys.platform == "win32":
+        # Keep the legacy XDG path if a database is already there.
+        if (xdg_dir / "frmj.db").exists():
+            return xdg_dir
+        return Path.home() / "AppData" / "Roaming" / "frmj"
 
-    # Fresh Windows install — use the conventional AppData location.
-    return Path.home() / "AppData" / "Roaming" / "frmj"
+    # Linux and any other POSIX platform.
+    return xdg_dir
 
 
 _DATA_DIR: Path = _resolve_default_data_dir()
