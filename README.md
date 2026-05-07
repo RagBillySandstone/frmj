@@ -239,6 +239,7 @@ Three sizing strategies are supported:
 
 All strategies respect `safety_reserve_pct`: that fraction of equity is subtracted from available margin before any formula is applied.
 
+
 ---
 
 ## Environment Variables
