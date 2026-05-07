@@ -61,38 +61,6 @@ frmj config unset-token --practice # remove practice token
 
 Backed by GNOME Keyring / KWallet on Linux, Keychain on macOS, Credential Locker on Windows.
 
-**Environment variable fallbacks** (useful for CI / containers or headless Linux without a keyring daemon):
-
-| Variable | Used for |
-|---|---|
-| `OANDA_API_TOKEN` | Live token. Also a legacy fallback for practice mode if `OANDA_API_TOKEN_PRACTICE` is not set. |
-| `OANDA_API_TOKEN_PRACTICE` | Practice token. Takes priority over `OANDA_API_TOKEN` in practice mode. |
-
-Environment variables take precedence over the keychain within each mode.
-
-### Environment variables
-
-| Variable | Required | Description |
-|---|---|---|
-| `OANDA_API_TOKEN` | No | Live Oanda token. Falls back to OS keychain if unset. |
-| `OANDA_API_TOKEN_PRACTICE` | No | Practice Oanda token. Falls back to `OANDA_API_TOKEN` if unset. |
-| `FRMJ_DB_PATH` | No | Path to the SQLite file. Defaults to `~/.local/share/frmj/frmj.db`. |
-
-### Config table keys (set with `frmj config set`)
-
-| Key | Required | Default | Description |
-|---|---|---|---|
-| `practice_account_id` | Yes (practice) | — | Oanda practice account ID |
-| `account_id` | Yes (live) | — | Oanda live account ID |
-| `practice_mode` | No | `true` | `true` for practice, `false` for live |
-| `max_open_trades` | Yes | — | Maximum concurrent open tickets (e.g. `6`) |
-| `risk_strategy` | No | `remaining_margin_fraction` | Sizing strategy (see Risk Model) |
-| `blocking_mode` | No | `hard_block` | `hard_block` or `warning_only` at the trade cap |
-| `scale_in` | No | `never` | `never`, `warn`, or `allow` for same-instrument adds |
-| `safety_reserve_pct` | No | `0` | Fraction of equity to never deploy, e.g. `0.10` for 10% |
-| `percent_of_equity` | Conditional | — | Required when `risk_strategy = percent_of_equity` |
-| `fixed_dollar` | Conditional | — | Required when `risk_strategy = fixed_dollar` |
-
 ### First-time setup
 
 Configure both modes upfront so you can switch freely:
@@ -259,6 +227,52 @@ frmj config check                          # validate all config, report issues
 frmj config check --connectivity           # also verify credentials against the API
 ```
 
+### Risk model (`domain/risk.py`)
+
+Three sizing strategies are supported:
+
+**`remaining_margin_fraction`** (default) — the primary strategy. With `M` max trades and `N` currently open, the next trade deploys `1 / (M + 1 - N)` of available margin. This produces an invariant: over `M` filled trades, each consumes exactly `1/(M+1)` of the original margin, leaving a permanent `1/(M+1)` buffer as breathing room for margin calls. No parameter needed beyond `max_open_trades`.
+
+**`percent_of_equity`** — a fixed fraction of total account equity, regardless of open trades. Set `percent_of_equity` config key.
+
+**`fixed_dollar`** — a fixed dollar amount per trade. Set `fixed_dollar` config key.
+
+All strategies respect `safety_reserve_pct`: that fraction of equity is subtracted from available margin before any formula is applied.
+
+
+**Environment variable fallbacks** (useful for CI / containers or headless Linux without a keyring daemon):
+
+| Variable | Used for |
+|---|---|
+| `OANDA_API_TOKEN` | Live token. Also a legacy fallback for practice mode if `OANDA_API_TOKEN_PRACTICE` is not set. |
+| `OANDA_API_TOKEN_PRACTICE` | Practice token. Takes priority over `OANDA_API_TOKEN` in practice mode. |
+
+Environment variables take precedence over the keychain within each mode.
+
+### Environment variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `OANDA_API_TOKEN` | No | Live Oanda token. Falls back to OS keychain if unset. |
+| `OANDA_API_TOKEN_PRACTICE` | No | Practice Oanda token. Falls back to `OANDA_API_TOKEN` if unset. |
+| `FRMJ_DB_PATH` | No | Path to the SQLite file. Defaults to `~/.local/share/frmj/frmj.db`. |
+
+### Config table keys (set with `frmj config set`)
+
+| Key | Required | Default | Description |
+|---|---|---|---|
+| `practice_account_id` | Yes (practice) | — | Oanda practice account ID |
+| `account_id` | Yes (live) | — | Oanda live account ID |
+| `practice_mode` | No | `true` | `true` for practice, `false` for live |
+| `max_open_trades` | Yes | — | Maximum concurrent open tickets (e.g. `6`) |
+| `risk_strategy` | No | `remaining_margin_fraction` | Sizing strategy (see Risk Model) |
+| `blocking_mode` | No | `hard_block` | `hard_block` or `warning_only` at the trade cap |
+| `scale_in` | No | `never` | `never`, `warn`, or `allow` for same-instrument adds |
+| `safety_reserve_pct` | No | `0` | Fraction of equity to never deploy, e.g. `0.10` for 10% |
+| `percent_of_equity` | Conditional | — | Required when `risk_strategy = percent_of_equity` |
+| `fixed_dollar` | Conditional | — | Required when `risk_strategy = fixed_dollar` |
+
+
 ---
 
 ## Architecture
@@ -285,18 +299,6 @@ The three domain modules (`risk`, `sizing`, `pricing`) are **pure functions with
 The execution layer (`oanda`, `sync`) handles all network and database I/O. It feeds structured data into the domain layer and writes results to SQLite.
 
 `app.py` is the only place that reads environment variables, touches the filesystem, or accesses the OS keychain. The CLI commands call `app.py` to obtain wired-up dependencies, then pass them into the execution and domain layers.
-
-### Risk model (`domain/risk.py`)
-
-Three sizing strategies are supported:
-
-**`remaining_margin_fraction`** (default) — the primary strategy. With `M` max trades and `N` currently open, the next trade deploys `1 / (M + 1 - N)` of available margin. This produces an invariant: over `M` filled trades, each consumes exactly `1/(M+1)` of the original margin, leaving a permanent `1/(M+1)` buffer as breathing room for margin calls. No parameter needed beyond `max_open_trades`.
-
-**`percent_of_equity`** — a fixed fraction of total account equity, regardless of open trades. Set `percent_of_equity` config key.
-
-**`fixed_dollar`** — a fixed dollar amount per trade. Set `fixed_dollar` config key.
-
-All strategies respect `safety_reserve_pct`: that fraction of equity is subtracted from available margin before any formula is applied.
 
 ### Database schema
 
