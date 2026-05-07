@@ -32,7 +32,10 @@ Remove live token:     ``frmj config unset-token``
 Other environment variables
 ---------------------------
 ``FRMJ_DB_PATH``      (optional) — path to the SQLite file; defaults to
-                       ``~/.local/share/frmj/frmj.db``.
+                       ``~/.local/share/frmj/frmj.db`` on Linux/macOS and
+                       ``%APPDATA%\\frmj\\frmj.db`` on Windows (unless the
+                       legacy XDG-style path already exists, in which case
+                       that path is kept to preserve backward compatibility).
 
 Config table keys
 -----------------
@@ -54,6 +57,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 from decimal import Decimal
 from pathlib import Path
 
@@ -73,14 +77,39 @@ from frmj.persistence.schema import ensure_schema
 # Constants
 # ---------------------------------------------------------------------------
 
-_DEFAULT_DB_PATH: Path = (
-    Path.home() / ".local" / "share" / "frmj" / "frmj.db"
-)
+
+def _resolve_default_data_dir() -> Path:
+    """
+    Return the platform-appropriate data directory for FRoMaJ.
+
+    Resolution order:
+    - Linux / macOS: ``~/.local/share/frmj`` (XDG base-dir convention).
+    - Windows (new install): ``%APPDATA%\\frmj`` (i.e.
+      ``C:\\Users\\<user>\\AppData\\Roaming\\frmj``).
+    - Windows (existing install): if a database already exists at the old
+      XDG-style path (``~\\.local\\share\\frmj\\frmj.db``) created by an
+      earlier version of frmj, that directory is returned unchanged so
+      the user's data is not orphaned.
+    """
+    xdg_dir: Path = Path.home() / ".local" / "share" / "frmj"
+
+    if sys.platform != "win32":
+        return xdg_dir
+
+    # On Windows, keep the legacy XDG path if a database is already there so
+    # that existing installs continue to work without any migration step.
+    if (xdg_dir / "frmj.db").exists():
+        return xdg_dir
+
+    # Fresh Windows install — use the conventional AppData location.
+    return Path.home() / "AppData" / "Roaming" / "frmj"
+
+
+_DATA_DIR: Path = _resolve_default_data_dir()
+_DEFAULT_DB_PATH: Path = _DATA_DIR / "frmj.db"
 
 # Path for the draft plan saved when an order attempt fails mid-flow.
-_DRAFT_PLAN_PATH: Path = (
-    Path.home() / ".local" / "share" / "frmj" / "saved_plan.json"
-)
+_DRAFT_PLAN_PATH: Path = _DATA_DIR / "saved_plan.json"
 
 # Keyring entry coordinates — single source of truth used by get/store/delete.
 _KEYRING_SERVICE: str = "frmj"
@@ -101,7 +130,8 @@ def get_db(path: Path | None = None) -> sqlite3.Connection:
 
     If *path* is ``None`` the path is resolved in this priority order:
     1. ``FRMJ_DB_PATH`` environment variable.
-    2. ``~/.local/share/frmj/frmj.db`` (XDG data home convention).
+    2. Platform-appropriate default via ``_resolve_default_data_dir()``
+       (see that function's docstring for the full resolution logic).
 
     The parent directory is created if it does not exist.  ``ensure_schema``
     is called on every open so startup is always idempotent and schema
@@ -124,17 +154,13 @@ def get_db(path: Path | None = None) -> sqlite3.Connection:
 
 def get_config(conn: sqlite3.Connection, key: str) -> str | None:
     """Return the value for *key* from the config table, or ``None``."""
-    row = conn.execute(
-        "SELECT value FROM config WHERE key = ?", (key,)
-    ).fetchone()
+    row = conn.execute("SELECT value FROM config WHERE key = ?", (key,)).fetchone()
     return row[0] if row else None
 
 
 def set_config(conn: sqlite3.Connection, key: str, value: str) -> None:
     """Upsert *key* = *value* in the config table."""
-    conn.execute(
-        "REPLACE INTO config (key, value) VALUES (?, ?)", (key, value)
-    )
+    conn.execute("REPLACE INTO config (key, value) VALUES (?, ?)", (key, value))
     conn.commit()
 
 
@@ -147,9 +173,7 @@ def delete_config(conn: sqlite3.Connection, key: str) -> bool:
 
 def get_all_config(conn: sqlite3.Connection) -> list[tuple[str, str]]:
     """Return all config rows as ``(key, value)`` pairs sorted by key."""
-    rows = conn.execute(
-        "SELECT key, value FROM config ORDER BY key"
-    ).fetchall()
+    rows = conn.execute("SELECT key, value FROM config ORDER BY key").fetchall()
     return [(row[0], row[1]) for row in rows]
 
 
@@ -177,6 +201,7 @@ def get_token(practice: bool = False) -> str | None:
     Returns ``None`` when no source has the token.  Keyring errors are treated
     as "not available" so the caller can surface a unified missing-token message.
     """
+
     def _keyring_get(key: str) -> str | None:
         try:
             return keyring.get_password(_KEYRING_SERVICE, key)
@@ -187,7 +212,7 @@ def get_token(practice: bool = False) -> str | None:
         return (
             os.environ.get("OANDA_API_TOKEN_PRACTICE")
             or _keyring_get(_KEYRING_TOKEN_KEY_PRACTICE)
-            or os.environ.get("OANDA_API_TOKEN")       # legacy
+            or os.environ.get("OANDA_API_TOKEN")  # legacy
             or _keyring_get(_KEYRING_TOKEN_KEY_LEGACY)  # legacy
         ) or None
     else:
