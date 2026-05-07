@@ -66,12 +66,36 @@ class TestResolveDefaultDataDir:
         monkeypatch.setattr(sys, "platform", "linux")
         assert _resolve_default_data_dir() == fake_home / ".local" / "share" / "frmj"
 
-    def test_darwin_returns_xdg_path(
+    def test_darwin_fresh_install_returns_library_path(
         self, fake_home: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """macOS is treated identically to Linux — XDG, not ~/Library."""
+        """On macOS the canonical ~/Library/Application Support path is used for new installs."""
         monkeypatch.setattr(sys, "platform", "darwin")
+        assert (
+            _resolve_default_data_dir()
+            == fake_home / "Library" / "Application Support" / "frmj"
+        )
+
+    def test_darwin_existing_install_keeps_legacy_xdg_path(
+        self, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On macOS, the XDG path is preserved when frmj.db already lives there."""
+        monkeypatch.setattr(sys, "platform", "darwin")
+        legacy_db = fake_home / ".local" / "share" / "frmj" / "frmj.db"
+        legacy_db.parent.mkdir(parents=True)
+        legacy_db.touch()
         assert _resolve_default_data_dir() == fake_home / ".local" / "share" / "frmj"
+
+    def test_darwin_legacy_dir_without_db_does_not_trigger_fallback(
+        self, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On macOS, the legacy directory alone is not enough — frmj.db must be present."""
+        monkeypatch.setattr(sys, "platform", "darwin")
+        (fake_home / ".local" / "share" / "frmj").mkdir(parents=True)
+        assert (
+            _resolve_default_data_dir()
+            == fake_home / "Library" / "Application Support" / "frmj"
+        )
 
     def test_windows_fresh_install_returns_appdata_path(
         self, fake_home: Path, monkeypatch: pytest.MonkeyPatch
