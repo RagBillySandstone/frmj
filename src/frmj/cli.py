@@ -1570,7 +1570,7 @@ def journal(
             SELECT id, oanda_id, type, time, raw_json
             FROM transactions
             {where_sql}
-            ORDER BY time DESC
+            ORDER BY CAST(oanda_id AS INTEGER) DESC
             LIMIT ?
             """,
             params,
@@ -1999,7 +1999,9 @@ def _display_transaction(txn: sqlite3.Row) -> None:
             pass
 
     pl_str = f"  {_color_pl(pl)}" if pl is not None else ""
-    typer.echo(f"{time_short}  {txn['type']:<24}  #{txn['oanda_id']}{extra}{pl_str}")
+    typer.echo(
+        f"#{txn['oanda_id']:<12}  {txn['type']:<24}{extra}{pl_str}  {time_short}"
+    )
 
 
 def _prompt_tpsl(label: str) -> TPSLSpec | None:
