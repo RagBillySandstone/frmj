@@ -5,14 +5,16 @@ from __future__ import annotations
 from datetime import timedelta, timezone
 from decimal import Decimal
 
-import pytest
 
 from frmj.domain.analytics import (
     ClosedTrade,
+    DirectionStats,
     TradeSummary,
     compute_summary,
+    pl_by_direction,
     pl_by_hour,
     pl_by_instrument,
+    pl_by_instrument_direction,
     pl_by_weekday,
 )
 
@@ -88,7 +90,11 @@ class TestComputeSummary:
         assert result.avg_pl == Decimal("10.00")
 
     def test_total_pl_is_sum(self) -> None:
-        trades = [_trade("1", pl="25.00"), _trade("2", pl="-8.50"), _trade("3", pl="12.00")]
+        trades = [
+            _trade("1", pl="25.00"),
+            _trade("2", pl="-8.50"),
+            _trade("3", pl="12.00"),
+        ]
         result = compute_summary(trades)
         assert result is not None
         assert result.total_pl == Decimal("28.50")
@@ -141,8 +147,10 @@ class TestPlByInstrument:
         assert pl_by_instrument([]) == []
 
     def test_single_instrument(self) -> None:
-        trades = [_trade("1", instrument="EUR_USD", pl="20.00"),
-                  _trade("2", instrument="EUR_USD", pl="15.00")]
+        trades = [
+            _trade("1", instrument="EUR_USD", pl="20.00"),
+            _trade("2", instrument="EUR_USD", pl="15.00"),
+        ]
         rows = pl_by_instrument(trades)
         assert len(rows) == 1
         instr, count, total, avg = rows[0]
@@ -158,8 +166,8 @@ class TestPlByInstrument:
             _trade("3", instrument="EUR_USD", pl="-5.00"),
         ]
         rows = pl_by_instrument(trades)
-        assert rows[0][0] == "EUR_USD"   # 45.00 total
-        assert rows[1][0] == "GBP_USD"   # 10.00 total
+        assert rows[0][0] == "EUR_USD"  # 45.00 total
+        assert rows[1][0] == "GBP_USD"  # 10.00 total
 
     def test_losing_instrument_sorted_last(self) -> None:
         trades = [
@@ -326,3 +334,172 @@ class TestPlByWeekday:
         ]
         rows = pl_by_weekday(trades)
         assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
+# pl_by_direction
+# ---------------------------------------------------------------------------
+
+
+class TestPlByDirection:
+    def test_empty_list_returns_empty(self) -> None:
+        assert pl_by_direction([]) == []
+
+    def test_only_longs_returns_single_row(self) -> None:
+        trades = [
+            _trade("1", direction="LONG", pl="20.00"),
+            _trade("2", direction="LONG", pl="-5.00"),
+        ]
+        rows = pl_by_direction(trades)
+        assert len(rows) == 1
+        row = rows[0]
+        assert isinstance(row, DirectionStats)
+        assert row.direction == "LONG"
+        assert row.count == 2
+        assert row.wins == 1
+        assert row.losses == 1
+        assert row.total_pl == Decimal("15.00")
+        assert row.avg_pl == Decimal("7.50")
+        assert row.win_rate == Decimal(1) / Decimal(2)
+
+    def test_only_shorts_returns_single_row(self) -> None:
+        trades = [_trade("1", direction="SHORT", pl="40.00")]
+        rows = pl_by_direction(trades)
+        assert len(rows) == 1
+        assert rows[0].direction == "SHORT"
+        assert rows[0].total_pl == Decimal("40.00")
+
+    def test_long_listed_before_short(self) -> None:
+        trades = [
+            _trade("1", direction="SHORT", pl="10.00"),
+            _trade("2", direction="LONG", pl="5.00"),
+        ]
+        rows = pl_by_direction(trades)
+        assert [r.direction for r in rows] == ["LONG", "SHORT"]
+
+    def test_breakeven_counted_in_total_not_wins_or_losses(self) -> None:
+        trades = [
+            _trade("1", direction="LONG", pl="10.00"),
+            _trade("2", direction="LONG", pl="0.00"),
+            _trade("3", direction="LONG", pl="-5.00"),
+        ]
+        rows = pl_by_direction(trades)
+        assert rows[0].count == 3
+        assert rows[0].wins == 1
+        assert rows[0].losses == 1
+        # win_rate is wins/total, not wins/(wins+losses)
+        assert rows[0].win_rate == Decimal(1) / Decimal(3)
+
+    def test_mixed_directions_split_correctly(self) -> None:
+        trades = [
+            _trade("1", direction="LONG", pl="30.00"),
+            _trade("2", direction="LONG", pl="-10.00"),
+            _trade("3", direction="SHORT", pl="50.00"),
+            _trade("4", direction="SHORT", pl="-20.00"),
+            _trade("5", direction="SHORT", pl="-5.00"),
+        ]
+        rows = pl_by_direction(trades)
+        assert len(rows) == 2
+        long_row, short_row = rows
+        assert long_row.count == 2
+        assert long_row.total_pl == Decimal("20.00")
+        assert short_row.count == 3
+        assert short_row.total_pl == Decimal("25.00")
+
+    def test_unknown_direction_silently_dropped(self) -> None:
+        # Defensive: malformed rows are tolerated (they shouldn't occur in
+        # practice, but the parser elsewhere already swallows oddities).
+        trades = [
+            ClosedTrade(
+                "1",
+                "EUR_USD",
+                "2026-04-25T09:00:00.000000Z",
+                Decimal("10.00"),
+                1000,
+                "FLAT",
+            ),
+            _trade("2", direction="LONG", pl="5.00"),
+        ]
+        rows = pl_by_direction(trades)
+        assert len(rows) == 1
+        assert rows[0].direction == "LONG"
+        assert rows[0].count == 1
+
+
+# ---------------------------------------------------------------------------
+# pl_by_instrument_direction
+# ---------------------------------------------------------------------------
+
+
+class TestPlByInstrumentDirection:
+    def test_empty_list_returns_empty(self) -> None:
+        assert pl_by_instrument_direction([]) == []
+
+    def test_single_pair_long_only(self) -> None:
+        trades = [
+            _trade("1", instrument="EUR_USD", direction="LONG", pl="20.00"),
+            _trade("2", instrument="EUR_USD", direction="LONG", pl="-5.00"),
+        ]
+        rows = pl_by_instrument_direction(trades)
+        assert len(rows) == 1
+        instrument, stats = rows[0]
+        assert instrument == "EUR_USD"
+        assert stats.direction == "LONG"
+        assert stats.count == 2
+        assert stats.total_pl == Decimal("15.00")
+
+    def test_long_emitted_before_short_within_instrument(self) -> None:
+        trades = [
+            _trade("1", instrument="EUR_USD", direction="SHORT", pl="10.00"),
+            _trade("2", instrument="EUR_USD", direction="LONG", pl="5.00"),
+        ]
+        rows = pl_by_instrument_direction(trades)
+        directions = [stats.direction for _, stats in rows]
+        assert directions == ["LONG", "SHORT"]
+
+    def test_instruments_sorted_alphabetically(self) -> None:
+        trades = [
+            _trade("1", instrument="USD_JPY", direction="LONG", pl="5.00"),
+            _trade("2", instrument="EUR_USD", direction="LONG", pl="10.00"),
+            _trade("3", instrument="GBP_USD", direction="SHORT", pl="3.00"),
+        ]
+        rows = pl_by_instrument_direction(trades)
+        instruments = [instr for instr, _ in rows]
+        assert instruments == ["EUR_USD", "GBP_USD", "USD_JPY"]
+
+    def test_empty_side_omitted(self) -> None:
+        # EUR_USD has only LONG trades — no SHORT row should be emitted.
+        trades = [_trade("1", instrument="EUR_USD", direction="LONG", pl="20.00")]
+        rows = pl_by_instrument_direction(trades)
+        assert len(rows) == 1
+        assert rows[0][1].direction == "LONG"
+
+    def test_both_sides_emitted_when_present(self) -> None:
+        trades = [
+            _trade("1", instrument="EUR_USD", direction="LONG", pl="20.00"),
+            _trade("2", instrument="EUR_USD", direction="SHORT", pl="-5.00"),
+        ]
+        rows = pl_by_instrument_direction(trades)
+        assert len(rows) == 2
+        assert rows[0][0] == "EUR_USD"
+        assert rows[0][1].direction == "LONG"
+        assert rows[1][0] == "EUR_USD"
+        assert rows[1][1].direction == "SHORT"
+
+    def test_stats_per_row_are_correct(self) -> None:
+        trades = [
+            _trade("1", instrument="EUR_USD", direction="LONG", pl="30.00"),
+            _trade("2", instrument="EUR_USD", direction="LONG", pl="-10.00"),
+            _trade("3", instrument="EUR_USD", direction="LONG", pl="20.00"),
+            _trade("4", instrument="EUR_USD", direction="SHORT", pl="-15.00"),
+        ]
+        rows = pl_by_instrument_direction(trades)
+        long_row = next(s for _, s in rows if s.direction == "LONG")
+        short_row = next(s for _, s in rows if s.direction == "SHORT")
+        assert long_row.count == 3
+        assert long_row.wins == 2
+        assert long_row.losses == 1
+        assert long_row.total_pl == Decimal("40.00")
+        assert long_row.avg_pl == Decimal("40.00") / Decimal(3)
+        assert short_row.count == 1
+        assert short_row.total_pl == Decimal("-15.00")
