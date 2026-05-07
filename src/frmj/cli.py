@@ -112,9 +112,12 @@ from frmj.app import (
 )
 from frmj.domain.analytics import (
     ClosedTrade,
+    DirectionStats,
     compute_summary,
+    pl_by_direction,
     pl_by_hour,
     pl_by_instrument,
+    pl_by_instrument_direction,
     pl_by_weekday,
 )
 from frmj.domain.pricing import (
@@ -133,7 +136,7 @@ from frmj.domain.risk import (
     evaluate_trade,
 )
 from frmj.domain.sizing import Direction, compute_units
-from frmj.execution.oanda import AccountSummary, CloseFill, OpenTrade
+from frmj.execution.oanda import AccountSummary, OpenTrade
 from frmj.execution.sync import sync_cold, sync_incremental
 
 # ---------------------------------------------------------------------------
@@ -163,29 +166,71 @@ app.add_typer(config_app, name="config")
 # appears here.  Sorted alphabetically within each group.
 _FX_PAIRS: tuple[str, ...] = (
     # Majors
-    "aud_usd", "eur_usd", "gbp_usd", "nzd_usd",
-    "usd_cad", "usd_chf", "usd_jpy",
+    "aud_usd",
+    "eur_usd",
+    "gbp_usd",
+    "nzd_usd",
+    "usd_cad",
+    "usd_chf",
+    "usd_jpy",
     # Euro crosses
-    "eur_aud", "eur_cad", "eur_chf", "eur_gbp",
-    "eur_jpy", "eur_nzd",
+    "eur_aud",
+    "eur_cad",
+    "eur_chf",
+    "eur_gbp",
+    "eur_jpy",
+    "eur_nzd",
     # Sterling crosses
-    "gbp_aud", "gbp_cad", "gbp_chf", "gbp_jpy", "gbp_nzd",
+    "gbp_aud",
+    "gbp_cad",
+    "gbp_chf",
+    "gbp_jpy",
+    "gbp_nzd",
     # Antipodean / commodity crosses
-    "aud_cad", "aud_chf", "aud_jpy", "aud_nzd",
-    "cad_chf", "cad_jpy",
+    "aud_cad",
+    "aud_chf",
+    "aud_jpy",
+    "aud_nzd",
+    "cad_chf",
+    "cad_jpy",
     "chf_jpy",
-    "nzd_cad", "nzd_chf", "nzd_jpy",
+    "nzd_cad",
+    "nzd_chf",
+    "nzd_jpy",
     # SGD crosses
-    "sgd_chf", "sgd_hkd", "sgd_jpy",
+    "sgd_chf",
+    "sgd_hkd",
+    "sgd_jpy",
     # USD exotics
-    "usd_cnh", "usd_czk", "usd_dkk", "usd_hkd", "usd_huf",
-    "usd_mxn", "usd_nok", "usd_pln", "usd_sar", "usd_sek",
-    "usd_sgd", "usd_thb", "usd_try", "usd_zar",
+    "usd_cnh",
+    "usd_czk",
+    "usd_dkk",
+    "usd_hkd",
+    "usd_huf",
+    "usd_mxn",
+    "usd_nok",
+    "usd_pln",
+    "usd_sar",
+    "usd_sek",
+    "usd_sgd",
+    "usd_thb",
+    "usd_try",
+    "usd_zar",
     # EUR exotics
-    "eur_czk", "eur_dkk", "eur_huf", "eur_nok",
-    "eur_pln", "eur_sek", "eur_try", "eur_zar",
+    "eur_czk",
+    "eur_dkk",
+    "eur_huf",
+    "eur_nok",
+    "eur_pln",
+    "eur_sek",
+    "eur_try",
+    "eur_zar",
     # Metals / spot commodities
-    "xag_usd", "xau_usd", "xcu_usd", "xpd_usd", "xpt_usd",
+    "xag_usd",
+    "xau_usd",
+    "xcu_usd",
+    "xpd_usd",
+    "xpt_usd",
 )
 
 
@@ -242,7 +287,9 @@ def sync(
         conn.close()
 
     mode = "cold" if cold else "incremental"
-    typer.echo(f"Sync ({mode}): {result.rows_ingested} ingested, {result.rows_skipped} skipped")
+    typer.echo(
+        f"Sync ({mode}): {result.rows_ingested} ingested, {result.rows_skipped} skipped"
+    )
     if result.last_oanda_id:
         typer.echo(f"Cursor: transaction {result.last_oanda_id}")
     else:
@@ -377,18 +424,20 @@ def close(
 
 #: Keys accepted by ``frmj config set``.  The API token is excluded because it
 #: is stored in the OS keychain via ``config set-token``, not in the DB.
-VALID_CONFIG_KEYS: frozenset[str] = frozenset({
-    "account_id",
-    "blocking_mode",
-    "fixed_dollar",
-    "max_open_trades",
-    "percent_of_equity",
-    "practice_account_id",
-    "practice_mode",
-    "risk_strategy",
-    "safety_reserve_pct",
-    "scale_in",
-})
+VALID_CONFIG_KEYS: frozenset[str] = frozenset(
+    {
+        "account_id",
+        "blocking_mode",
+        "fixed_dollar",
+        "max_open_trades",
+        "percent_of_equity",
+        "practice_account_id",
+        "practice_mode",
+        "risk_strategy",
+        "safety_reserve_pct",
+        "scale_in",
+    }
+)
 
 
 @config_app.command("set")
@@ -522,89 +571,140 @@ def config_check(
         practice_token = get_token(practice=True)
         active_marker = " (active)" if practice_active else ""
         if os.environ.get("OANDA_API_TOKEN_PRACTICE"):
-            checks.append(("practice token", "OK",
-                           f"OANDA_API_TOKEN_PRACTICE env var{active_marker}"))
+            checks.append(
+                (
+                    "practice token",
+                    "OK",
+                    f"OANDA_API_TOKEN_PRACTICE env var{active_marker}",
+                )
+            )
         elif practice_token:
-            checks.append(("practice token", "OK",
-                           f"OS keychain{active_marker}"))
+            checks.append(("practice token", "OK", f"OS keychain{active_marker}"))
         elif practice_active:
-            checks.append(("practice token", "MISSING",
-                           "run: frmj config set-token --practice"))
+            checks.append(
+                ("practice token", "MISSING", "run: frmj config set-token --practice")
+            )
         else:
-            checks.append(("practice token", "INFO",
-                           "not configured — run: frmj config set-token --practice"))
+            checks.append(
+                (
+                    "practice token",
+                    "INFO",
+                    "not configured — run: frmj config set-token --practice",
+                )
+            )
 
         practice_account_id_val = all_cfg.get("practice_account_id")
         if practice_account_id_val:
-            checks.append(("practice_account_id", "OK",
-                           f"{practice_account_id_val}{active_marker}"))
+            checks.append(
+                (
+                    "practice_account_id",
+                    "OK",
+                    f"{practice_account_id_val}{active_marker}",
+                )
+            )
         elif practice_active:
-            checks.append(("practice_account_id", "MISSING",
-                           "run: frmj config set practice_account_id <ID>"))
+            checks.append(
+                (
+                    "practice_account_id",
+                    "MISSING",
+                    "run: frmj config set practice_account_id <ID>",
+                )
+            )
         else:
-            checks.append(("practice_account_id", "INFO",
-                           "not configured — run: frmj config set practice_account_id <ID>"))
+            checks.append(
+                (
+                    "practice_account_id",
+                    "INFO",
+                    "not configured — run: frmj config set practice_account_id <ID>",
+                )
+            )
 
         # --- Live credentials ------------------------------------------------
         live_token = get_token(practice=False)
         active_marker = " (active)" if not practice_active else ""
         if os.environ.get("OANDA_API_TOKEN"):
-            checks.append(("live token", "OK",
-                           f"OANDA_API_TOKEN env var{active_marker}"))
+            checks.append(
+                ("live token", "OK", f"OANDA_API_TOKEN env var{active_marker}")
+            )
         elif live_token:
-            checks.append(("live token", "OK",
-                           f"OS keychain{active_marker}"))
+            checks.append(("live token", "OK", f"OS keychain{active_marker}"))
         elif not practice_active:
-            checks.append(("live token", "MISSING",
-                           "run: frmj config set-token"))
+            checks.append(("live token", "MISSING", "run: frmj config set-token"))
         else:
-            checks.append(("live token", "INFO",
-                           "not configured — run: frmj config set-token"))
+            checks.append(
+                ("live token", "INFO", "not configured — run: frmj config set-token")
+            )
 
         account_id_val = all_cfg.get("account_id")
         if account_id_val:
-            checks.append(("account_id", "OK",
-                           f"{account_id_val}{active_marker}"))
+            checks.append(("account_id", "OK", f"{account_id_val}{active_marker}"))
         elif not practice_active:
-            checks.append(("account_id", "MISSING",
-                           "run: frmj config set account_id <ID>"))
+            checks.append(
+                ("account_id", "MISSING", "run: frmj config set account_id <ID>")
+            )
         else:
-            checks.append(("account_id", "INFO",
-                           "not configured — run: frmj config set account_id <ID>"))
+            checks.append(
+                (
+                    "account_id",
+                    "INFO",
+                    "not configured — run: frmj config set account_id <ID>",
+                )
+            )
 
         # --- max_open_trades (required for trading) --------------------------
         mot = all_cfg.get("max_open_trades")
         if mot is None:
-            checks.append(("max_open_trades", "WARN",
-                           "not set — trading disabled; run: frmj config set max_open_trades <N>"))
+            checks.append(
+                (
+                    "max_open_trades",
+                    "WARN",
+                    "not set — trading disabled; run: frmj config set max_open_trades <N>",
+                )
+            )
         else:
             try:
                 if int(mot) <= 0:
                     raise ValueError
                 checks.append(("max_open_trades", "OK", mot))
             except ValueError:
-                checks.append(("max_open_trades", "INVALID",
-                               f"{mot!r} — must be a positive integer"))
+                checks.append(
+                    (
+                        "max_open_trades",
+                        "INVALID",
+                        f"{mot!r} — must be a positive integer",
+                    )
+                )
 
         # --- risk_strategy ---------------------------------------------------
         rs_val = all_cfg.get("risk_strategy")
         valid_strategies = [s.value for s in RiskStrategy]
         if rs_val is None:
-            checks.append(("risk_strategy", "OK",
-                           f"remaining_margin_fraction (default)"))
+            checks.append(
+                ("risk_strategy", "OK", "remaining_margin_fraction (default)")
+            )
         elif rs_val in valid_strategies:
             checks.append(("risk_strategy", "OK", rs_val))
         else:
-            checks.append(("risk_strategy", "INVALID",
-                           f"{rs_val!r} — must be one of: {', '.join(valid_strategies)}"))
+            checks.append(
+                (
+                    "risk_strategy",
+                    "INVALID",
+                    f"{rs_val!r} — must be one of: {', '.join(valid_strategies)}",
+                )
+            )
 
         # --- percent_of_equity (required when strategy=percent_of_equity) ----
         effective_strategy = rs_val or "remaining_margin_fraction"
         if effective_strategy == RiskStrategy.PERCENT_OF_EQUITY.value:
             poe = all_cfg.get("percent_of_equity")
             if poe is None:
-                checks.append(("percent_of_equity", "MISSING",
-                               "required when risk_strategy = percent_of_equity"))
+                checks.append(
+                    (
+                        "percent_of_equity",
+                        "MISSING",
+                        "required when risk_strategy = percent_of_equity",
+                    )
+                )
             else:
                 checks.append(("percent_of_equity", "OK", poe))
 
@@ -612,8 +712,13 @@ def config_check(
         if effective_strategy == RiskStrategy.FIXED_DOLLAR.value:
             fd = all_cfg.get("fixed_dollar")
             if fd is None:
-                checks.append(("fixed_dollar", "MISSING",
-                               "required when risk_strategy = fixed_dollar"))
+                checks.append(
+                    (
+                        "fixed_dollar",
+                        "MISSING",
+                        "required when risk_strategy = fixed_dollar",
+                    )
+                )
             else:
                 checks.append(("fixed_dollar", "OK", fd))
 
@@ -625,8 +730,13 @@ def config_check(
         elif bm_val in valid_modes:
             checks.append(("blocking_mode", "OK", bm_val))
         else:
-            checks.append(("blocking_mode", "INVALID",
-                           f"{bm_val!r} — must be one of: {', '.join(valid_modes)}"))
+            checks.append(
+                (
+                    "blocking_mode",
+                    "INVALID",
+                    f"{bm_val!r} — must be one of: {', '.join(valid_modes)}",
+                )
+            )
 
         # --- scale_in --------------------------------------------------------
         si_val = all_cfg.get("scale_in")
@@ -636,8 +746,13 @@ def config_check(
         elif si_val in valid_si:
             checks.append(("scale_in", "OK", si_val))
         else:
-            checks.append(("scale_in", "INVALID",
-                           f"{si_val!r} — must be one of: {', '.join(valid_si)}"))
+            checks.append(
+                (
+                    "scale_in",
+                    "INVALID",
+                    f"{si_val!r} — must be one of: {', '.join(valid_si)}",
+                )
+            )
 
         # --- safety_reserve_pct ----------------------------------------------
         sr_val = all_cfg.get("safety_reserve_pct")
@@ -650,8 +765,13 @@ def config_check(
                     raise ValueError
                 checks.append(("safety_reserve_pct", "OK", sr_val))
             except Exception:
-                checks.append(("safety_reserve_pct", "INVALID",
-                               f"{sr_val!r} — must be a decimal in [0, 1)"))
+                checks.append(
+                    (
+                        "safety_reserve_pct",
+                        "INVALID",
+                        f"{sr_val!r} — must be a decimal in [0, 1)",
+                    )
+                )
 
         # --- practice_mode ---------------------------------------------------
         pm_val = all_cfg.get("practice_mode")
@@ -660,25 +780,39 @@ def config_check(
         elif pm_val.lower() in ("true", "false", "1", "0", "yes", "no"):
             checks.append(("practice_mode", "OK", pm_val))
         else:
-            checks.append(("practice_mode", "INVALID",
-                           f"{pm_val!r} — must be true or false"))
+            checks.append(
+                ("practice_mode", "INVALID", f"{pm_val!r} — must be true or false")
+            )
 
         # --- Connectivity (opt-in) -------------------------------------------
         if connectivity:
             active_token = practice_token if practice_active else live_token
-            active_account_id = practice_account_id_val if practice_active else account_id_val
+            active_account_id = (
+                practice_account_id_val if practice_active else account_id_val
+            )
             if active_token and active_account_id:
                 try:
                     client = get_client(conn)
                     summary = client.get_account_summary()
-                    checks.append(("connectivity", "OK",
-                                   f"Oanda responded — NAV ${summary.nav:,.2f}"))
+                    checks.append(
+                        (
+                            "connectivity",
+                            "OK",
+                            f"Oanda responded — NAV ${summary.nav:,.2f}",
+                        )
+                    )
                 except Exception as exc:
-                    checks.append(("connectivity", "INVALID",
-                                   f"API call failed: {exc}"))
+                    checks.append(
+                        ("connectivity", "INVALID", f"API call failed: {exc}")
+                    )
             else:
-                checks.append(("connectivity", "WARN",
-                               "skipped — active token or account_id not configured"))
+                checks.append(
+                    (
+                        "connectivity",
+                        "WARN",
+                        "skipped — active token or account_id not configured",
+                    )
+                )
 
     finally:
         conn.close()
@@ -710,12 +844,12 @@ def config_check(
     if not errors and not warnings:
         typer.echo(typer.style("All checks passed.", fg=typer.colors.GREEN))
     elif not errors:
-        typer.echo(f"{len(warnings)} warning(s). Configuration is usable but incomplete.")
+        typer.echo(
+            f"{len(warnings)} warning(s). Configuration is usable but incomplete."
+        )
     else:
         count = len(errors) + len(warnings)
-        typer.echo(
-            typer.style(f"{count} issue(s) found.", fg=typer.colors.RED)
-        )
+        typer.echo(typer.style(f"{count} issue(s) found.", fg=typer.colors.RED))
         raise typer.Exit(1)
 
 
@@ -917,7 +1051,10 @@ def trade(
 
         _display_exits(exits, units_calc.margin_used)
 
-        if exits.projected_profit_home is not None and exits.projected_loss_home is not None:
+        if (
+            exits.projected_profit_home is not None
+            and exits.projected_loss_home is not None
+        ):
             if exits.projected_loss_home != 0:
                 rr = abs(exits.projected_profit_home / exits.projected_loss_home)
                 typer.echo(f"  R:R  {rr:.2f}")
@@ -953,7 +1090,9 @@ def trade(
                 )
                 _display_exits(exits, units_calc.margin_used)
 
-        units_signed = units_calc.units if direction is Direction.LONG else -units_calc.units
+        units_signed = (
+            units_calc.units if direction is Direction.LONG else -units_calc.units
+        )
         tp_price = exits.take_profit_price
         sl_price = exits.stop_loss_price
 
@@ -981,13 +1120,15 @@ def trade(
         if action == "r":
             continue
         elif action == "s":
-            plan_path = save_draft_plan({
-                "instrument": instrument,
-                "direction": direction_str,
-                "units_signed": units_signed,
-                "tp_price": str(tp_price) if tp_price is not None else None,
-                "sl_price": str(sl_price) if sl_price is not None else None,
-            })
+            plan_path = save_draft_plan(
+                {
+                    "instrument": instrument,
+                    "direction": direction_str,
+                    "units_signed": units_signed,
+                    "tp_price": str(tp_price) if tp_price is not None else None,
+                    "sl_price": str(sl_price) if sl_price is not None else None,
+                }
+            )
             typer.echo(f"Plan saved to {plan_path}.")
             typer.echo("Resume later with:  frmj trade --resume")
             conn.close()
@@ -997,7 +1138,9 @@ def trade(
             conn.close()
             return
 
-    typer.echo(f"Order filled at {fill.fill_price} — transaction #{fill.transaction_id}")
+    typer.echo(
+        f"Order filled at {fill.fill_price} — transaction #{fill.transaction_id}"
+    )
 
     # --- Attach TP/SL to the open trade on Oanda -----------------------------
     if fill.trade_id is None:
@@ -1080,8 +1223,15 @@ def trade(
 
 # Ordered columns for both CSV and JSON export.
 _EXPORT_FIELDS = (
-    "oanda_id", "account_id", "type", "time",
-    "instrument", "units", "direction", "pl", "price",
+    "oanda_id",
+    "account_id",
+    "type",
+    "time",
+    "instrument",
+    "units",
+    "direction",
+    "pl",
+    "price",
 )
 
 
@@ -1235,15 +1385,17 @@ def stats() -> None:
             if pl_val == 0:
                 continue  # opening fill — no realised P/L
             units_raw = int(Decimal(data.get("units", "0")))
-            trades.append(ClosedTrade(
-                oanda_id=row["oanda_id"],
-                instrument=data.get("instrument", ""),
-                time=row["time"],
-                pl=pl_val,
-                units=abs(units_raw),
-                # Closing a long = negative units in close txn; short = positive.
-                direction="LONG" if units_raw < 0 else "SHORT",
-            ))
+            trades.append(
+                ClosedTrade(
+                    oanda_id=row["oanda_id"],
+                    instrument=data.get("instrument", ""),
+                    time=row["time"],
+                    pl=pl_val,
+                    units=abs(units_raw),
+                    # Closing a long = negative units in close txn; short = positive.
+                    direction="LONG" if units_raw < 0 else "SHORT",
+                )
+            )
         except Exception:
             continue
 
@@ -1405,7 +1557,9 @@ def journal(
         if with_notes:
             where.append("id IN (SELECT DISTINCT transaction_id FROM notes)")
         if filter_tag:
-            where.append("id IN (SELECT DISTINCT transaction_id FROM tags WHERE tag = ?)")
+            where.append(
+                "id IN (SELECT DISTINCT transaction_id FROM tags WHERE tag = ?)"
+            )
             params.append(filter_tag.lower())
 
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
@@ -1423,13 +1577,15 @@ def journal(
         ).fetchall()
 
         active_filters = [
-            f for f in [
+            f
+            for f in [
                 f"instrument={instrument}" if instrument else "",
                 f"type={txn_type}" if txn_type else "",
                 f"since={since}" if since else "",
                 "with-notes" if with_notes else "",
                 f"tag={filter_tag}" if filter_tag else "",
-            ] if f
+            ]
+            if f
         ]
         if active_filters:
             typer.echo(f"Filter: {', '.join(active_filters)}")
@@ -1492,6 +1648,7 @@ def _validate_tag(raw: str) -> str | None:
     if not t:
         return None
     import re
+
     if not re.fullmatch(r"[a-z0-9_-]+", t):
         return None
     return t
@@ -1546,9 +1703,7 @@ def _watch_loop(interval: int) -> None:
         conn.close()
         raise typer.Exit(1)
 
-    typer.echo(
-        f"Watching for new transactions (every {interval}s) — Ctrl+C to stop."
-    )
+    typer.echo(f"Watching for new transactions (every {interval}s) — Ctrl+C to stop.")
 
     try:
         while True:
@@ -1615,6 +1770,16 @@ def _display_stats(
     typer.echo(f"  Best:       {_color_pl(summary.best_pl)}")
     typer.echo(f"  Worst:      {_color_pl(summary.worst_pl)}")
 
+    # "By direction" — overall LONG vs SHORT side-by-side.  Helps spot a
+    # systemic bias (e.g. only the long side is profitable).
+    by_dir = pl_by_direction(trades)
+    if by_dir:
+        typer.echo("")
+        typer.echo("By direction")
+        typer.echo("─" * 50)
+        for stats in by_dir:
+            typer.echo(_format_direction_row(stats))
+
     by_instr = pl_by_instrument(trades)
     if by_instr:
         typer.echo("")
@@ -1625,6 +1790,22 @@ def _display_stats(
             typer.echo(
                 f"  {instr:<{iw}}  {count:>4}  {_color_pl(total)}"
                 f"    avg {_color_pl(avg)}"
+            )
+
+    # "By instrument & direction" — surfaces (pair, side) edges that the
+    # plain instrument view averages away.  Emitted only when at least one
+    # instrument has trades on both sides, otherwise it duplicates the
+    # plain instrument view above.
+    by_instr_dir = pl_by_instrument_direction(trades)
+    if by_instr_dir and _has_both_sides(by_instr_dir):
+        typer.echo("")
+        typer.echo("By instrument & direction")
+        typer.echo("─" * 50)
+        # Pad instrument column to the widest instrument name for alignment.
+        iw = max(len(instr) for instr, _ in by_instr_dir)
+        for instrument, stats in by_instr_dir:
+            typer.echo(
+                f"  {instrument:<{iw}}  {_format_direction_row(stats, indent=False)}"
             )
 
     by_day = pl_by_weekday(trades)
@@ -1735,7 +1916,39 @@ def _print_token_status() -> None:
     elif get_token(practice=True) is not None:
         typer.echo("practice API token =  (stored in OS keychain)")
     else:
-        typer.echo("practice API token =  (not set — run: frmj config set-token --practice)")
+        typer.echo(
+            "practice API token =  (not set — run: frmj config set-token --practice)"
+        )
+
+
+def _format_direction_row(stats: DirectionStats, indent: bool = True) -> str:
+    """Render one DirectionStats as a single fixed-width line.
+
+    Used both by the "By direction" and "By instrument & direction" tables;
+    *indent* controls the leading two-space gutter that direct table rows
+    expect (the instrument-prefixed variant supplies its own indent).
+    """
+    # Direction label is padded to "SHORT" width so LONG/SHORT rows align;
+    # count is right-aligned in a 4-char field consistent with other tables.
+    prefix = "  " if indent else ""
+    return (
+        f"{prefix}{stats.direction:<5}  {stats.count:>4}"
+        f"  win {stats.win_rate * 100:5.1f}%"
+        f"  total {_color_pl(stats.total_pl)}"
+        f"  avg {_color_pl(stats.avg_pl)}"
+    )
+
+
+def _has_both_sides(rows: list[tuple[str, DirectionStats]]) -> bool:
+    """Return True if any instrument in *rows* has both LONG and SHORT trades.
+
+    Suppresses the "By instrument & direction" section when every pair is
+    one-sided, since in that case it would just restate "By instrument".
+    """
+    seen: dict[str, set[str]] = {}
+    for instrument, stats in rows:
+        seen.setdefault(instrument, set()).add(stats.direction)
+    return any(len(sides) > 1 for sides in seen.values())
 
 
 def _color_pl(pl: Decimal) -> str:
@@ -1886,12 +2099,12 @@ def _display_open_trade(conn: sqlite3.Connection, trade: OpenTrade) -> None:
 def _display_account_summary(summary: AccountSummary) -> None:
     """Print account-level summary rows beneath the positions table."""
     rows: list[tuple[str, str]] = [
-        ("NAV",              f"${summary.nav:,.2f}"),
-        ("Unrealized P/L",  _pl_str(summary.unrealized_pl)),
-        ("Balance",         f"${summary.balance:,.2f}"),
-        ("Realized P/L",    _pl_str(summary.realized_pl)),
-        ("Position Value",  f"${summary.position_value:,.2f}"),
-        ("Margin Used",     f"${summary.margin_used:,.2f}"),
+        ("NAV", f"${summary.nav:,.2f}"),
+        ("Unrealized P/L", _pl_str(summary.unrealized_pl)),
+        ("Balance", f"${summary.balance:,.2f}"),
+        ("Realized P/L", _pl_str(summary.realized_pl)),
+        ("Position Value", f"${summary.position_value:,.2f}"),
+        ("Margin Used", f"${summary.margin_used:,.2f}"),
         ("Margin Available", f"${summary.margin_available:,.2f}"),
     ]
     label_width = max(len(label) for label, _ in rows)
