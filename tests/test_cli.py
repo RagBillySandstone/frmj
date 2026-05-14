@@ -24,10 +24,17 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
+from frmj.accounts import add_account, set_active_account
 from frmj.app import get_db, set_config
 from frmj.cli import app
-from frmj.domain.sizing import Direction, InstrumentSpec, PriceQuote
-from frmj.execution.oanda import AccountSummary, CloseFill, OpenTrade, OrderFill, TransactionRow
+from frmj.domain.sizing import InstrumentSpec, PriceQuote
+from frmj.execution.oanda import (
+    AccountSummary,
+    CloseFill,
+    OpenTrade,
+    OrderFill,
+    TransactionRow,
+)
 
 runner = CliRunner()
 
@@ -68,15 +75,18 @@ def _row(oanda_id: str, account_id: str = "acct-1") -> TransactionRow:
 
 @pytest.fixture()
 def db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Set FRMJ_DB_PATH to a temp location and seed credentials for practice mode
-    (the default).  OANDA_API_TOKEN acts as the legacy practice-mode fallback.
+    """Set FRMJ_DB_PATH to a temp location and seed a practice account.
+
+    OANDA_API_TOKEN is set as a legacy env var; get_account_token falls back
+    to it for practice accounts, so tests don't need to touch the keyring.
     """
     path = tmp_path / "frmj_test.db"
     monkeypatch.setenv("FRMJ_DB_PATH", str(path))
     monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
-    # Seed practice_account_id so get_client doesn't raise in default practice mode.
+    # Add a named practice account and activate it.
     conn = get_db(path=path)
-    set_config(conn, "practice_account_id", "acct-1")
+    add_account(conn, "practice", "acct-1", is_practice=True)
+    set_active_account(conn, "practice")
     conn.close()
     return path
 
@@ -145,18 +155,18 @@ class TestSyncCommand:
         assert result.exit_code == 0
         assert "42" in result.output
 
-    def test_sync_exits_1_on_missing_token(
+    def test_sync_exits_1_on_missing_account(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Missing OANDA_API_TOKEN → exit code 1, error message."""
-        path = tmp_path / "no_token.db"
+        """No active account → exit code 1, actionable error message."""
+        path = tmp_path / "no_account.db"
         monkeypatch.setenv("FRMJ_DB_PATH", str(path))
         monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
         result = runner.invoke(app, ["sync"])
         assert result.exit_code == 1
-        assert "OANDA_API_TOKEN" in result.stderr
+        assert "No active account" in result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -194,10 +204,13 @@ class TestSyncWatch:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """KeyboardInterrupt causes the loop to print 'Stopped.' and exit 0."""
+
         def fake_sync(conn, client):
             raise KeyboardInterrupt
 
-        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeClient(account_id="acct-1"))
+        monkeypatch.setattr(
+            "frmj.cli.get_client", lambda conn: FakeClient(account_id="acct-1")
+        )
         monkeypatch.setattr("frmj.cli.sync_incremental", fake_sync)
         monkeypatch.setattr("frmj.cli.time.sleep", lambda _: None)
 
@@ -211,10 +224,13 @@ class TestSyncWatch:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The opening message includes the configured interval."""
+
         def fake_sync(conn, client):
             raise KeyboardInterrupt
 
-        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeClient(account_id="acct-1"))
+        monkeypatch.setattr(
+            "frmj.cli.get_client", lambda conn: FakeClient(account_id="acct-1")
+        )
         monkeypatch.setattr("frmj.cli.sync_incremental", fake_sync)
         monkeypatch.setattr("frmj.cli.time.sleep", lambda _: None)
 
@@ -244,10 +260,13 @@ class TestSyncWatch:
             call_count += 1
             if call_count == 1:
                 from frmj.execution.sync import SyncResult
+
                 return SyncResult(rows_ingested=0, rows_skipped=0, last_oanda_id="100")
             raise KeyboardInterrupt
 
-        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeClient(account_id="acct-1"))
+        monkeypatch.setattr(
+            "frmj.cli.get_client", lambda conn: FakeClient(account_id="acct-1")
+        )
         monkeypatch.setattr("frmj.cli.sync_incremental", fake_sync)
         monkeypatch.setattr("frmj.cli.time.sleep", lambda _: None)
 
@@ -255,7 +274,8 @@ class TestSyncWatch:
         assert result.exit_code == 0
         # Only the header and "Stopped." line; no transaction rows.
         body_lines = [
-            ln for ln in result.output.splitlines()
+            ln
+            for ln in result.output.splitlines()
             if ln.strip() and "Watching" not in ln and "Stopped" not in ln
         ]
         assert body_lines == []
@@ -292,10 +312,13 @@ class TestSyncWatch:
             call_count += 1
             if call_count == 1:
                 from frmj.execution.sync import SyncResult
+
                 return SyncResult(rows_ingested=1, rows_skipped=0, last_oanda_id="101")
             raise KeyboardInterrupt
 
-        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeClient(account_id="acct-1"))
+        monkeypatch.setattr(
+            "frmj.cli.get_client", lambda conn: FakeClient(account_id="acct-1")
+        )
         monkeypatch.setattr("frmj.cli.sync_incremental", fake_sync)
         monkeypatch.setattr("frmj.cli.time.sleep", lambda _: None)
 
@@ -317,10 +340,13 @@ class TestSyncWatch:
             call_count += 1
             if call_count == 1:
                 from frmj.execution.sync import SyncResult
+
                 return SyncResult(rows_ingested=50, rows_skipped=0, last_oanda_id="50")
             raise KeyboardInterrupt
 
-        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeClient(account_id="acct-1"))
+        monkeypatch.setattr(
+            "frmj.cli.get_client", lambda conn: FakeClient(account_id="acct-1")
+        )
         monkeypatch.setattr("frmj.cli.sync_incremental", fake_sync)
         monkeypatch.setattr("frmj.cli.time.sleep", lambda _: None)
 
@@ -345,7 +371,9 @@ class TestSyncWatch:
                 raise ValueError("network blip")
             raise KeyboardInterrupt
 
-        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeClient(account_id="acct-1"))
+        monkeypatch.setattr(
+            "frmj.cli.get_client", lambda conn: FakeClient(account_id="acct-1")
+        )
         monkeypatch.setattr("frmj.cli.sync_incremental", fake_sync)
         monkeypatch.setattr("frmj.cli.time.sleep", lambda _: None)
 
@@ -369,10 +397,13 @@ class TestSyncWatch:
             call_count += 1
             if call_count == 1:
                 from frmj.execution.sync import SyncResult
+
                 return SyncResult(rows_ingested=0, rows_skipped=0, last_oanda_id="100")
             raise KeyboardInterrupt
 
-        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeClient(account_id="acct-1"))
+        monkeypatch.setattr(
+            "frmj.cli.get_client", lambda conn: FakeClient(account_id="acct-1")
+        )
         monkeypatch.setattr("frmj.cli.sync_incremental", fake_sync)
         monkeypatch.setattr("frmj.cli.time.sleep", lambda s: sleep_calls.append(s))
 
@@ -386,9 +417,7 @@ class TestSyncWatch:
 
 
 class TestConfigCommands:
-    def test_config_set_and_get_roundtrip(
-        self, db_path: Path
-    ) -> None:
+    def test_config_set_and_get_roundtrip(self, db_path: Path) -> None:
         """``frmj config set`` writes, ``frmj config get`` reads back."""
         set_result = runner.invoke(app, ["config", "set", "max_open_trades", "6"])
         assert set_result.exit_code == 0, set_result.output
@@ -399,9 +428,7 @@ class TestConfigCommands:
         assert get_result.exit_code == 0, get_result.output
         assert get_result.output.strip() == "6"
 
-    def test_config_set_overwrites_existing_value(
-        self, db_path: Path
-    ) -> None:
+    def test_config_set_overwrites_existing_value(self, db_path: Path) -> None:
         runner.invoke(app, ["config", "set", "scale_in", "warn"])
         runner.invoke(app, ["config", "set", "scale_in", "allow"])
         result = runner.invoke(app, ["config", "get", "scale_in"])
@@ -415,15 +442,21 @@ class TestConfigCommands:
     def test_config_set_multiple_keys(self, db_path: Path) -> None:
         """Multiple independent keys can be set without interference."""
         pairs = [
-            ("account_id", "val-1"),
-            ("practice_account_id", "val-2"),
-            ("max_open_trades", "val-3"),
+            ("max_open_trades", "5"),
+            ("scale_in", "warn"),
+            ("blocking_mode", "warning_only"),
         ]
         for key, val in pairs:
             runner.invoke(app, ["config", "set", key, val])
         for key, val in pairs:
             result = runner.invoke(app, ["config", "get", key])
             assert result.output.strip() == val
+
+    def test_config_set_rejects_account_id(self, db_path: Path) -> None:
+        """account_id is no longer a valid config key — must use 'frmj account' instead."""
+        result = runner.invoke(app, ["config", "set", "account_id", "101-001"])
+        assert result.exit_code == 1
+        assert "not a valid config key" in result.output
 
     def test_config_get_all_shows_all_keys(self, db_path: Path) -> None:
         """``frmj config get`` with no argument shows every configured key."""
@@ -436,12 +469,12 @@ class TestConfigCommands:
         assert "scale_in" in result.output
         assert "never" in result.output
 
-    def test_config_get_all_empty_db_shows_message(self, db_path: Path) -> None:
-        """``frmj config get`` on a fresh DB (only practice_account_id seeded) shows it."""
+    def test_config_get_all_shows_active_account(self, db_path: Path) -> None:
+        """``frmj config get`` shows the active_account config key set by the fixture."""
         result = runner.invoke(app, ["config", "get"])
         assert result.exit_code == 0, result.output
-        # The db_path fixture seeds practice_account_id, so it must appear.
-        assert "practice_account_id" in result.output
+        # The db_path fixture adds a practice account and activates it.
+        assert "active_account" in result.output
 
     def test_config_get_all_shows_token_status(self, db_path: Path) -> None:
         """``frmj config get`` always prints an API token status line."""
@@ -460,8 +493,10 @@ class TestConfigCommands:
     def test_config_get_all_token_from_env(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """OANDA_API_TOKEN detected as legacy env var source — value never printed."""
         monkeypatch.setenv("OANDA_API_TOKEN", "env-tok")
         result = runner.invoke(app, ["config", "get"])
+        # Displayed as "legacy env var" since it's the old format.
         assert "env var" in result.output
         assert "env-tok" not in result.output  # value must not be printed
 
@@ -493,7 +528,6 @@ class TestConfigCheck:
             ("blocking_mode", "hard_block"),
             ("scale_in", "never"),
             ("safety_reserve_pct", "0.05"),
-            ("practice_mode", "true"),
         ]:
             runner.invoke(app, ["config", "set", key, val])
 
@@ -506,22 +540,22 @@ class TestConfigCheck:
     ) -> None:
         """Missing token shows MISSING status and exits 1."""
         monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
+        monkeypatch.delenv("OANDA_API_TOKEN_PRACTICE", raising=False)
         monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: None)
         result = runner.invoke(app, ["config", "check"])
         assert result.exit_code == 1
         assert "MISSING" in result.output
 
-    def test_missing_account_id_exits_1(
+    def test_missing_active_account_exits_1(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Missing account_id shows MISSING and exits 1."""
+        """No active account shows MISSING and exits 1."""
         path = tmp_path / "check_test.db"
         monkeypatch.setenv("FRMJ_DB_PATH", str(path))
-        # token is present via db_path fixture env setup in test
         monkeypatch.setenv("OANDA_API_TOKEN", "tok")
         result = runner.invoke(app, ["config", "check"])
         assert result.exit_code == 1
-        assert "account_id" in result.output
+        assert "active account" in result.output
         assert "MISSING" in result.output
 
     def test_missing_max_open_trades_is_warning(
@@ -533,9 +567,7 @@ class TestConfigCheck:
         assert "WARN" in result.output
         assert "max_open_trades" in result.output
 
-    def test_invalid_risk_strategy_exits_1(
-        self, db_path: Path
-    ) -> None:
+    def test_invalid_risk_strategy_exits_1(self, db_path: Path) -> None:
         """An unknown risk_strategy value shows INVALID and exits 1."""
         runner.invoke(app, ["config", "set", "risk_strategy", "bogus_strategy"])
         result = runner.invoke(app, ["config", "check"])
@@ -543,36 +575,28 @@ class TestConfigCheck:
         assert "INVALID" in result.output
         assert "risk_strategy" in result.output
 
-    def test_invalid_blocking_mode_exits_1(
-        self, db_path: Path
-    ) -> None:
+    def test_invalid_blocking_mode_exits_1(self, db_path: Path) -> None:
         """An unknown blocking_mode value shows INVALID and exits 1."""
         runner.invoke(app, ["config", "set", "blocking_mode", "not_valid"])
         result = runner.invoke(app, ["config", "check"])
         assert result.exit_code == 1
         assert "blocking_mode" in result.output
 
-    def test_invalid_scale_in_exits_1(
-        self, db_path: Path
-    ) -> None:
+    def test_invalid_scale_in_exits_1(self, db_path: Path) -> None:
         """An unknown scale_in value shows INVALID and exits 1."""
         runner.invoke(app, ["config", "set", "scale_in", "sometimes"])
         result = runner.invoke(app, ["config", "check"])
         assert result.exit_code == 1
         assert "scale_in" in result.output
 
-    def test_safety_reserve_out_of_range_exits_1(
-        self, db_path: Path
-    ) -> None:
+    def test_safety_reserve_out_of_range_exits_1(self, db_path: Path) -> None:
         """safety_reserve_pct >= 1 shows INVALID and exits 1."""
         runner.invoke(app, ["config", "set", "safety_reserve_pct", "1.5"])
         result = runner.invoke(app, ["config", "check"])
         assert result.exit_code == 1
         assert "safety_reserve_pct" in result.output
 
-    def test_percent_of_equity_strategy_requires_field(
-        self, db_path: Path
-    ) -> None:
+    def test_percent_of_equity_strategy_requires_field(self, db_path: Path) -> None:
         """risk_strategy=percent_of_equity without percent_of_equity → MISSING."""
         runner.invoke(app, ["config", "set", "risk_strategy", "percent_of_equity"])
         result = runner.invoke(app, ["config", "check"])
@@ -580,9 +604,7 @@ class TestConfigCheck:
         assert "percent_of_equity" in result.output
         assert "MISSING" in result.output
 
-    def test_percent_of_equity_with_field_is_ok(
-        self, db_path: Path
-    ) -> None:
+    def test_percent_of_equity_with_field_is_ok(self, db_path: Path) -> None:
         """risk_strategy=percent_of_equity with percent_of_equity set → no error."""
         runner.invoke(app, ["config", "set", "risk_strategy", "percent_of_equity"])
         runner.invoke(app, ["config", "set", "percent_of_equity", "0.02"])
@@ -592,9 +614,7 @@ class TestConfigCheck:
         assert "MISSING" not in result.output
         assert "INVALID" not in result.output
 
-    def test_fixed_dollar_strategy_requires_field(
-        self, db_path: Path
-    ) -> None:
+    def test_fixed_dollar_strategy_requires_field(self, db_path: Path) -> None:
         """risk_strategy=fixed_dollar without fixed_dollar → MISSING."""
         runner.invoke(app, ["config", "set", "risk_strategy", "fixed_dollar"])
         result = runner.invoke(app, ["config", "check"])
@@ -644,17 +664,14 @@ class TestConfigCheck:
         assert "INVALID" in result.output
         assert "connection refused" in result.output
 
-    def test_token_from_env_shows_ok(
-        self, db_path: Path
-    ) -> None:
-        """When token is in env, check shows OK with 'env var' detail."""
+    def test_token_from_env_shows_ok(self, db_path: Path) -> None:
+        """When OANDA_API_TOKEN is set, config check reports the token as OK."""
         result = runner.invoke(app, ["config", "check"])
         assert "token" in result.output
-        assert "env var" in result.output
+        # env var source is displayed (new format or legacy fallback format)
+        assert "env var" in result.output or "keychain" in result.output
 
-    def test_default_values_shown_when_not_set(
-        self, db_path: Path
-    ) -> None:
+    def test_default_values_shown_when_not_set(self, db_path: Path) -> None:
         """Unset optional keys display their defaults."""
         result = runner.invoke(app, ["config", "check"])
         assert "remaining_margin_fraction (default)" in result.output
@@ -693,6 +710,7 @@ class TestConfigTokenCommands:
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import keyring.errors
+
         monkeypatch.setattr(
             "frmj.app.keyring.set_password",
             lambda s, u, p: (_ for _ in ()).throw(keyring.errors.NoKeyringError()),
@@ -718,12 +736,211 @@ class TestConfigTokenCommands:
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import keyring.errors
+
         monkeypatch.setattr(
             "frmj.app.keyring.delete_password",
             lambda s, u: (_ for _ in ()).throw(keyring.errors.NoKeyringError()),
         )
         result = runner.invoke(app, ["config", "unset-token"])
         assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# account sub-commands
+# ---------------------------------------------------------------------------
+
+
+class TestAccountCommands:
+    """Tests for ``frmj account`` sub-commands."""
+
+    def test_account_add_creates_account(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """account add NAME prompts for oanda_id, type, token and creates the profile."""
+        monkeypatch.setattr("frmj.app.keyring.set_password", lambda s, u, p: None)
+        # Input: oanda_id, type=practice, token (empty → skip)
+        result = runner.invoke(
+            app, ["account", "add", "demo"], input="101-001-99999-001\npractice\n\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "demo" in result.output
+
+    def test_account_add_duplicate_name_exits_1(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Adding an account with a name that already exists → exit 1."""
+        # "practice" already exists from db_path fixture.
+        result = runner.invoke(
+            app, ["account", "add", "practice"], input="acct-dup\npractice\n\n"
+        )
+        assert result.exit_code == 1
+        assert "already exists" in result.output + result.stderr
+
+    def test_account_list_shows_active_marker(self, db_path: Path) -> None:
+        """account list marks the active account with '*'."""
+        result = runner.invoke(app, ["account", "list"])
+        assert result.exit_code == 0, result.output
+        # The db_path fixture creates and activates 'practice'.
+        assert "*" in result.output
+        assert "practice" in result.output
+
+    def test_account_list_empty_db_shows_message(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """account list on a DB with no accounts prints guidance."""
+        path = tmp_path / "empty.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        result = runner.invoke(app, ["account", "list"])
+        assert result.exit_code == 0
+        assert "No accounts" in result.output
+
+    def test_account_use_switches_active_account(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """account use NAME changes the active account."""
+        monkeypatch.setattr("frmj.app.keyring.set_password", lambda s, u, p: None)
+        # Add a second account first.
+        runner.invoke(app, ["account", "add", "funded"], input="live-001\nlive\n\n")
+        result = runner.invoke(app, ["account", "use", "funded"])
+        assert result.exit_code == 0, result.output
+        assert "funded" in result.output
+        # Verify via current.
+        current = runner.invoke(app, ["account", "current"])
+        assert "funded" in current.output
+
+    def test_account_use_nonexistent_exits_1(self, db_path: Path) -> None:
+        """Switching to an account that doesn't exist → exit 1."""
+        result = runner.invoke(app, ["account", "use", "ghost"])
+        assert result.exit_code == 1
+        assert "not found" in result.output + result.stderr
+
+    def test_account_current_shows_active(self, db_path: Path) -> None:
+        """account current prints the active account name."""
+        result = runner.invoke(app, ["account", "current"])
+        assert result.exit_code == 0, result.output
+        assert "practice" in result.output
+
+    def test_account_current_no_active_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """account current with no active account → exit 1."""
+        path = tmp_path / "no-active.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        result = runner.invoke(app, ["account", "current"])
+        assert result.exit_code == 1
+
+    def test_account_remove_removes_account(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """account remove NAME deletes the profile (when it is not active)."""
+        monkeypatch.setattr("frmj.app.keyring.delete_password", lambda s, u: None)
+        # Add a second account; keep 'practice' active.
+        monkeypatch.setattr("frmj.app.keyring.set_password", lambda s, u, p: None)
+        runner.invoke(app, ["account", "add", "to-del"], input="del-001\npractice\n\n")
+        result = runner.invoke(app, ["account", "remove", "to-del"])
+        assert result.exit_code == 0, result.output
+        assert "removed" in result.output
+
+    def test_account_remove_active_account_exits_1(self, db_path: Path) -> None:
+        """Removing the currently active account is refused → exit 1."""
+        result = runner.invoke(app, ["account", "remove", "practice"])
+        assert result.exit_code == 1
+        assert "active account" in result.output + result.stderr
+
+    def test_account_remove_nonexistent_exits_1(self, db_path: Path) -> None:
+        """Removing an account that doesn't exist → exit 1."""
+        result = runner.invoke(app, ["account", "remove", "ghost"])
+        assert result.exit_code == 1
+
+    def test_account_set_token_for_active(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """account set-token with no argument uses the active account."""
+        stored: list[str] = []
+        monkeypatch.setattr(
+            "frmj.app.keyring.set_password",
+            lambda s, u, p: stored.append(p),
+        )
+        result = runner.invoke(app, ["account", "set-token"], input="my-tok\n")
+        assert result.exit_code == 0, result.output
+        assert stored == ["my-tok"]
+
+    def test_account_set_token_for_named(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """account set-token NAME stores token for the named account."""
+        stored: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            "frmj.app.keyring.set_password",
+            lambda s, u, p: stored.append((u, p)),
+        )
+        result = runner.invoke(
+            app, ["account", "set-token", "practice"], input="practice-tok\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert any("practice-tok" in tok for _, tok in stored)
+
+
+# ---------------------------------------------------------------------------
+# mode sub-commands
+# ---------------------------------------------------------------------------
+
+
+class TestModeCommands:
+    """Tests for ``frmj mode practice`` and ``frmj mode live``."""
+
+    def test_mode_practice_sets_practice_mode(self, db_path: Path) -> None:
+        """mode practice sets live_mode to false."""
+        result = runner.invoke(app, ["mode", "practice"])
+        assert result.exit_code == 0, result.output
+        assert "PRACTICE" in result.output
+
+    def test_mode_live_requires_exact_phrase(self, db_path: Path) -> None:
+        """Entering the wrong phrase cancels live mode enablement."""
+        result = runner.invoke(app, ["mode", "live"], input="wrong phrase\n")
+        assert result.exit_code == 0
+        assert "Cancelled" in result.output
+
+    def test_mode_live_with_correct_phrase_enables(self, db_path: Path) -> None:
+        """Entering 'ENABLE LIVE' exactly enables live mode."""
+        result = runner.invoke(app, ["mode", "live"], input="ENABLE LIVE\n")
+        assert result.exit_code == 0, result.output
+        assert "ENABLED" in result.output
+
+    def test_mode_live_shows_active_account_name(self, db_path: Path) -> None:
+        """The live mode warning displays the current active account name."""
+        result = runner.invoke(app, ["mode", "live"], input="wrong\n")
+        assert "practice" in result.output  # the account name from the fixture
+
+
+# ---------------------------------------------------------------------------
+# status command
+# ---------------------------------------------------------------------------
+
+
+class TestStatusCommand:
+    def test_status_shows_account_and_mode(self, db_path: Path) -> None:
+        """status prints the active account name and mode."""
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0, result.output
+        assert "Account:" in result.output
+        assert "Mode:" in result.output
+        assert "practice" in result.output
+
+    def test_status_no_active_account(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """status with no active account shows guidance."""
+        path = tmp_path / "empty-status.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0
+        assert "none" in result.output.lower()
+
+    def test_status_practice_mode_shown(self, db_path: Path) -> None:
+        """Default mode is PRACTICE (live mode not enabled)."""
+        result = runner.invoke(app, ["status"])
+        assert "PRACTICE" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -745,8 +962,8 @@ class FakeFullClient:
 
     account_id: str = "acct-1"
     order_placed: bool = False
-    tp_attached: str | None = None   # price string passed to attach_take_profit
-    sl_attached: str | None = None   # price string passed to attach_stop_loss
+    tp_attached: str | None = None  # price string passed to attach_take_profit
+    sl_attached: str | None = None  # price string passed to attach_stop_loss
     tp_should_fail: bool = False
     sl_should_fail: bool = False
 
@@ -853,8 +1070,9 @@ class TestDryRun:
         fake = FakeFullClient()
         monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
         # Provide TP and SL input (50 pips, 30 pips), then dry-run exits.
-        result = runner.invoke(app, ["trade", "EUR_USD", "long", "--dry-run"],
-                               input="50\n30\n")
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="50\n30\n"
+        )
         assert result.exit_code == 0, result.output
 
     def test_dry_run_prints_dry_run_message(
@@ -862,8 +1080,9 @@ class TestDryRun:
     ) -> None:
         """Output must contain the [DRY RUN] marker."""
         monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
-        result = runner.invoke(app, ["trade", "EUR_USD", "long", "--dry-run"],
-                               input="50\n30\n")
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="50\n30\n"
+        )
         assert "[DRY RUN]" in result.output
 
     def test_dry_run_does_not_place_order(
@@ -872,8 +1091,7 @@ class TestDryRun:
         """``place_market_order`` must NOT be called in dry-run mode."""
         fake = FakeFullClient()
         monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
-        runner.invoke(app, ["trade", "EUR_USD", "long", "--dry-run"],
-                      input="50\n30\n")
+        runner.invoke(app, ["trade", "EUR_USD", "long", "--dry-run"], input="50\n30\n")
         assert not fake.order_placed
 
     def test_dry_run_shows_exit_levels(
@@ -881,8 +1099,9 @@ class TestDryRun:
     ) -> None:
         """Exit levels table (TP and SL) appears in dry-run output."""
         monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
-        result = runner.invoke(app, ["trade", "EUR_USD", "long", "--dry-run"],
-                               input="50\n30\n")
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="50\n30\n"
+        )
         assert "TP:" in result.output
         assert "SL:" in result.output
 
@@ -892,8 +1111,9 @@ class TestDryRun:
         """Pressing Enter for both TP and SL yields no exit levels line."""
         monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
         # Empty input for both TP and SL prompts.
-        result = runner.invoke(app, ["trade", "EUR_USD", "long", "--dry-run"],
-                               input="\n\n")
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="\n\n"
+        )
         assert result.exit_code == 0
         # Neither TP nor SL was supplied, so no exit levels table is printed.
         assert "TP:" not in result.output
@@ -1033,7 +1253,9 @@ class TestTagCommand:
         result = runner.invoke(app, ["tag", "99", "bad@tag"])
         assert "Skipped" in result.output + result.stderr
 
-    def test_journal_shows_tags(self, tag_db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_journal_shows_tags(
+        self, tag_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Tags appear under the transaction in journal output."""
         runner.invoke(app, ["tag", "99", "breakout"])
         monkeypatch.setattr(
@@ -1043,7 +1265,9 @@ class TestTagCommand:
         result = runner.invoke(app, ["journal"])
         assert "Tags: breakout" in result.output
 
-    def test_journal_tag_filter(self, tag_db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_journal_tag_filter(
+        self, tag_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """--tag filter shows only transactions with that tag."""
         _seed_transaction(tag_db, oanda_id="100")
         runner.invoke(app, ["tag", "99", "breakout"])
@@ -1057,7 +1281,9 @@ class TestTagCommand:
         assert "#99" in result.output
         assert "#100" not in result.output
 
-    def test_stats_by_tag_section(self, tag_db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_stats_by_tag_section(
+        self, tag_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """When closed trades have tags, the stats output includes a 'By tag' section."""
         # Seed a closing ORDER_FILL with P/L.
         conn = get_db(path=tag_db)
@@ -1068,12 +1294,18 @@ class TestTagCommand:
         )
         conn.commit()
         # Tag the closing fill with "breakout".
-        row = conn.execute("SELECT id FROM transactions WHERE oanda_id='200'").fetchone()
-        conn.execute("INSERT INTO tags (transaction_id, tag) VALUES (?, 'breakout')", (row[0],))
+        row = conn.execute(
+            "SELECT id FROM transactions WHERE oanda_id='200'"
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO tags (transaction_id, tag) VALUES (?, 'breakout')", (row[0],)
+        )
         conn.commit()
         conn.close()
 
-        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeClient(account_id="acct-1"))
+        monkeypatch.setattr(
+            "frmj.cli.get_client", lambda conn: FakeClient(account_id="acct-1")
+        )
         result = runner.invoke(app, ["stats"])
         assert result.exit_code == 0, result.output
         assert "By tag" in result.output
@@ -1163,9 +1395,7 @@ class TestJournalCommand:
         result = runner.invoke(app, ["journal"])
         assert "Confirmed breakout" in result.output
 
-    def test_instrument_direction_shown_for_order_fill(
-        self, journal_db: Path
-    ) -> None:
+    def test_instrument_direction_shown_for_order_fill(self, journal_db: Path) -> None:
         """ORDER_FILL rows must show instrument and direction parsed from JSON."""
         result = runner.invoke(app, ["journal"])
         assert "EUR_USD" in result.output
@@ -1285,7 +1515,7 @@ class TestJournalCommand:
             "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
             "VALUES ('5001', 'acct-1', 'DAILY_FINANCING', "
             "'2026-04-25T22:00:00.000000Z', "
-            "'{\"financing\":\"-3.50\"}')"
+            '\'{"financing":"-3.50"}\')'
         )
         conn.commit()
         conn.close()
@@ -1310,7 +1540,7 @@ class TestJournalCommand:
             "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
             "VALUES ('5002', 'acct-1', 'DAILY_FINANCING', "
             "'2026-04-25T22:00:00.000000Z', "
-            "'{\"instrument\":\"EUR_USD\",\"amount\":\"-1.25\"}')"
+            '\'{"instrument":"EUR_USD","amount":"-1.25"}\')'
         )
         conn.commit()
         conn.close()
@@ -1504,6 +1734,7 @@ def _closing_fill_json(
 ) -> str:
     """Build a compact raw_json string for a closing ORDER_FILL."""
     import json as _json
+
     return _json.dumps({"instrument": instrument, "units": units, "pl": pl})
 
 
@@ -1544,24 +1775,20 @@ class TestJournalFiltering:
         raw_conn.execute(
             "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json)"
             " VALUES ('200', 'acct-1', 'DAILY_FINANCING', '2026-04-25T22:00:00Z',"
-            " '{\"financing\":\"-1.50\"}')"
+            ' \'{"financing":"-1.50"}\')'
         )
         raw_conn.commit()
         raw_conn.close()
         return path
 
-    def test_filter_by_instrument_shows_only_matching(
-        self, filter_db: Path
-    ) -> None:
+    def test_filter_by_instrument_shows_only_matching(self, filter_db: Path) -> None:
         result = runner.invoke(app, ["journal", "--instrument", "EUR_USD"])
         assert result.exit_code == 0, result.output
         assert "101" in result.output
         assert "103" in result.output
         assert "102" not in result.output  # GBP_USD row excluded
 
-    def test_filter_by_instrument_shows_filter_label(
-        self, filter_db: Path
-    ) -> None:
+    def test_filter_by_instrument_shows_filter_label(self, filter_db: Path) -> None:
         result = runner.invoke(app, ["journal", "--instrument", "EUR_USD"])
         assert "instrument=EUR_USD" in result.output
 
@@ -1586,9 +1813,7 @@ class TestJournalFiltering:
         result = runner.invoke(app, ["journal", "--since", "2026-04-26"])
         assert "since=2026-04-26" in result.output
 
-    def test_filter_with_notes_shows_only_annotated(
-        self, filter_db: Path
-    ) -> None:
+    def test_filter_with_notes_shows_only_annotated(self, filter_db: Path) -> None:
         # Attach a note to row 102
         conn = sqlite3.connect(str(filter_db))
         txn_id = conn.execute(
@@ -1618,7 +1843,7 @@ class TestJournalFiltering:
             ["journal", "--instrument", "EUR_USD", "--since", "2026-04-26"],
         )
         assert result.exit_code == 0, result.output
-        assert "103" in result.output   # EUR_USD on Apr-27 ✓
+        assert "103" in result.output  # EUR_USD on Apr-27 ✓
         assert "101" not in result.output  # EUR_USD on Apr-25 before since
         assert "102" not in result.output  # GBP_USD excluded by instrument
 
@@ -1631,11 +1856,9 @@ class TestJournalFiltering:
 
     def test_n_still_limits_after_filter(self, filter_db: Path) -> None:
         """--n 1 with matching rows returns only the most recent match."""
-        result = runner.invoke(
-            app, ["journal", "--instrument", "EUR_USD", "--n", "1"]
-        )
+        result = runner.invoke(app, ["journal", "--instrument", "EUR_USD", "--n", "1"])
         assert result.exit_code == 0, result.output
-        assert "103" in result.output   # most recent EUR_USD
+        assert "103" in result.output  # most recent EUR_USD
         assert "101" not in result.output
 
 
@@ -1667,9 +1890,7 @@ class TestStatsCommand:
         conn.commit()
         conn.close()
 
-    def test_no_closed_trades_shows_message(
-        self, stats_db: Path
-    ) -> None:
+    def test_no_closed_trades_shows_message(self, stats_db: Path) -> None:
         result = runner.invoke(app, ["stats"])
         assert result.exit_code == 0, result.output
         assert "No closed trades" in result.output
@@ -1680,7 +1901,7 @@ class TestStatsCommand:
         conn.execute(
             "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
             "VALUES ('1', 'acct-1', 'ORDER_FILL', '2026-04-25T09:00:00Z', "
-            "'{\"instrument\":\"EUR_USD\",\"units\":\"10000\",\"pl\":\"0\"}')"
+            '\'{"instrument":"EUR_USD","units":"10000","pl":"0"}\')'
         )
         conn.commit()
         conn.close()
@@ -1689,30 +1910,39 @@ class TestStatsCommand:
         assert "No closed trades" in result.output
 
     def test_shows_trade_count(self, stats_db: Path) -> None:
-        self._seed_fills(stats_db, [
-            ("1", "2026-04-25T09:00:00Z", "-10000", "30.00"),
-            ("2", "2026-04-26T10:00:00Z", "-10000", "-15.00"),
-        ])
+        self._seed_fills(
+            stats_db,
+            [
+                ("1", "2026-04-25T09:00:00Z", "-10000", "30.00"),
+                ("2", "2026-04-26T10:00:00Z", "-10000", "-15.00"),
+            ],
+        )
         result = runner.invoke(app, ["stats"])
         assert result.exit_code == 0, result.output
         assert "2 closed trades" in result.output
 
     def test_shows_win_rate(self, stats_db: Path) -> None:
-        self._seed_fills(stats_db, [
-            ("1", "2026-04-25T09:00:00Z", "-10000", "30.00"),
-            ("2", "2026-04-26T10:00:00Z", "-10000", "20.00"),
-            ("3", "2026-04-27T11:00:00Z", "-10000", "-10.00"),
-        ])
+        self._seed_fills(
+            stats_db,
+            [
+                ("1", "2026-04-25T09:00:00Z", "-10000", "30.00"),
+                ("2", "2026-04-26T10:00:00Z", "-10000", "20.00"),
+                ("3", "2026-04-27T11:00:00Z", "-10000", "-10.00"),
+            ],
+        )
         result = runner.invoke(app, ["stats"])
         assert "Win rate" in result.output
         # 2 wins / 3 total = 66.7%
         assert "66.7%" in result.output
 
     def test_shows_instrument_breakdown(self, stats_db: Path) -> None:
-        self._seed_fills(stats_db, [
-            ("1", "2026-04-25T09:00:00Z", "-10000", "30.00"),
-            ("2", "2026-04-26T10:00:00Z", "5000", "-10.00"),  # GBP_USD short close
-        ])
+        self._seed_fills(
+            stats_db,
+            [
+                ("1", "2026-04-25T09:00:00Z", "-10000", "30.00"),
+                ("2", "2026-04-26T10:00:00Z", "5000", "-10.00"),  # GBP_USD short close
+            ],
+        )
         # Override instrument for second fill
         conn = sqlite3.connect(str(stats_db))
         conn.execute(
@@ -1728,9 +1958,12 @@ class TestStatsCommand:
 
     def test_shows_weekday_breakdown(self, stats_db: Path) -> None:
         # 2026-04-27 is Monday
-        self._seed_fills(stats_db, [
-            ("1", "2026-04-27T09:00:00Z", "-10000", "25.00"),
-        ])
+        self._seed_fills(
+            stats_db,
+            [
+                ("1", "2026-04-27T09:00:00Z", "-10000", "25.00"),
+            ],
+        )
         result = runner.invoke(app, ["stats"])
         assert "By weekday" in result.output
         assert "Mon" in result.output
@@ -1738,17 +1971,23 @@ class TestStatsCommand:
     def test_shows_hour_breakdown(self, stats_db: Path) -> None:
         # The hour bucket is rendered in the system local timezone, so we
         # only assert on the section header rather than a specific hour.
-        self._seed_fills(stats_db, [
-            ("1", "2026-04-25T09:30:00Z", "-10000", "15.00"),
-        ])
+        self._seed_fills(
+            stats_db,
+            [
+                ("1", "2026-04-25T09:30:00Z", "-10000", "15.00"),
+            ],
+        )
         result = runner.invoke(app, ["stats"])
         assert "By hour (local)" in result.output
 
     def test_total_pl_shown(self, stats_db: Path) -> None:
-        self._seed_fills(stats_db, [
-            ("1", "2026-04-25T09:00:00Z", "-10000", "50.00"),
-            ("2", "2026-04-26T10:00:00Z", "-10000", "-20.00"),
-        ])
+        self._seed_fills(
+            stats_db,
+            [
+                ("1", "2026-04-25T09:00:00Z", "-10000", "50.00"),
+                ("2", "2026-04-26T10:00:00Z", "-10000", "-20.00"),
+            ],
+        )
         result = runner.invoke(app, ["stats"])
         assert "Total P/L" in result.output
         assert "30.00" in result.output
@@ -1769,17 +2008,17 @@ class TestExportCommand:
         conn.execute(
             "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json)"
             " VALUES ('1', 'acct-1', 'ORDER_FILL', '2026-04-25T09:00:00Z',"
-            " '{\"instrument\":\"EUR_USD\",\"units\":\"10000\",\"pl\":\"0\",\"price\":\"1.10050\"}')"
+            ' \'{"instrument":"EUR_USD","units":"10000","pl":"0","price":"1.10050"}\')'
         )
         conn.execute(
             "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json)"
             " VALUES ('2', 'acct-1', 'ORDER_FILL', '2026-04-25T14:00:00Z',"
-            " '{\"instrument\":\"EUR_USD\",\"units\":\"-10000\",\"pl\":\"45.23\",\"price\":\"1.10503\"}')"
+            ' \'{"instrument":"EUR_USD","units":"-10000","pl":"45.23","price":"1.10503"}\')'
         )
         conn.execute(
             "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json)"
             " VALUES ('3', 'acct-1', 'DAILY_FINANCING', '2026-04-25T22:00:00Z',"
-            " '{\"financing\":\"-1.50\"}')"
+            ' \'{"financing":"-1.50"}\')'
         )
         conn.commit()
         conn.close()
@@ -1837,15 +2076,19 @@ class TestExportCommand:
         assert "DAILY_FINANCING" not in result.output
 
     def test_filter_by_instrument(self, export_db: Path) -> None:
-        result = runner.invoke(app, ["export", "--format", "json", "--instrument", "EUR_USD"])
+        result = runner.invoke(
+            app, ["export", "--format", "json", "--instrument", "EUR_USD"]
+        )
         data = json.loads(result.output)
         assert all(r["instrument"] == "EUR_USD" for r in data)
 
     def test_filter_since(self, export_db: Path) -> None:
-        result = runner.invoke(app, ["export", "--format", "json", "--since", "2026-04-25T14"])
+        result = runner.invoke(
+            app, ["export", "--format", "json", "--since", "2026-04-25T14"]
+        )
         data = json.loads(result.output)
         oanda_ids = [r["oanda_id"] for r in data]
-        assert "1" not in oanda_ids   # before cutoff
+        assert "1" not in oanda_ids  # before cutoff
         assert "2" in oanda_ids
         assert "3" in oanda_ids
 
@@ -1867,9 +2110,7 @@ class TestExportCommand:
         assert "notes" in result.output
         assert "Entry confirmed" in result.output
 
-    def test_output_to_file(
-        self, export_db: Path, tmp_path: Path
-    ) -> None:
+    def test_output_to_file(self, export_db: Path, tmp_path: Path) -> None:
         out = tmp_path / "out.csv"
         result = runner.invoke(app, ["export", "--output", str(out)])
         assert result.exit_code == 0, result.output
@@ -1882,7 +2123,9 @@ class TestExportCommand:
         self, export_db: Path, tmp_path: Path
     ) -> None:
         out = tmp_path / "out.json"
-        result = runner.invoke(app, ["export", "--format", "json", "--output", str(out)])
+        result = runner.invoke(
+            app, ["export", "--format", "json", "--output", str(out)]
+        )
         assert "3 rows" in result.output
 
 
@@ -1916,7 +2159,9 @@ class TestPositionsCommand:
     def test_shows_instrument_and_direction(
         self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        result = self._invoke(monkeypatch, [_open_trade(instrument="EUR_USD", direction="LONG")])
+        result = self._invoke(
+            monkeypatch, [_open_trade(instrument="EUR_USD", direction="LONG")]
+        )
         assert result.exit_code == 0, result.output
         assert "EUR_USD" in result.output
         assert "LONG" in result.output
@@ -1924,7 +2169,9 @@ class TestPositionsCommand:
     def test_shows_units_and_entry_price(
         self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        result = self._invoke(monkeypatch, [_open_trade(units=10_000, open_price="1.10050")])
+        result = self._invoke(
+            monkeypatch, [_open_trade(units=10_000, open_price="1.10050")]
+        )
         assert "10,000" in result.output
         assert "1.10050" in result.output
 
@@ -2296,13 +2543,17 @@ class TestTradeResume:
         tp_price: str | None = "1.10550",
         sl_price: str | None = "1.09750",
     ) -> None:
-        plan_file.write_text(json.dumps({
-            "instrument": instrument,
-            "direction": direction,
-            "units_signed": units_signed,
-            "tp_price": tp_price,
-            "sl_price": sl_price,
-        }))
+        plan_file.write_text(
+            json.dumps(
+                {
+                    "instrument": instrument,
+                    "direction": direction,
+                    "units_signed": units_signed,
+                    "tp_price": tp_price,
+                    "sl_price": sl_price,
+                }
+            )
+        )
 
     def test_no_plan_exits_1(
         self, resume_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch

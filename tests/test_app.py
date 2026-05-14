@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from frmj.accounts import add_account, set_active_account
 from frmj.app import (
     _resolve_default_data_dir,
     clear_draft_plan,
@@ -162,7 +163,7 @@ class TestGetDb:
             ).fetchall()
         }
         conn.close()
-        assert {"transactions", "notes", "sync_cursors", "config"} <= tables
+        assert {"transactions", "notes", "sync_cursors", "config", "accounts"} <= tables
 
     def test_explicit_path_overrides_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -247,51 +248,57 @@ class TestGetClient:
         yield conn
         conn.close()
 
+    def test_raises_without_active_account(
+        self, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """get_client raises a clear error when no active account is configured."""
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token")
+        with pytest.raises(RuntimeError, match="No active account"):
+            get_client(db)
+
     def test_raises_without_token(
         self, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """get_client raises when the active account has no resolvable token."""
         monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
-        set_config(db, "account_id", "101-001-12345-001")
-        with pytest.raises(RuntimeError, match="OANDA_API_TOKEN"):
+        monkeypatch.delenv("OANDA_API_TOKEN_PRACTICE", raising=False)
+        add_account(db, "practice", "101-001-12345-001", is_practice=True)
+        set_active_account(db, "practice")
+        with pytest.raises(RuntimeError, match="No API token"):
             get_client(db)
 
-    def test_raises_without_account_id(
+    def test_returns_oanda_client_for_practice_account(
         self, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """A practice account profile yields an OandaClient with the correct account_id."""
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token")
-        with pytest.raises(RuntimeError, match="account_id"):
-            get_client(db)
-
-    def test_returns_oanda_client_in_practice_mode(
-        self, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Default (practice=true) uses practice_account_id."""
-        monkeypatch.setenv("OANDA_API_TOKEN", "test-token")
-        set_config(db, "practice_account_id", "101-001-12345-001")
+        add_account(db, "my-practice", "101-001-12345-001", is_practice=True)
+        set_active_account(db, "my-practice")
         client = get_client(db)
         assert isinstance(client, OandaClient)
         assert client.account_id == "101-001-12345-001"
         client.close()
 
-    def test_practice_mode_default_is_true(
+    def test_practice_account_uses_practice_url(
         self, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When practice_mode is absent, the client should use the practice URL."""
+        """A practice account profile points OandaClient at the practice API host."""
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token")
-        set_config(db, "practice_account_id", "101-001-12345-001")
+        add_account(db, "practice", "101-001-12345-001", is_practice=True)
+        set_active_account(db, "practice")
         client = get_client(db)
         from frmj.execution.oanda import PRACTICE_BASE_URL
 
         assert client._base_url == PRACTICE_BASE_URL
         client.close()
 
-    def test_practice_mode_false_uses_live_url(
+    def test_live_account_uses_live_url(
         self, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Live mode uses account_id (not practice_account_id)."""
+        """A live account profile points OandaClient at the live API host."""
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token")
-        set_config(db, "account_id", "101-001-12345-001")
-        set_config(db, "practice_mode", "false")
+        add_account(db, "live", "101-001-99999-001", is_practice=False)
+        set_active_account(db, "live")
         client = get_client(db)
         from frmj.execution.oanda import LIVE_BASE_URL
 
