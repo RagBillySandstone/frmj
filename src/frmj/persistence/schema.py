@@ -211,10 +211,28 @@ CREATE INDEX IF NOT EXISTS idx_tags_tag
 
 
 -- -------------------------------------------------------------------------
+-- Accounts — named Oanda account profiles
+-- -------------------------------------------------------------------------
+-- One row per named profile. is_practice controls which Oanda API host is
+-- used (practice.oanda.com vs fxtrade.oanda.com) and which token is looked
+-- up. API tokens are stored in the OS keychain, not here.
+--
+-- The active account and live-mode flag are stored as plain keys in the
+-- config table below ("active_account" and "live_mode"), keeping all
+-- runtime state in one place.
+CREATE TABLE IF NOT EXISTS accounts (
+    name        TEXT    PRIMARY KEY,
+    oanda_id    TEXT    NOT NULL,
+    is_practice INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+
+-- -------------------------------------------------------------------------
 -- Config — flat key/value store for account settings
 -- -------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS config (
-    -- Examples: "account_id", "practice_mode", "default_risk_fraction"
+    -- Examples: "active_account", "live_mode", "max_open_trades"
     key     TEXT    PRIMARY KEY,
 
     -- All values stored as TEXT; callers are responsible for serialising and
