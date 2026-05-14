@@ -95,20 +95,31 @@ from decimal import Decimal
 import httpx
 import typer
 
+from frmj.accounts import (
+    get_active_account,
+    get_active_account_name,
+    is_live_mode,
+    list_accounts,
+    get_account,
+    add_account,
+    remove_account,
+    set_active_account,
+    set_live_mode,
+)
 from frmj.app import (
     clear_draft_plan,
+    delete_account_token,
     delete_config,
-    delete_token,
+    get_account_token,
     get_all_config,
     get_client,
     get_config,
     get_db,
     get_risk_config,
-    get_token,
     load_draft_plan,
     save_draft_plan,
     set_config,
-    store_token,
+    store_account_token,
 )
 from frmj.domain.analytics import (
     ClosedTrade,
@@ -155,6 +166,20 @@ config_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(config_app, name="config")
+
+account_app = typer.Typer(
+    name="account",
+    help="Manage named Oanda account profiles.",
+    no_args_is_help=True,
+)
+app.add_typer(account_app, name="account")
+
+mode_app = typer.Typer(
+    name="mode",
+    help="Switch between practice and live execution modes.",
+    no_args_is_help=True,
+)
+app.add_typer(mode_app, name="mode")
 
 
 # ---------------------------------------------------------------------------
@@ -419,20 +444,315 @@ def close(
 
 
 # ---------------------------------------------------------------------------
+# status command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def status() -> None:
+    """Show the active account and current execution mode."""
+    conn = get_db()
+    try:
+        account = get_active_account(conn)
+        live = is_live_mode(conn)
+    finally:
+        conn.close()
+
+    if account is None:
+        typer.echo("Account: (none — run: frmj account add NAME)")
+    else:
+        acct_type = "practice" if account.is_practice else "live"
+        typer.echo(f"Account: {account.name}  [{acct_type}, {account.oanda_id}]")
+
+    mode_label = (
+        typer.style("LIVE", fg=typer.colors.RED, bold=True) if live else "PRACTICE"
+    )
+    typer.echo(f"Mode:    {mode_label}")
+
+
+# ---------------------------------------------------------------------------
+# account sub-commands
+# ---------------------------------------------------------------------------
+
+
+@account_app.command("add")
+def account_add(
+    name: str = typer.Argument(..., help="Short name for the account, e.g. funded"),
+) -> None:
+    """Add a new Oanda account profile."""
+    name = name.strip()
+    if not name:
+        typer.echo("Error: account name cannot be empty.", err=True)
+        raise typer.Exit(1)
+
+    conn = get_db()
+    try:
+        # Reject duplicate names.
+        if get_account(conn, name) is not None:
+            typer.echo(
+                f"Error: account '{name}' already exists. "
+                "Use 'frmj account list' to see existing accounts.",
+                err=True,
+            )
+            conn.close()
+            raise typer.Exit(1)
+
+        # Gather account details interactively.
+        oanda_id: str = typer.prompt("Oanda account ID").strip()
+        if not oanda_id:
+            typer.echo("Error: Oanda account ID cannot be empty.", err=True)
+            conn.close()
+            raise typer.Exit(1)
+
+        acct_type: str = (
+            typer.prompt(
+                "Account type [practice/live]",
+                default="practice",
+            )
+            .strip()
+            .lower()
+        )
+        if acct_type not in ("practice", "live"):
+            typer.echo("Error: type must be 'practice' or 'live'.", err=True)
+            conn.close()
+            raise typer.Exit(1)
+        is_practice = acct_type == "practice"
+
+        # Optional token — users can also call 'account set-token' later.
+        token_raw: str = typer.prompt(
+            "API token (press Enter to skip and set later with "
+            f"'frmj account set-token {name}')",
+            default="",
+            hide_input=True,
+        ).strip()
+
+        # Persist the account record.
+        import sqlite3 as _sqlite3
+
+        try:
+            add_account(conn, name, oanda_id, is_practice=is_practice)
+        except _sqlite3.IntegrityError:
+            typer.echo(f"Error: account '{name}' already exists.", err=True)
+            conn.close()
+            raise typer.Exit(1)
+
+        # Store token if one was supplied.
+        if token_raw:
+            try:
+                store_account_token(name, token_raw)
+            except RuntimeError as exc:
+                typer.echo(f"Warning: could not store token — {exc}", err=True)
+
+        # Auto-activate when this is the first account.
+        from frmj.accounts import get_account_count as _count
+
+        if _count(conn) == 1:
+            set_active_account(conn, name)
+            typer.echo(f"Account '{name}' added and set as active.")
+        else:
+            typer.echo(
+                f"Account '{name}' added. Run 'frmj account use {name}' to activate it."
+            )
+
+    finally:
+        conn.close()
+
+
+@account_app.command("list")
+def account_list() -> None:
+    """List all configured account profiles."""
+    conn = get_db()
+    try:
+        accounts = list_accounts(conn)
+        active_name = get_active_account_name(conn)
+    finally:
+        conn.close()
+
+    if not accounts:
+        typer.echo("No accounts configured. Add one with: frmj account add NAME")
+        return
+
+    for acct in accounts:
+        marker = "*" if acct.name == active_name else " "
+        acct_type = "practice" if acct.is_practice else "live"
+        typer.echo(f"  {marker} {acct.name}  [{acct_type}, {acct.oanda_id}]")
+
+
+@account_app.command("use")
+def account_use(
+    name: str = typer.Argument(..., help="Account name to activate"),
+) -> None:
+    """Set the active account."""
+    conn = get_db()
+    try:
+        if get_account(conn, name) is None:
+            typer.echo(
+                f"Error: account '{name}' not found. "
+                "Run 'frmj account list' to see available accounts.",
+                err=True,
+            )
+            conn.close()
+            raise typer.Exit(1)
+        set_active_account(conn, name)
+    finally:
+        conn.close()
+    typer.echo(f"Active account set to '{name}'.")
+
+
+@account_app.command("current")
+def account_current() -> None:
+    """Show the currently active account."""
+    conn = get_db()
+    try:
+        account = get_active_account(conn)
+    finally:
+        conn.close()
+
+    if account is None:
+        typer.echo("No active account. Run: frmj account use NAME")
+        raise typer.Exit(1)
+
+    acct_type = "practice" if account.is_practice else "live"
+    typer.echo(f"{account.name}  [{acct_type}, {account.oanda_id}]")
+
+
+@account_app.command("remove")
+def account_remove(
+    name: str = typer.Argument(..., help="Account name to remove"),
+) -> None:
+    """Remove an account profile (does not delete the associated token)."""
+    conn = get_db()
+    try:
+        active_name = get_active_account_name(conn)
+        if name == active_name:
+            typer.echo(
+                f"Error: '{name}' is the active account. "
+                "Switch to another account first with: frmj account use NAME",
+                err=True,
+            )
+            conn.close()
+            raise typer.Exit(1)
+
+        removed = remove_account(conn, name)
+    finally:
+        conn.close()
+
+    if removed:
+        # Best-effort keyring cleanup — suppress errors so removal still succeeds.
+        try:
+            delete_account_token(name)
+        except Exception:
+            pass
+        typer.echo(f"Account '{name}' removed.")
+    else:
+        typer.echo(f"Error: account '{name}' not found.", err=True)
+        raise typer.Exit(1)
+
+
+@account_app.command("set-token")
+def account_set_token(
+    name: str | None = typer.Argument(
+        None,
+        help="Account name (defaults to the active account).",
+    ),
+) -> None:
+    """Store the API token for an account in the OS keychain."""
+    conn = get_db()
+    try:
+        if name is None:
+            account = get_active_account(conn)
+            if account is None:
+                typer.echo(
+                    "Error: No active account. Specify an account name or run "
+                    "'frmj account use NAME' first.",
+                    err=True,
+                )
+                conn.close()
+                raise typer.Exit(1)
+            name = account.name
+        elif get_account(conn, name) is None:
+            typer.echo(
+                f"Error: account '{name}' not found. "
+                "Run 'frmj account list' to see available accounts.",
+                err=True,
+            )
+            conn.close()
+            raise typer.Exit(1)
+    finally:
+        conn.close()
+
+    token = typer.prompt(f"Oanda API token for '{name}'", hide_input=True)
+    try:
+        store_account_token(name, token)
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"Token for '{name}' stored in OS keychain.")
+
+
+# ---------------------------------------------------------------------------
+# mode sub-commands
+# ---------------------------------------------------------------------------
+
+
+@mode_app.command("practice")
+def mode_practice() -> None:
+    """Switch to practice mode — live order execution is disabled."""
+    conn = get_db()
+    try:
+        set_live_mode(conn, enabled=False)
+    finally:
+        conn.close()
+    typer.echo("Mode set to PRACTICE. Live order execution is disabled.")
+
+
+@mode_app.command("live")
+def mode_live() -> None:
+    """Enable live trading mode (requires explicit confirmation)."""
+    conn = get_db()
+    try:
+        account = get_active_account(conn)
+        account_name = account.name if account else "(none)"
+
+        typer.echo(
+            typer.style(
+                "WARNING: Live trading mode enables real order execution.",
+                fg=typer.colors.YELLOW,
+                bold=True,
+            )
+        )
+        typer.echo("")
+        typer.echo(f"Active account: {account_name}")
+        typer.echo("")
+
+        confirmation = typer.prompt("Type ENABLE LIVE to continue")
+        if confirmation != "ENABLE LIVE":
+            typer.echo("Cancelled. Live mode not enabled.")
+            conn.close()
+            raise typer.Exit(0)
+
+        set_live_mode(conn, enabled=True)
+    finally:
+        conn.close()
+
+    typer.echo(
+        typer.style("Live trading mode ENABLED.", fg=typer.colors.RED, bold=True)
+    )
+
+
+# ---------------------------------------------------------------------------
 # config sub-commands
 # ---------------------------------------------------------------------------
 
-#: Keys accepted by ``frmj config set``.  The API token is excluded because it
-#: is stored in the OS keychain via ``config set-token``, not in the DB.
+#: Keys accepted by ``frmj config set``.  Account identity and mode are
+#: managed via ``frmj account`` and ``frmj mode`` — they are intentionally
+#: excluded here to prevent accidental overwrites.
 VALID_CONFIG_KEYS: frozenset[str] = frozenset(
     {
-        "account_id",
         "blocking_mode",
         "fixed_dollar",
         "max_open_trades",
         "percent_of_equity",
-        "practice_account_id",
-        "practice_mode",
         "risk_strategy",
         "safety_reserve_pct",
         "scale_in",
@@ -510,40 +830,54 @@ def config_unset(
 
 
 @config_app.command("set-token")
-def config_set_token(
-    practice: bool = typer.Option(
-        False,
-        "--practice",
-        help="Store the practice account token instead of the live token.",
-    ),
-) -> None:
-    """Store an Oanda API token securely in the OS keychain."""
-    mode = "practice" if practice else "live"
-    token = typer.prompt(f"Oanda API token ({mode})", hide_input=True)
+def config_set_token() -> None:
+    """Store the API token for the active account in the OS keychain.
+
+    Use ``frmj account set-token [NAME]`` to target a specific account.
+    """
+    conn = get_db()
     try:
-        store_token(token, practice=practice)
+        account = get_active_account(conn)
+    finally:
+        conn.close()
+    if account is None:
+        typer.echo(
+            "Error: No active account. Add one with: frmj account add NAME",
+            err=True,
+        )
+        raise typer.Exit(1)
+    token = typer.prompt(f"Oanda API token for '{account.name}'", hide_input=True)
+    try:
+        store_account_token(account.name, token)
     except RuntimeError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1)
-    typer.echo(f"{mode.capitalize()} token stored in OS keychain.")
+    typer.echo(f"Token for '{account.name}' stored in OS keychain.")
 
 
 @config_app.command("unset-token")
-def config_unset_token(
-    practice: bool = typer.Option(
-        False,
-        "--practice",
-        help="Remove the practice account token instead of the live token.",
-    ),
-) -> None:
-    """Remove an Oanda API token from the OS keychain."""
-    mode = "practice" if practice else "live"
+def config_unset_token() -> None:
+    """Remove the API token for the active account from the OS keychain.
+
+    Use ``frmj account set-token [NAME]`` to manage tokens for specific accounts.
+    """
+    conn = get_db()
     try:
-        delete_token(practice=practice)
+        account = get_active_account(conn)
+    finally:
+        conn.close()
+    if account is None:
+        typer.echo(
+            "Error: No active account. Add one with: frmj account add NAME",
+            err=True,
+        )
+        raise typer.Exit(1)
+    try:
+        delete_account_token(account.name)
     except RuntimeError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1)
-    typer.echo(f"{mode.capitalize()} token removed from OS keychain.")
+    typer.echo(f"Token for '{account.name}' removed from OS keychain.")
 
 
 @config_app.command("check")
@@ -564,92 +898,63 @@ def config_check(
         # "INFO" entries are displayed but do not affect the exit code.
         checks: list[tuple[str, str, str]] = []
 
-        practice_str = all_cfg.get("practice_mode") or "true"
-        practice_active = practice_str.lower() in ("true", "1", "yes")
+        # --- Active account --------------------------------------------------
+        account = get_active_account(conn)
+        live = is_live_mode(conn)
+        mode_label = "LIVE" if live else "PRACTICE"
 
-        # --- Practice credentials --------------------------------------------
-        practice_token = get_token(practice=True)
-        active_marker = " (active)" if practice_active else ""
-        if os.environ.get("OANDA_API_TOKEN_PRACTICE"):
+        if account is None:
             checks.append(
                 (
-                    "practice token",
-                    "OK",
-                    f"OANDA_API_TOKEN_PRACTICE env var{active_marker}",
-                )
-            )
-        elif practice_token:
-            checks.append(("practice token", "OK", f"OS keychain{active_marker}"))
-        elif practice_active:
-            checks.append(
-                ("practice token", "MISSING", "run: frmj config set-token --practice")
-            )
-        else:
-            checks.append(
-                (
-                    "practice token",
-                    "INFO",
-                    "not configured — run: frmj config set-token --practice",
-                )
-            )
-
-        practice_account_id_val = all_cfg.get("practice_account_id")
-        if practice_account_id_val:
-            checks.append(
-                (
-                    "practice_account_id",
-                    "OK",
-                    f"{practice_account_id_val}{active_marker}",
-                )
-            )
-        elif practice_active:
-            checks.append(
-                (
-                    "practice_account_id",
+                    "active account",
                     "MISSING",
-                    "run: frmj config set practice_account_id <ID>",
+                    "run: frmj account add NAME  then  frmj account use NAME",
                 )
             )
         else:
+            acct_type = "practice" if account.is_practice else "live"
             checks.append(
                 (
-                    "practice_account_id",
-                    "INFO",
-                    "not configured — run: frmj config set practice_account_id <ID>",
+                    "active account",
+                    "OK",
+                    f"{account.name}  (Oanda {acct_type} account {account.oanda_id})",
                 )
             )
 
-        # --- Live credentials ------------------------------------------------
-        live_token = get_token(practice=False)
-        active_marker = " (active)" if not practice_active else ""
-        if os.environ.get("OANDA_API_TOKEN"):
-            checks.append(
-                ("live token", "OK", f"OANDA_API_TOKEN env var{active_marker}")
-            )
-        elif live_token:
-            checks.append(("live token", "OK", f"OS keychain{active_marker}"))
-        elif not practice_active:
-            checks.append(("live token", "MISSING", "run: frmj config set-token"))
-        else:
-            checks.append(
-                ("live token", "INFO", "not configured — run: frmj config set-token")
-            )
+        # --- Token for active account ----------------------------------------
+        if account is not None:
+            from frmj.app import _account_env_var
 
-        account_id_val = all_cfg.get("account_id")
-        if account_id_val:
-            checks.append(("account_id", "OK", f"{account_id_val}{active_marker}"))
-        elif not practice_active:
-            checks.append(
-                ("account_id", "MISSING", "run: frmj config set account_id <ID>")
-            )
-        else:
-            checks.append(
-                (
-                    "account_id",
-                    "INFO",
-                    "not configured — run: frmj config set account_id <ID>",
+            token = get_account_token(account.name, is_practice=account.is_practice)
+            env_var = _account_env_var(account.name)
+            # Detect token source in same priority order as get_account_token.
+            if os.environ.get(env_var):
+                checks.append(("token", "OK", f"{env_var} env var"))
+            elif (
+                (account.is_practice and os.environ.get("OANDA_API_TOKEN_PRACTICE"))
+                or (not account.is_practice and os.environ.get("OANDA_API_TOKEN"))
+                or (account.is_practice and os.environ.get("OANDA_API_TOKEN"))
+            ):
+                legacy = (
+                    "OANDA_API_TOKEN_PRACTICE"
+                    if account.is_practice
+                    and os.environ.get("OANDA_API_TOKEN_PRACTICE")
+                    else "OANDA_API_TOKEN"
                 )
-            )
+                checks.append(("token", "OK", f"legacy env var ({legacy})"))
+            elif token:
+                checks.append(("token", "OK", "OS keychain"))
+            else:
+                checks.append(
+                    (
+                        "token",
+                        "MISSING",
+                        f"run: frmj account set-token {account.name}",
+                    )
+                )
+
+        # --- Execution mode --------------------------------------------------
+        checks.append(("mode", "INFO", mode_label))
 
         # --- max_open_trades (required for trading) --------------------------
         mot = all_cfg.get("max_open_trades")
@@ -773,24 +1078,11 @@ def config_check(
                     )
                 )
 
-        # --- practice_mode ---------------------------------------------------
-        pm_val = all_cfg.get("practice_mode")
-        if pm_val is None:
-            checks.append(("practice_mode", "OK", "true (default)"))
-        elif pm_val.lower() in ("true", "false", "1", "0", "yes", "no"):
-            checks.append(("practice_mode", "OK", pm_val))
-        else:
-            checks.append(
-                ("practice_mode", "INVALID", f"{pm_val!r} — must be true or false")
-            )
-
         # --- Connectivity (opt-in) -------------------------------------------
         if connectivity:
-            active_token = practice_token if practice_active else live_token
-            active_account_id = (
-                practice_account_id_val if practice_active else account_id_val
-            )
-            if active_token and active_account_id:
+            if account is not None and get_account_token(
+                account.name, is_practice=account.is_practice
+            ):
                 try:
                     client = get_client(conn)
                     summary = client.get_account_summary()
@@ -810,7 +1102,7 @@ def config_check(
                     (
                         "connectivity",
                         "WARN",
-                        "skipped — active token or account_id not configured",
+                        "skipped — active account or token not configured",
                     )
                 )
 
@@ -830,7 +1122,7 @@ def config_check(
         elif status == "WARN":
             badge = typer.style(f"{status:<{status_w}}", fg=typer.colors.YELLOW)
         elif status == "INFO":
-            badge = f"{status:<{status_w}}"  # neutral — inactive credential hint
+            badge = f"{status:<{status_w}}"  # neutral — mode display
         else:  # MISSING / INVALID
             badge = typer.style(f"{status:<{status_w}}", fg=typer.colors.RED)
 
@@ -1099,6 +1391,19 @@ def trade(
     # =========================================================================
     # Shared post-planning section: place order, attach TP/SL, sync, note
     # =========================================================================
+
+    # --- Live mode gate: block live orders when mode is practice -------------
+    active_account = get_active_account(conn)
+    if active_account is not None and not active_account.is_practice:
+        if not is_live_mode(conn):
+            typer.echo(
+                "Error: Active account is a live account, "
+                "but live trading mode is not enabled.\n"
+                "Run: frmj mode live",
+                err=True,
+            )
+            conn.close()
+            raise typer.Exit(1)
 
     # --- Place order with retry loop -----------------------------------------
     while True:
@@ -1899,26 +2204,48 @@ def _records_to_json(records: list[dict]) -> str:
 
 
 def _print_token_status() -> None:
-    """Print two lines showing where (or whether) each API token is set.
+    """Print the token status for the active account.
 
     Called by ``config_get`` when showing all values.  Token values are never
     printed — only the source.
     """
-    if os.environ.get("OANDA_API_TOKEN"):
-        typer.echo("live API token     =  (set via OANDA_API_TOKEN env var)")
-    elif get_token(practice=False) is not None:
-        typer.echo("live API token     =  (stored in OS keychain)")
-    else:
-        typer.echo("live API token     =  (not set — run: frmj config set-token)")
+    conn = get_db()
+    try:
+        account = get_active_account(conn)
+    finally:
+        conn.close()
 
-    if os.environ.get("OANDA_API_TOKEN_PRACTICE"):
-        typer.echo("practice API token =  (set via OANDA_API_TOKEN_PRACTICE env var)")
-    elif get_token(practice=True) is not None:
-        typer.echo("practice API token =  (stored in OS keychain)")
-    else:
+    if account is None:
         typer.echo(
-            "practice API token =  (not set — run: frmj config set-token --practice)"
+            "API token          =  (no active account — run: frmj account add NAME)"
         )
+        return
+
+    from frmj.app import _account_env_var
+
+    env_var = _account_env_var(account.name)
+
+    # Detect source in priority order, mirroring get_account_token resolution.
+    if os.environ.get(env_var):
+        source = f"set via {env_var} env var"
+    elif (
+        # Token found via a legacy env var used as a migration-period fallback.
+        (account.is_practice and os.environ.get("OANDA_API_TOKEN_PRACTICE"))
+        or (not account.is_practice and os.environ.get("OANDA_API_TOKEN"))
+        or (account.is_practice and os.environ.get("OANDA_API_TOKEN"))
+    ):
+        legacy_var = (
+            "OANDA_API_TOKEN_PRACTICE"
+            if (account.is_practice and os.environ.get("OANDA_API_TOKEN_PRACTICE"))
+            else "OANDA_API_TOKEN"
+        )
+        source = f"set via legacy env var ({legacy_var}) — migrate to {env_var}"
+    elif get_account_token(account.name, is_practice=account.is_practice) is not None:
+        source = "stored in OS keychain"
+    else:
+        source = f"not set — run: frmj account set-token {account.name}"
+
+    typer.echo(f"API token ({account.name:<10}) =  ({source})")
 
 
 def _format_direction_row(stats: DirectionStats, indent: bool = True) -> str:
