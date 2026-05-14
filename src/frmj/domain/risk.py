@@ -360,12 +360,9 @@ def evaluate_trade(
     if at_or_over_cap:
         if config.blocking_mode is BlockingMode.HARD_BLOCK:
             raise MaxTradesExceeded(
-                f"{open_trades} open >= max {config.max_open_trades} "
-                f"(HARD_BLOCK)"
+                f"{open_trades} open >= max {config.max_open_trades} (HARD_BLOCK)"
             )
-        warnings.append(
-            f"{open_trades} open trades >= max {config.max_open_trades}"
-        )
+        warnings.append(f"{open_trades} open trades >= max {config.max_open_trades}")
 
     # ----- Safety reserve -----------------------------------------------------
     # Compute the "untouchable" portion of equity and subtract it from the
@@ -398,9 +395,7 @@ def evaluate_trade(
         # numerator first preserves precision. Since our numerators are
         # always 1 today this is somewhat academic, but the code stays
         # correct if we ever generalise to non-unit numerators.
-        capital = (
-            usable_margin * Decimal(frac.numerator) / Decimal(frac.denominator)
-        )
+        capital = usable_margin * Decimal(frac.numerator) / Decimal(frac.denominator)
 
     elif config.strategy is RiskStrategy.PERCENT_OF_EQUITY:
         # ``percent_of_equity`` is guaranteed non-None by RiskConfig validation;
@@ -416,8 +411,7 @@ def evaluate_trade(
         capital = min(requested, usable_margin)
         if capital < requested:
             warnings.append(
-                f"capped by usable margin: requested {requested}, "
-                f"deploying {capital}"
+                f"capped by usable margin: requested {requested}, deploying {capital}"
             )
 
     elif config.strategy is RiskStrategy.FIXED_DOLLAR:
@@ -426,8 +420,7 @@ def evaluate_trade(
         capital = min(requested, usable_margin)
         if capital < requested:
             warnings.append(
-                f"capped by usable margin: requested {requested}, "
-                f"deploying {capital}"
+                f"capped by usable margin: requested {requested}, deploying {capital}"
             )
 
     else:  # pragma: no cover - defensive against future enum additions

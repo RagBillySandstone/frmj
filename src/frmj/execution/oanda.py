@@ -91,10 +91,10 @@ LIVE_BASE_URL: str = "https://api-oanda.com/v3"
 # response contains exactly this many rows there may be more; we loop.
 _SINCEID_PAGE_LIMIT: int = 500
 
-_CONNECT_TIMEOUT: float = 5.0   # seconds — fail fast on broken network
-_READ_TIMEOUT: float = 15.0     # seconds — cold pages can be large
-_WRITE_TIMEOUT: float = 5.0     # seconds — tiny uploads
-_POOL_TIMEOUT: float = 5.0      # seconds — connection pool wait
+_CONNECT_TIMEOUT: float = 5.0  # seconds — fail fast on broken network
+_READ_TIMEOUT: float = 15.0  # seconds — cold pages can be large
+_WRITE_TIMEOUT: float = 5.0  # seconds — tiny uploads
+_POOL_TIMEOUT: float = 5.0  # seconds — connection pool wait
 
 
 # ---------------------------------------------------------------------------
@@ -528,9 +528,7 @@ class OandaClient:
         Called at the start of the trade flow so the risk model has fresh
         account state. Raises ``httpx.HTTPStatusError`` on Oanda errors.
         """
-        resp = self._http.get(
-            f"{self._base_url}/accounts/{self.account_id}/summary"
-        )
+        resp = self._http.get(f"{self._base_url}/accounts/{self.account_id}/summary")
         resp.raise_for_status()
         return _parse_account_summary(resp.json())
 
@@ -626,9 +624,7 @@ class OandaClient:
         Returns an empty list when there are no open positions.
         Raises ``httpx.HTTPStatusError`` on Oanda errors.
         """
-        resp = self._http.get(
-            f"{self._base_url}/accounts/{self.account_id}/openTrades"
-        )
+        resp = self._http.get(f"{self._base_url}/accounts/{self.account_id}/openTrades")
         resp.raise_for_status()
         return [_parse_open_trade(t) for t in resp.json().get("trades", [])]
 

@@ -86,8 +86,7 @@ class TPSLSpec:
     def __post_init__(self) -> None:
         if self.value <= 0:
             raise ValueError(
-                f"TPSLSpec.value must be positive (a magnitude); "
-                f"got {self.value!r}"
+                f"TPSLSpec.value must be positive (a magnitude); got {self.value!r}"
             )
 
 
@@ -110,7 +109,7 @@ class ExitLevels:
     take_profit_price: Decimal | None
     stop_loss_price: Decimal | None
     projected_profit_home: Decimal | None  # at TP, positive
-    projected_loss_home: Decimal | None    # at SL, negative
+    projected_loss_home: Decimal | None  # at SL, negative
     return_on_margin_at_tp: Decimal | None  # fraction, e.g. Decimal("0.10")
     return_on_margin_at_sl: Decimal | None  # fraction, e.g. Decimal("-0.05")
     warnings: tuple[str, ...]

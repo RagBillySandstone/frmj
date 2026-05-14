@@ -87,9 +87,7 @@ class InstrumentSpec:
         # Cheap structural validation — catches typos in tests and bad data
         # from Oanda before it propagates into a trade decision.
         if self.margin_rate <= 0 or self.margin_rate > 1:
-            raise ValueError(
-                f"margin_rate must be in (0, 1]; got {self.margin_rate!r}"
-            )
+            raise ValueError(f"margin_rate must be in (0, 1]; got {self.margin_rate!r}")
         if self.min_units < 1:
             raise ValueError(f"min_units must be >= 1; got {self.min_units!r}")
         if self.units_increment < 1:
