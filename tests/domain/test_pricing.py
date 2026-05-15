@@ -300,7 +300,9 @@ class TestPercentTakeProfit:
     def test_warning_beyond_return_threshold(self) -> None:
         # 110% return — just over the 100% threshold.
         result = _call(
-            tp=TPSLSpec(TPSLKind.PERCENT_RETURN, UNREALISTIC_RETURN_THRESHOLD + Decimal("0.1"))
+            tp=TPSLSpec(
+                TPSLKind.PERCENT_RETURN, UNREALISTIC_RETURN_THRESHOLD + Decimal("0.1")
+            )
         )
         assert any("take-profit" in w and "return" in w for w in result.warnings)
 
@@ -354,7 +356,9 @@ class TestPercentStopLoss:
 
     def test_warning_beyond_return_threshold(self) -> None:
         result = _call(
-            sl=TPSLSpec(TPSLKind.PERCENT_RETURN, UNREALISTIC_RETURN_THRESHOLD + Decimal("0.1"))
+            sl=TPSLSpec(
+                TPSLKind.PERCENT_RETURN, UNREALISTIC_RETURN_THRESHOLD + Decimal("0.1")
+            )
         )
         assert any("stop-loss" in w and "return" in w for w in result.warnings)
 
@@ -458,6 +462,26 @@ class TestInputValidation:
     def test_nonpositive_entry_raises(self, bad: Decimal) -> None:
         with pytest.raises(ValueError):
             _call(entry=bad)
+
+    def test_zero_entry_with_explicit_quote_reaches_entry_validation(self) -> None:
+        """Cover the ``entry_price <= 0`` guard inside ``compute_exit_levels``.
+
+        ``_call(entry=Decimal("0"))`` constructs ``_eur_usd_quote(Decimal("0"))``
+        which itself raises from ``PriceQuote.__post_init__`` (bid becomes
+        -0.0002).  Supplying an explicit valid quote bypasses that so the guard
+        on line 231 of pricing.py is actually reached.
+        """
+        with pytest.raises(ValueError, match="entry_price must be positive"):
+            compute_exit_levels(
+                entry_price=Decimal("0"),
+                units=10_000,
+                direction=Direction.LONG,
+                spec=_eur_usd_spec(),
+                quote=_eur_usd_quote(),  # valid; constructed at price 1.10
+                margin_used=Decimal("220"),
+                take_profit=None,
+                stop_loss=None,
+            )
 
     @pytest.mark.parametrize("bad_units", [0, -1])
     def test_nonpositive_units_raises(self, bad_units: int) -> None:

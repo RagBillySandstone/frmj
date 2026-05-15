@@ -10,6 +10,7 @@ from frmj.domain.analytics import (
     ClosedTrade,
     DirectionStats,
     TradeSummary,
+    _stats_for,
     compute_summary,
     pl_by_direction,
     pl_by_hour,
@@ -503,3 +504,69 @@ class TestPlByInstrumentDirection:
         assert long_row.avg_pl == Decimal("40.00") / Decimal(3)
         assert short_row.count == 1
         assert short_row.total_pl == Decimal("-15.00")
+
+    def test_unknown_direction_silently_skipped(self) -> None:
+        """Trades with a direction other than LONG/SHORT are silently ignored."""
+        trades = [
+            ClosedTrade(
+                "1",
+                "EUR_USD",
+                "2026-04-25T09:00:00.000000Z",
+                Decimal("10.00"),
+                1000,
+                "FLAT",
+            ),
+            _trade("2", instrument="EUR_USD", direction="LONG", pl="5.00"),
+        ]
+        rows = pl_by_instrument_direction(trades)
+        # Only the LONG trade should appear; FLAT is dropped.
+        assert len(rows) == 1
+        assert rows[0][1].direction == "LONG"
+        assert rows[0][1].count == 1
+
+
+# ---------------------------------------------------------------------------
+# _stats_for — direct unit tests for the private helper
+# ---------------------------------------------------------------------------
+
+
+class TestStatsForHelper:
+    def test_empty_group_returns_zeroed_stats(self) -> None:
+        """``_stats_for`` with an empty list returns a zeroed DirectionStats.
+
+        Both callers (``pl_by_direction`` and ``pl_by_instrument_direction``)
+        guard against empty lists via ``if not pls: continue``, so this branch
+        is dead in normal usage — but the guard is there to prevent a
+        ZeroDivisionError, and this test exercises it directly.
+        """
+        result = _stats_for("LONG", [])
+        assert isinstance(result, DirectionStats)
+        assert result.direction == "LONG"
+        assert result.count == 0
+        assert result.wins == 0
+        assert result.losses == 0
+        assert result.win_rate == Decimal(0)
+        assert result.total_pl == Decimal(0)
+        assert result.avg_pl == Decimal(0)
+
+
+# ---------------------------------------------------------------------------
+# compute_summary — best_pl update branch
+# ---------------------------------------------------------------------------
+
+
+class TestComputeSummaryBestPlUpdate:
+    def test_best_pl_updates_when_later_trade_exceeds_first(self) -> None:
+        """``best_pl`` must be updated when a trade after index 0 has a higher P/L.
+
+        The existing tests all start with the highest P/L trade at index 0, so
+        the ``if t.pl > best_pl: best_pl = t.pl`` branch is never reached by
+        them.  This test places the best trade last to exercise that update.
+        """
+        trades = [
+            _trade("1", pl="10.00"),
+            _trade("2", pl="50.00"),  # highest — appears after index 0
+        ]
+        result = compute_summary(trades)
+        assert result is not None
+        assert result.best_pl == Decimal("50.00")
