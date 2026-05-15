@@ -276,17 +276,28 @@ def pl_by_hour(
 
 def pl_by_weekday(
     trades: list[ClosedTrade],
+    tz: tzinfo | None = None,
 ) -> list[tuple[str, int, Decimal]]:
     """Return ``(weekday_name, count, total_pl)`` Mon-Sun for days that have trades.
+
+    The Oanda timestamps stored on ``ClosedTrade.time`` are UTC.  When *tz*
+    is provided, each timestamp is converted to that timezone before its
+    calendar day is extracted, so the buckets reflect the local date in *tz*.
+    When *tz* is None, the raw UTC date is used (original behaviour).
 
     Days with no trades are omitted to keep the table compact.
     """
     groups: dict[int, tuple[int, Decimal]] = {}
     for t in trades:
         try:
-            dt = datetime.fromisoformat(t.time)
+            # Trim to seconds for Python < 3.11 compat (same approach as pl_by_hour).
+            dt = datetime.fromisoformat(t.time[:19])
         except ValueError:
             continue
+        if tz is not None:
+            # Tag as naive UTC then shift; the resulting date reflects wall-clock
+            # calendar day in *tz*, so day-boundary crossings are handled correctly.
+            dt = dt.replace(tzinfo=timezone.utc).astimezone(tz)
         d = dt.weekday()
         count, total = groups.get(d, (0, Decimal(0)))
         groups[d] = (count + 1, total + t.pl)

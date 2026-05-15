@@ -336,6 +336,32 @@ class TestPlByWeekday:
         rows = pl_by_weekday(trades)
         assert len(rows) == 1
 
+    def test_tz_rolls_day_forward_across_midnight(self) -> None:
+        # 22:00 UTC Sunday (2026-04-26) = 08:00 AEST Monday (2026-04-27).
+        # Without a tz the UTC date (Sunday) would be used; with UTC+10 the
+        # trade must land on Monday.
+        fixed_aest = timezone(timedelta(hours=10))
+        rows = pl_by_weekday(
+            [_trade(time="2026-04-26T22:00:00.000000Z", pl="10.00")],
+            tz=fixed_aest,
+        )
+        assert len(rows) == 1
+        day, count, total = rows[0]
+        assert day == "Mon"
+        assert count == 1
+        assert total == Decimal("10.00")
+
+    def test_tz_trade_before_midnight_stays_on_same_day(self) -> None:
+        # 13:00 UTC Sunday (2026-04-26) = 23:00 AEST Sunday — still Sunday.
+        fixed_aest = timezone(timedelta(hours=10))
+        rows = pl_by_weekday(
+            [_trade(time="2026-04-26T13:00:00.000000Z", pl="5.00")],
+            tz=fixed_aest,
+        )
+        assert len(rows) == 1
+        day, _, _ = rows[0]
+        assert day == "Sun"
+
 
 # ---------------------------------------------------------------------------
 # pl_by_direction

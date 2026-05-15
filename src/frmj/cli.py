@@ -95,7 +95,7 @@ import json
 import os
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import httpx
@@ -2179,10 +2179,15 @@ def _display_stats(
                 f"  {instrument:<{iw}}  {_format_direction_row(stats, indent=False)}"
             )
 
-    by_day = pl_by_weekday(trades)
+    # Fixed UTC+10 (AEST) aligns day boundaries with the Sydney market open,
+    # which marks the start of each Forex trading day.  A fixed offset rather
+    # than zoneinfo.ZoneInfo("Australia/Sydney") ensures DST never shifts the
+    # bucket boundaries.
+    _AEST = timezone(timedelta(hours=10))
+    by_day = pl_by_weekday(trades, tz=_AEST)
     if by_day:
         typer.echo("")
-        typer.echo("By weekday")
+        typer.echo("By weekday (AEST)")
         typer.echo("─" * 50)
         for day, count, total in by_day:
             typer.echo(f"  {day}  {count:>4}  {_color_pl(total)}")
