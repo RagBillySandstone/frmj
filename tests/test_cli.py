@@ -880,6 +880,133 @@ class TestAccountCommands:
         assert result.exit_code == 0, result.output
         assert any("practice-tok" in tok for _, tok in stored)
 
+    def test_account_rename_success(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """account rename OLD NEW exits 0 and prints a confirmation message."""
+        # No keychain entry stored for this account — get_password returns None.
+        monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: None)
+        result = runner.invoke(app, ["account", "rename", "practice", "demo"])
+        assert result.exit_code == 0, result.output
+        assert "practice" in result.output
+        assert "demo" in result.output
+
+    def test_account_rename_account_is_listed_under_new_name(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After rename, account list shows only the new name as an account entry."""
+        monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: None)
+        runner.invoke(app, ["account", "rename", "practice", "funded"])
+        result = runner.invoke(app, ["account", "list"])
+        assert result.exit_code == 0, result.output
+        # Parse the account name from each list row (first double-space-delimited token
+        # after stripping the active marker) so the type label "practice" does not
+        # produce a false positive.
+        listed_names = [
+            line.strip().lstrip("* ").split("  ")[0]
+            for line in result.output.splitlines()
+            if line.strip()
+        ]
+        assert "funded" in listed_names
+        assert "practice" not in listed_names
+
+    def test_account_rename_active_pointer_updated(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Renaming the active account updates the active pointer."""
+        monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: None)
+        runner.invoke(app, ["account", "rename", "practice", "funded"])
+        # account current should report the new name.
+        current = runner.invoke(app, ["account", "current"])
+        assert current.exit_code == 0, current.output
+        assert "funded" in current.output
+
+    def test_account_rename_migrates_keychain_token(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When a keychain entry exists it is copied to the new name and the old one deleted."""
+        written: list[tuple[str, str]] = []
+        deleted: list[str] = []
+        # Return a token only for the old account's keychain key.
+        monkeypatch.setattr(
+            "frmj.app.keyring.get_password",
+            lambda s, u: "stored-token" if u == "oanda_token_practice" else None,
+        )
+        monkeypatch.setattr(
+            "frmj.app.keyring.set_password",
+            lambda s, u, p: written.append((u, p)),
+        )
+        monkeypatch.setattr(
+            "frmj.app.keyring.delete_password",
+            lambda s, u: deleted.append(u),
+        )
+        result = runner.invoke(app, ["account", "rename", "practice", "funded"])
+        assert result.exit_code == 0, result.output
+        # Token should be written under the new keychain key.
+        assert any(
+            u == "oanda_token_funded" and p == "stored-token" for u, p in written
+        )
+        # Old keychain entry should be deleted.
+        assert "oanda_token_practice" in deleted
+
+    def test_account_rename_no_keychain_entry_is_noop(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When no keychain entry exists, rename still succeeds without writing or deleting."""
+        written: list[str] = []
+        deleted: list[str] = []
+        monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: None)
+        monkeypatch.setattr(
+            "frmj.app.keyring.set_password", lambda s, u, p: written.append(u)
+        )
+        monkeypatch.setattr(
+            "frmj.app.keyring.delete_password", lambda s, u: deleted.append(u)
+        )
+        result = runner.invoke(app, ["account", "rename", "practice", "demo"])
+        assert result.exit_code == 0, result.output
+        assert written == []
+        assert deleted == []
+
+    def test_account_rename_old_name_not_found_exits_1(self, db_path: Path) -> None:
+        """Renaming an account that doesn't exist → exit 1 with 'not found'."""
+        result = runner.invoke(app, ["account", "rename", "ghost", "new"])
+        assert result.exit_code == 1
+        assert "not found" in result.output + result.stderr
+
+    def test_account_rename_new_name_collision_exits_1(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Renaming to an existing account name → exit 1 with 'already exists'."""
+        monkeypatch.setattr("frmj.app.keyring.set_password", lambda s, u, p: None)
+        # Add a second account to collide with.
+        runner.invoke(app, ["account", "add", "funded"], input="live-001\nlive\n\n")
+        result = runner.invoke(app, ["account", "rename", "practice", "funded"])
+        assert result.exit_code == 1
+        assert "already exists" in result.output + result.stderr
+
+    def test_account_rename_same_name_exits_1(self, db_path: Path) -> None:
+        """Renaming an account to its current name → exit 1."""
+        result = runner.invoke(app, ["account", "rename", "practice", "practice"])
+        assert result.exit_code == 1
+        assert "same" in result.output + result.stderr
+
+    def test_account_rename_keychain_error_warns_but_exits_0(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A keyring backend error during token migration emits a warning but still exits 0."""
+        import keyring.errors
+
+        monkeypatch.setattr(
+            "frmj.app.keyring.get_password",
+            lambda s, u: (_ for _ in ()).throw(keyring.errors.NoKeyringError()),
+        )
+        result = runner.invoke(app, ["account", "rename", "practice", "demo"])
+        assert result.exit_code == 0, result.output
+        # Confirm the rename itself succeeded.
+        assert "renamed" in result.output
+        # A warning about the keychain should appear on stderr.
+        assert "keychain" in result.stderr.lower() or "keyring" in result.stderr.lower()
+
 
 # ---------------------------------------------------------------------------
 # mode sub-commands
