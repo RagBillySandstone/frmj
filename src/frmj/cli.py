@@ -1666,7 +1666,7 @@ def export(
             params.append(since)
         if instrument:
             where.append("json_extract(raw_json, '$.instrument') = ?")
-            params.append(instrument)
+            params.append(instrument.upper())
 
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
@@ -1922,9 +1922,10 @@ def journal(
             params.append(since)
         if instrument:
             # json_extract is available in SQLite ≥ 3.9 (2015); safe on all
-            # target platforms.
+            # target platforms.  Normalise to uppercase so 'eur_usd' matches
+            # 'EUR_USD' as stored by Oanda.
             where.append("json_extract(raw_json, '$.instrument') = ?")
-            params.append(instrument)
+            params.append(instrument.upper())
         if with_notes:
             where.append("id IN (SELECT DISTINCT transaction_id FROM notes)")
         if filter_tag:
