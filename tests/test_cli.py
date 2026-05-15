@@ -509,6 +509,16 @@ class TestConfigCommands:
         assert "keychain" in result.output
         assert "kr-tok" not in result.output  # value must not be printed
 
+    def test_config_get_all_no_active_account_shows_guidance(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When no active account exists, config get shows 'no active account'."""
+        path = tmp_path / "empty_account.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        result = runner.invoke(app, ["config", "get"])
+        assert result.exit_code == 0
+        assert "no active account" in result.output.lower()
+
 
 # ---------------------------------------------------------------------------
 # config check
@@ -620,6 +630,15 @@ class TestConfigCheck:
         result = runner.invoke(app, ["config", "check"])
         assert result.exit_code == 1
         assert "fixed_dollar" in result.output
+
+    def test_fixed_dollar_with_field_is_ok(self, db_path: Path) -> None:
+        """risk_strategy=fixed_dollar with fixed_dollar set → OK line shown."""
+        runner.invoke(app, ["config", "set", "max_open_trades", "5"])
+        runner.invoke(app, ["config", "set", "risk_strategy", "fixed_dollar"])
+        runner.invoke(app, ["config", "set", "fixed_dollar", "100"])
+        result = runner.invoke(app, ["config", "check"])
+        assert "fixed_dollar" in result.output
+        assert "OK" in result.output
 
     def test_connectivity_flag_skipped_without_token(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1006,6 +1025,52 @@ class TestAccountCommands:
         assert "renamed" in result.output
         # A warning about the keychain should appear on stderr.
         assert "keychain" in result.stderr.lower() or "keyring" in result.stderr.lower()
+
+    def test_account_add_empty_oanda_id_exits_1(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Supplying an all-whitespace Oanda account ID exits 1.
+
+        Typer re-prompts on a bare newline (no default set), so a space is
+        used — it passes the prompt but strips to empty, triggering the guard.
+        """
+        result = runner.invoke(app, ["account", "add", "new-acct"], input="   \n")
+        assert result.exit_code == 1
+        assert "cannot be empty" in result.output + result.stderr
+
+    def test_account_add_invalid_type_exits_1(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Supplying an account type other than 'practice' or 'live' exits 1."""
+        # Input: valid oanda_id, invalid type
+        result = runner.invoke(
+            app, ["account", "add", "new-acct"], input="101-001-99999-001\nfoo\n"
+        )
+        assert result.exit_code == 1
+        assert (
+            "practice" in result.output + result.stderr
+            or "type" in result.output + result.stderr
+        )
+
+    def test_account_add_token_storage_failure_warns_but_exits_0(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When token storage fails (no keyring), a warning is shown but the
+        account is still created and the command exits 0."""
+        import keyring.errors
+
+        monkeypatch.setattr(
+            "frmj.app.keyring.set_password",
+            lambda s, u, p: (_ for _ in ()).throw(keyring.errors.NoKeyringError()),
+        )
+        # Input: oanda_id, type=practice, token="mytoken" (non-empty → triggers store)
+        result = runner.invoke(
+            app,
+            ["account", "add", "new-acct"],
+            input="101-001-99999-001\npractice\nmytoken\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "Warning" in result.output + result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -1676,6 +1741,33 @@ class TestJournalCommand:
         assert "EUR_USD" in result.output
         assert "1.25" in result.output
 
+    def test_daily_financing_invalid_amount_handled_gracefully(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DAILY_FINANCING rows with a non-numeric amount are displayed without
+        a P/L figure — the ``except Exception: pass`` block suppresses the error."""
+        path = tmp_path / "fin_bad.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        monkeypatch.setattr(
+            "frmj.cli.get_client",
+            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+        )
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+            "VALUES ('5099', 'acct-1', 'DAILY_FINANCING', "
+            "'2026-04-25T22:00:00.000000Z', "
+            '\'{"financing":"not-a-number"}\')'
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        # The transaction row must appear; no crash despite the bad amount.
+        assert "5099" in result.output
+
 
 # ---------------------------------------------------------------------------
 # trade — confirmed execution path with TP/SL attachment
@@ -1817,6 +1909,228 @@ class TestTradeExecute:
         count = conn.execute("SELECT COUNT(*) FROM trade_plans").fetchone()[0]
         conn.close()
         assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# trade — error and edge-case paths
+# ---------------------------------------------------------------------------
+
+
+class TestTradeErrors:
+    """Error-path and edge-case tests for the ``frmj trade`` command."""
+
+    @pytest.fixture()
+    def trade_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Fully configured practice DB for normal trade command invocations."""
+        path = tmp_path / "trade_err.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        add_account(conn, "practice", "acct-1", is_practice=True)
+        set_active_account(conn, "practice")
+        set_config(conn, "max_open_trades", "5")
+        conn.close()
+        return path
+
+    @pytest.fixture()
+    def live_trade_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """DB with a live account and max_open_trades; live mode NOT enabled."""
+        path = tmp_path / "live_trade_err.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        add_account(conn, "my-live", "101-001-live-001", is_practice=False)
+        set_active_account(conn, "my-live")
+        set_config(conn, "max_open_trades", "5")
+        conn.close()
+        return path
+
+    def test_get_client_failure_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When get_client raises (no active account), trade exits 1."""
+        path = tmp_path / "no_account.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
+        result = runner.invoke(app, ["trade", "EUR_USD", "long"])
+        assert result.exit_code == 1
+        assert "Error" in result.output + result.stderr
+
+    def test_get_risk_config_failure_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When get_risk_config raises (no max_open_trades), trade exits 1."""
+        path = tmp_path / "no_risk.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        add_account(conn, "practice", "acct-1", is_practice=True)
+        set_active_account(conn, "practice")
+        conn.close()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
+        result = runner.invoke(app, ["trade", "EUR_USD", "long"])
+        assert result.exit_code == 1
+        assert "Error" in result.output + result.stderr
+
+    def test_market_data_failure_exits_1(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When fetching market data raises, trade exits 1."""
+
+        class FailingClient(FakeFullClient):
+            """Raises on the first call that fetches live account data."""
+
+            def get_account_summary(self) -> None:  # type: ignore[override]
+                raise RuntimeError("network down")
+
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FailingClient())
+        result = runner.invoke(app, ["trade", "EUR_USD", "long"])
+        assert result.exit_code == 1
+        assert "Error fetching market data" in result.output + result.stderr
+
+    def test_max_trades_exceeded_exits_1(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MaxTradesExceeded from evaluate_trade exits 1."""
+        from frmj.domain.risk import MaxTradesExceeded
+
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
+        monkeypatch.setattr(
+            "frmj.cli.evaluate_trade",
+            lambda **kw: (_ for _ in ()).throw(
+                MaxTradesExceeded("too many open trades")
+            ),
+        )
+        result = runner.invoke(app, ["trade", "EUR_USD", "long"])
+        assert result.exit_code == 1
+        assert "Cannot trade" in result.output + result.stderr
+
+    def test_scale_in_forbidden_exits_1(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ScaleInForbidden from evaluate_trade exits 1."""
+        from frmj.domain.risk import ScaleInForbidden
+
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
+        monkeypatch.setattr(
+            "frmj.cli.evaluate_trade",
+            lambda **kw: (_ for _ in ()).throw(
+                ScaleInForbidden("scale-in not allowed")
+            ),
+        )
+        result = runner.invoke(app, ["trade", "EUR_USD", "long"])
+        assert result.exit_code == 1
+        assert "Cannot trade" in result.output + result.stderr
+
+    def test_sizing_warnings_shown(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-fatal warnings from evaluate_trade are echoed before the trade plan."""
+        from frmj.domain.risk import RiskStrategy, SizingDecision
+
+        decision = SizingDecision(
+            capital_to_deploy=Decimal("500"),
+            strategy_used=RiskStrategy.REMAINING_MARGIN_FRACTION,
+            size_fraction=None,
+            warnings=("near max open trades",),
+        )
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
+        monkeypatch.setattr("frmj.cli.evaluate_trade", lambda **kw: decision)
+        # Just show the plan (dry-run avoids needing confirmation input).
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="\n\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "Warning" in result.output + result.stderr
+        assert "near max open trades" in result.output + result.stderr
+
+    def test_units_compute_failure_exits_1(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When compute_units raises, trade exits 1."""
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
+        monkeypatch.setattr(
+            "frmj.cli.compute_units",
+            lambda **kw: (_ for _ in ()).throw(RuntimeError("sizing error")),
+        )
+        result = runner.invoke(app, ["trade", "EUR_USD", "long"])
+        assert result.exit_code == 1
+        assert "Error computing units" in result.output + result.stderr
+
+    def test_edit_confirmation_loop(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pressing 'e' at the confirm prompt re-prompts for TP/SL and
+        re-displays exit levels before asking for confirmation again."""
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
+        # Sequence: TP=50, SL=30, answer=e (edit), new TP=20, new SL=15,
+        # answer=y (confirm order), note=skip, tags=skip.
+        result = runner.invoke(
+            app,
+            ["trade", "EUR_USD", "long"],
+            input="50\n30\ne\n20\n15\ny\n\n\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "Order filled" in result.output
+
+    def test_live_account_practice_mode_gate_exits_1(
+        self, live_trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A live account without live mode enabled is blocked after confirming."""
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
+        # TP=50, SL=30, confirm=y → live mode gate fires before place_market_order.
+        result = runner.invoke(
+            app,
+            ["trade", "EUR_USD", "long"],
+            input="50\n30\ny\n",
+        )
+        assert result.exit_code == 1
+        assert "live trading mode is not enabled" in result.output + result.stderr
+
+    def test_post_fill_sync_failure_warns_but_exits_0(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A sync error after a successful fill emits a warning but exits 0."""
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
+
+        call_count = 0
+
+        def _counting_sync(conn: object, client: object) -> object:
+            """First call is the pre-trade auto-sync; second is post-fill sync."""
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                raise RuntimeError("sync exploded after fill")
+            from frmj.execution.sync import SyncResult
+
+            return SyncResult(rows_ingested=0, rows_skipped=0, last_oanda_id=None)
+
+        monkeypatch.setattr("frmj.cli.sync_incremental", _counting_sync)
+        # TP=50, SL=30, confirm=y, note=skip, tags=skip.
+        result = runner.invoke(
+            app,
+            ["trade", "EUR_USD", "long"],
+            input="50\n30\ny\n\n\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "post-fill sync failed" in result.output + result.stderr
+
+    def test_note_skipped_when_fill_not_in_db(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the fill transaction is absent from the local DB and the user
+        types a note, a 'not yet in local DB' warning is shown instead of
+        inserting the note."""
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
+        # TP=skip, SL=skip, confirm=y, note="my note" (non-empty), tags=skip.
+        # FakeFullClient returns transaction_id="99999" which is never pre-inserted.
+        result = runner.invoke(
+            app,
+            ["trade", "EUR_USD", "long"],
+            input="\n\ny\nmy note\n\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "not yet in local DB" in result.output + result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -2118,6 +2432,23 @@ class TestStatsCommand:
         result = runner.invoke(app, ["stats"])
         assert "Total P/L" in result.output
         assert "30.00" in result.output
+
+    def test_zero_total_pl_shows_unsigned_amount(self, stats_db: Path) -> None:
+        """Two perfectly offsetting trades (total P/L = 0) exercise the
+        ``_color_pl(Decimal(0))`` code path that returns plain text without
+        ANSI color styling."""
+        self._seed_fills(
+            stats_db,
+            [
+                ("1", "2026-04-25T09:00:00Z", "-10000", "10.00"),
+                ("2", "2026-04-26T10:00:00Z", "-10000", "-10.00"),
+            ],
+        )
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        # total_pl=0 and avg_pl=0 both pass through _color_pl(Decimal("0")),
+        # which returns plain "$0.00" without a + prefix or ANSI color codes.
+        assert "$0.00" in result.output
 
 
 # ---------------------------------------------------------------------------
