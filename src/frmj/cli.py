@@ -30,6 +30,12 @@ Commands
 ``frmj config unset-token``
     Remove the stored token from the OS keychain.
 
+``frmj account rename OLD_NAME NEW_NAME``
+    Rename a configured account profile.  The Oanda account ID, token, and all
+    other settings are preserved; only the friendly name changes.  If
+    *OLD_NAME* is the active account the active pointer is updated atomically.
+    The OS keychain entry is migrated to the new name automatically.
+
 ``frmj trade <INSTRUMENT> <long|short> [--dry-run]``
     Interactive trade flow: risk → sizing → TP/SL → confirm → execute →
     attach TP/SL on Oanda → note.  ``--dry-run`` shows the full plan
@@ -103,6 +109,7 @@ from frmj.accounts import (
     get_account,
     add_account,
     remove_account,
+    rename_account,
     set_active_account,
     set_live_mode,
 )
@@ -117,6 +124,7 @@ from frmj.app import (
     get_db,
     get_risk_config,
     load_draft_plan,
+    rename_account_token,
     save_draft_plan,
     set_config,
     store_account_token,
@@ -688,6 +696,64 @@ def account_set_token(
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1)
     typer.echo(f"Token for '{name}' stored in OS keychain.")
+
+
+@account_app.command("rename")
+def account_rename(
+    old_name: str = typer.Argument(..., help="Current account name"),
+    new_name: str = typer.Argument(..., help="New account name"),
+) -> None:
+    """Rename an account profile without changing its Oanda ID or settings."""
+    # Normalise and validate the new name before touching the database.
+    new_name = new_name.strip()
+    if not new_name:
+        typer.echo("Error: new name cannot be empty.", err=True)
+        raise typer.Exit(1)
+    if old_name == new_name:
+        typer.echo("Error: old and new names are the same.", err=True)
+        raise typer.Exit(1)
+
+    conn = get_db()
+    try:
+        # Guard: old account must exist.
+        if get_account(conn, old_name) is None:
+            typer.echo(
+                f"Error: account '{old_name}' not found. "
+                "Run 'frmj account list' to see available accounts.",
+                err=True,
+            )
+            conn.close()
+            raise typer.Exit(1)
+
+        # Guard: new name must not collide with an existing profile.
+        if get_account(conn, new_name) is not None:
+            typer.echo(
+                f"Error: account '{new_name}' already exists.",
+                err=True,
+            )
+            conn.close()
+            raise typer.Exit(1)
+
+        # Rename in DB (accounts row + active_account config if applicable).
+        rename_account(conn, old_name, new_name)
+    finally:
+        conn.close()
+
+    # Migrate the keychain entry best-effort; missing keyring is a warning,
+    # not a fatal error, because the user may be relying on an env var instead.
+    try:
+        rename_account_token(old_name, new_name)
+    except RuntimeError as exc:
+        typer.echo(
+            f"Warning: could not migrate token in OS keychain — {exc}",
+            err=True,
+        )
+        typer.echo(
+            f"  Re-enter the token with: frmj account set-token {new_name}",
+            err=True,
+        )
+
+    typer.echo(f"Account '{old_name}' renamed to '{new_name}'.")
 
 
 # ---------------------------------------------------------------------------

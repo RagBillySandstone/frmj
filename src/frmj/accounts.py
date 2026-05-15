@@ -117,6 +117,46 @@ def get_account_count(conn: sqlite3.Connection) -> int:
     return row[0]
 
 
+def rename_account(conn: sqlite3.Connection, old_name: str, new_name: str) -> bool:
+    """
+    Rename the profile *old_name* to *new_name*.
+
+    Updates the ``accounts`` table and, when *old_name* is the active account,
+    atomically updates the ``active_account`` config key in the same
+    transaction — so the active pointer is never left dangling.
+
+    Returns ``True`` when the rename succeeded, ``False`` when *old_name* was
+    not found.  Raises ``sqlite3.IntegrityError`` when *new_name* already
+    exists (PRIMARY KEY constraint).  The caller is responsible for converting
+    that to a user-visible error.
+
+    Does **not** touch the OS keychain — callers that need to migrate the
+    stored token should call ``rename_account_token`` from ``app.py``.
+    """
+    # Read current active name before modifying the accounts table so both
+    # writes can be committed atomically.
+    active_name = get_active_account_name(conn)
+
+    cursor = conn.execute(
+        "UPDATE accounts SET name = ? WHERE name = ?",
+        (new_name, old_name),
+    )
+    if cursor.rowcount == 0:
+        # old_name did not exist — roll back any implicit transaction state.
+        conn.rollback()
+        return False
+
+    # Keep active_account config in sync when renaming the active profile.
+    if active_name == old_name:
+        conn.execute(
+            "REPLACE INTO config (key, value) VALUES (?, ?)",
+            (_ACTIVE_ACCOUNT_KEY, new_name),
+        )
+
+    conn.commit()
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Active account helpers
 # ---------------------------------------------------------------------------

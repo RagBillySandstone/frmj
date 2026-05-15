@@ -386,6 +386,35 @@ def delete_account_token(account_name: str) -> None:
         pass
 
 
+def rename_account_token(old_name: str, new_name: str) -> None:
+    """
+    Move the OS keychain entry for *old_name* to *new_name*.
+
+    Reads only the account-namespaced keychain key (``oanda_token_{name}``),
+    not env-var or legacy fallback sources — those do not need migration
+    because they are not keyed by account name.  When no account-namespaced
+    entry exists the function is a no-op.
+
+    Raises ``RuntimeError`` when no keyring backend is available.
+    """
+    try:
+        token = keyring.get_password(_KEYRING_SERVICE, _account_keyring_key(old_name))
+    except keyring.errors.NoKeyringError as exc:
+        raise RuntimeError("No system keyring is available on this machine.") from exc
+    except keyring.errors.KeyringError:
+        # Any other keyring error — treat as "no entry to migrate".
+        return
+
+    if token is None:
+        # No account-namespaced entry stored; nothing to migrate.
+        return
+
+    # Write under the new name first, then remove the old entry so the token
+    # is never lost if the delete step fails.
+    store_account_token(new_name, token)
+    delete_account_token(old_name)
+
+
 # ---------------------------------------------------------------------------
 # V1 → V2 migration
 # ---------------------------------------------------------------------------

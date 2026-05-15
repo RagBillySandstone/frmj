@@ -24,6 +24,7 @@ from frmj.accounts import (
     is_live_mode,
     list_accounts,
     remove_account,
+    rename_account,
     set_active_account,
     set_live_mode,
 )
@@ -366,6 +367,69 @@ class TestMigrateV1Accounts:
             assert get_config(conn, "practice_account_id") is None
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Rename account
+# ---------------------------------------------------------------------------
+
+
+class TestRenameAccount:
+    def test_rename_changes_name(self, conn: sqlite3.Connection) -> None:
+        """rename_account updates the name and the record is retrievable under the new name."""
+        add_account(conn, "old", "acct-1", is_practice=True)
+        result = rename_account(conn, "old", "new")
+        assert result is True
+        assert get_account(conn, "old") is None
+        record = get_account(conn, "new")
+        assert record is not None
+        assert record.name == "new"
+
+    def test_rename_preserves_oanda_id(self, conn: sqlite3.Connection) -> None:
+        """The Oanda account ID is untouched after renaming."""
+        add_account(conn, "demo", "101-001-99999-001", is_practice=True)
+        rename_account(conn, "demo", "practice")
+        record = get_account(conn, "practice")
+        assert record is not None
+        assert record.oanda_id == "101-001-99999-001"
+
+    def test_rename_preserves_is_practice(self, conn: sqlite3.Connection) -> None:
+        """The is_practice flag is untouched after renaming."""
+        add_account(conn, "live-old", "live-001", is_practice=False)
+        rename_account(conn, "live-old", "funded")
+        record = get_account(conn, "funded")
+        assert record is not None
+        assert record.is_practice is False
+
+    def test_rename_nonexistent_returns_false(self, conn: sqlite3.Connection) -> None:
+        """rename_account returns False when old_name does not exist."""
+        assert rename_account(conn, "ghost", "new") is False
+
+    def test_rename_duplicate_new_name_raises(self, conn: sqlite3.Connection) -> None:
+        """Renaming to an existing account name raises IntegrityError (PRIMARY KEY)."""
+        add_account(conn, "a", "a-id", is_practice=True)
+        add_account(conn, "b", "b-id", is_practice=False)
+        with pytest.raises(sqlite3.IntegrityError):
+            rename_account(conn, "a", "b")
+
+    def test_rename_active_account_updates_config(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """When the renamed account is active, the active_account config key follows."""
+        add_account(conn, "old-active", "acct-x", is_practice=True)
+        set_active_account(conn, "old-active")
+        rename_account(conn, "old-active", "new-active")
+        assert get_active_account_name(conn) == "new-active"
+
+    def test_rename_inactive_account_leaves_active_unchanged(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """Renaming a non-active account does not affect the active_account pointer."""
+        add_account(conn, "active", "a-id", is_practice=True)
+        add_account(conn, "inactive", "b-id", is_practice=False)
+        set_active_account(conn, "active")
+        rename_account(conn, "inactive", "renamed")
+        assert get_active_account_name(conn) == "active"
 
 
 # ---------------------------------------------------------------------------
