@@ -20,7 +20,9 @@ from frmj.accounts import add_account, set_active_account
 from frmj.app import (
     _resolve_default_data_dir,
     clear_draft_plan,
+    delete_account_token,
     delete_token,
+    get_account_token,
     get_all_config,
     get_client,
     get_config,
@@ -28,6 +30,8 @@ from frmj.app import (
     get_risk_config,
     get_token,
     load_draft_plan,
+    migrate_v1_accounts,
+    rename_account_token,
     save_draft_plan,
     set_config,
     store_token,
@@ -574,3 +578,175 @@ class TestDeleteToken:
         )
         with pytest.raises(RuntimeError, match="No system keyring"):
             delete_token()
+
+
+# ---------------------------------------------------------------------------
+# get_account_token — KeyringError branch inside _kr()
+# ---------------------------------------------------------------------------
+
+
+class TestGetAccountToken:
+    def test_generic_keyring_error_in_kr_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A generic KeyringError (not NoKeyringError) from get_password is treated
+        as 'token not found' and get_account_token returns None."""
+        import keyring.errors
+
+        # Clear all env vars that could supply a token.
+        monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
+        monkeypatch.delenv("OANDA_API_TOKEN_PRACTICE", raising=False)
+        monkeypatch.delenv("FRMJ_TOKEN_TEST", raising=False)
+
+        # A plain KeyringError (not a subclass that would indicate "no keyring")
+        # must be caught and treated as None so the caller gets a clean None.
+        monkeypatch.setattr(
+            "frmj.app.keyring.get_password",
+            lambda s, u: (_ for _ in ()).throw(keyring.errors.KeyringError()),
+        )
+        result = get_account_token("test", is_practice=True)
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# delete_account_token — NoKeyringError branch
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteAccountToken:
+    def test_no_keyring_raises_runtime_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """delete_account_token raises RuntimeError when no keyring backend is available."""
+        import keyring.errors
+
+        monkeypatch.setattr(
+            "frmj.app.keyring.delete_password",
+            lambda s, u: (_ for _ in ()).throw(keyring.errors.NoKeyringError()),
+        )
+        with pytest.raises(RuntimeError, match="No system keyring"):
+            delete_account_token("test-account")
+
+    def test_password_delete_error_is_swallowed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PasswordDeleteError (token was never stored) is silently ignored."""
+        import keyring.errors
+
+        monkeypatch.setattr(
+            "frmj.app.keyring.delete_password",
+            lambda s, u: (_ for _ in ()).throw(keyring.errors.PasswordDeleteError()),
+        )
+        delete_account_token("test-account")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# rename_account_token — generic KeyringError silent return
+# ---------------------------------------------------------------------------
+
+
+class TestRenameAccountToken:
+    def test_generic_keyring_error_on_get_returns_silently(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A generic KeyringError when reading the old token is silently swallowed;
+        rename_account_token is a no-op in that case rather than crashing."""
+        import keyring.errors
+
+        monkeypatch.setattr(
+            "frmj.app.keyring.get_password",
+            lambda s, u: (_ for _ in ()).throw(keyring.errors.KeyringError()),
+        )
+        # Must not raise.
+        rename_account_token("old-account", "new-account")
+
+
+# ---------------------------------------------------------------------------
+# migrate_v1_accounts — token copy branches
+# ---------------------------------------------------------------------------
+
+
+class TestMigrateV1Accounts:
+    @pytest.fixture()
+    def migration_db(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> sqlite3.Connection:
+        """Fresh DB (no accounts) ready for migration testing."""
+        db_path = tmp_path / "migrate.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(db_path))
+        # get_db calls migrate_v1_accounts internally; at this point no legacy
+        # keys exist so migration is a no-op and accounts table stays empty.
+        conn = get_db(path=db_path)
+        return conn
+
+    def test_practice_token_copied_to_keychain(
+        self, migration_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When a v1 practice token exists, migrate_v1_accounts copies it to the
+        new per-account keychain key ``oanda_token_practice``."""
+
+        set_config(migration_db, "practice_account_id", "101-001-p-001")
+        # Make the legacy practice token visible via env var.
+        monkeypatch.setenv("OANDA_API_TOKEN_PRACTICE", "practice-token-v1")
+
+        stored: list[tuple[str, str, str]] = []
+        monkeypatch.setattr(
+            "frmj.app.keyring.set_password",
+            lambda s, u, p: stored.append((s, u, p)),
+        )
+
+        migrate_v1_accounts(migration_db)
+
+        # The practice token must have been written to the per-account key.
+        assert any(u == "oanda_token_practice" for _, u, _ in stored)
+
+    def test_practice_no_keyring_silenced(
+        self, migration_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """NoKeyringError during practice token copy is silently ignored; migration
+        still completes (token is already accessible via the env var it came from)."""
+        import keyring.errors
+
+        set_config(migration_db, "practice_account_id", "101-001-p-001")
+        monkeypatch.setenv("OANDA_API_TOKEN_PRACTICE", "practice-token-v1")
+        monkeypatch.setattr(
+            "frmj.app.keyring.set_password",
+            lambda s, u, p: (_ for _ in ()).throw(keyring.errors.NoKeyringError()),
+        )
+
+        # Must not raise; the NoKeyringError is suppressed inside the try/except.
+        migrate_v1_accounts(migration_db)
+
+    def test_live_token_copied_to_keychain(
+        self, migration_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When a v1 live token exists, migrate_v1_accounts copies it to the
+        new per-account keychain key ``oanda_token_live``."""
+        set_config(migration_db, "account_id", "101-001-l-001")
+        # Live token is the value of OANDA_API_TOKEN (v1 convention).
+        monkeypatch.setenv("OANDA_API_TOKEN", "live-token-v1")
+
+        stored: list[tuple[str, str, str]] = []
+        monkeypatch.setattr(
+            "frmj.app.keyring.set_password",
+            lambda s, u, p: stored.append((s, u, p)),
+        )
+
+        migrate_v1_accounts(migration_db)
+
+        assert any(u == "oanda_token_live" for _, u, _ in stored)
+
+    def test_live_no_keyring_silenced(
+        self, migration_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """NoKeyringError during live token copy is silently ignored."""
+        import keyring.errors
+
+        set_config(migration_db, "account_id", "101-001-l-001")
+        monkeypatch.setenv("OANDA_API_TOKEN", "live-token-v1")
+        monkeypatch.setattr(
+            "frmj.app.keyring.set_password",
+            lambda s, u, p: (_ for _ in ()).throw(keyring.errors.NoKeyringError()),
+        )
+
+        migrate_v1_accounts(migration_db)  # must not raise
