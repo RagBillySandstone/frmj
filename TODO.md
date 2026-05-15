@@ -38,3 +38,15 @@ The CLI commands currently call `app.py` factories directly. Before building a G
 ### 6. CSV import from Oanda Hub download
 
 Allow bootstrapping the DB from the CSV file Oanda provides in the account hub (`History → Download`). Gives a way to back-fill history for accounts that have years of transactions before the first `frmj sync --cold` run, and provides a cross-check against the API sync. Parser should map CSV column names to the `transactions` schema and skip rows already present.
+
+---
+
+## P3 — Test coverage
+
+### 7. OandaClient HTTP method coverage
+
+`oanda.py` is at 62% line coverage. The untested lines are the HTTP client
+methods beyond `place_market_order` (`get_transactions_since`, `get_account_summary`,
+`get_instrument`, `get_price`, `get_open_trades`, `close_trade`, etc.).
+The existing `_FakeHttp` pattern in `tests/execution/test_oanda_client.py` can be
+extended to cover each method's response-parsing logic and error paths.
