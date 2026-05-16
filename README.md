@@ -145,16 +145,17 @@ frmj trade --resume                  # execute a previously saved draft plan
 
 The flow:
 
-1. Auto-syncs new transactions (silent unless new rows arrive).
-2. Fetches live account state (NAV, available margin, open trade count).
-3. Runs the risk model to determine capital to deploy.
-4. Fetches live bid/ask and instrument metadata.
-5. Computes position size (units and actual margin used).
-6. Prompts for take-profit and stop-loss (pips or `%` return-on-margin).
-7. Displays the full trade plan including exit prices, projected P/L, and R:R ratio.
-8. Confirms before placing a market order (`y` / `n` / `e` to edit TP/SL).
+1. Fetches live account state (NAV, available margin, open trade count) and live price.
+2. Runs the risk model to determine capital to deploy and enforce trade limits.
+3. Computes position size (units, margin required, pip value).
+4. Displays the trade plan: NAV, open trades, capital at risk, units, margin, pip value, and entry price.
+5. Prompts for take-profit and stop-loss (pips or `%` return-on-margin).
+6. Displays exit prices, projected P/L, and R:R ratio.
+7. Confirms before placing the order (`y` / `n` / `e` to re-enter TP/SL).
+8. Places a market order; on failure, prompts to retry, save the draft, or abort.
 9. Attaches TP/SL to the open trade on Oanda.
-10. Prompts for an optional note and tags after fill.
+10. Syncs the fill into the local journal.
+11. Prompts for an optional note and tags.
 
 **TP/SL input formats:**
 
