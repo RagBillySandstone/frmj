@@ -50,13 +50,13 @@ frmj --help
 FRoMaJ uses named account profiles. Add accounts once, then switch between them freely without re-entering credentials.
 
 ```sh
-# Add a practice account (prompts for Oanda account ID)
-frmj account add practice --practice
-frmj account set-token practice    # store token in OS keychain (prompted, never echoed)
+# Add a practice account (prompts for Oanda account ID and type)
+frmj account add practice
+frmj account set-token practice    # store practice token in OS keychain (prompted, never echoed)
 
-# Add a live account
+# Add a live account (prompts for Oanda account ID; choose type: live)
 frmj account add funded
-frmj account set-token funded
+frmj account set-token live        # store live token in OS keychain (prompted, never echoed)
 
 # Activate whichever account you want to work with
 frmj account use practice
@@ -71,11 +71,12 @@ frmj config check --connectivity   # also calls the Oanda API to verify credenti
 
 ### API tokens
 
-Tokens are stored per account in the OS keychain:
+Oanda issues one API token per environment (practice vs live), not per account. Tokens are stored by environment in the OS keychain:
 
 ```sh
-frmj account set-token NAME    # store token for account NAME (prompted, never echoed)
-frmj account remove NAME       # remove account and its token
+frmj account set-token practice    # store practice token (prompted, never echoed)
+frmj account set-token live        # store live token (prompted, never echoed)
+frmj account set-token             # defaults to the active account's environment type
 ```
 
 Backed by GNOME Keyring / KWallet on Linux, Keychain on macOS, Credential Locker on Windows.
@@ -238,13 +239,13 @@ Tags are normalised to lowercase. Only letters, digits, hyphens, and underscores
 Manage named Oanda account profiles.
 
 ```sh
-frmj account add NAME              # add a new account profile (prompts for Oanda account ID)
-frmj account add NAME --practice   # mark the account as a practice account
+frmj account add NAME              # add a new account profile (prompts for Oanda ID and type)
 frmj account list                  # list all configured accounts
 frmj account use NAME              # set NAME as the active account
 frmj account current               # show the currently active account
-frmj account remove NAME           # remove an account profile and its stored token
-frmj account set-token NAME        # store or update the API token for NAME
+frmj account remove NAME           # remove an account profile
+frmj account set-token practice    # store or update the practice API token
+frmj account set-token live        # store or update the live API token
 ```
 
 ### `frmj mode`
@@ -286,12 +287,9 @@ All strategies respect `safety_reserve_pct`: that fraction of equity is subtract
 
 | Variable | Required | Description |
 |---|---|---|
-| `FRMJ_TOKEN_{NAME}` | No | API token for the account named `NAME` (uppercase, hyphens → underscores). Takes priority over the OS keychain and legacy env vars. |
-| `OANDA_API_TOKEN` | No | Legacy live token. Used as a fallback if no per-account token is found. |
-| `OANDA_API_TOKEN_PRACTICE` | No | Legacy practice token. Used as a fallback for practice accounts. |
+| `OANDA_API_TOKEN_PRACTICE` | No | API token for practice accounts. Takes priority over the OS keychain. |
+| `OANDA_API_TOKEN` | No | API token for live accounts; also used as a fallback for practice accounts. |
 | `FRMJ_DB_PATH` | No | Path to the SQLite file. Defaults to `~/.local/share/frmj/frmj.db`. |
-
-`FRMJ_TOKEN_{NAME}` is the preferred form for automation and containers. For example, an account named `funded` reads `FRMJ_TOKEN_FUNDED`; an account named `my-practice` reads `FRMJ_TOKEN_MY_PRACTICE`. The legacy `OANDA_API_TOKEN*` variables remain supported as a migration fallback.
 
 ### Config table keys (set with `frmj config set`)
 
@@ -356,7 +354,7 @@ Transactions are never updated or deleted — Oanda is the system of record. Cor
 
 ### Migration from earlier versions
 
-If you have an existing database using the old flat-config account system (`practice_account_id`, `account_id`, `practice_mode` keys), FRoMaJ will auto-migrate on first run: it reads those keys, creates corresponding named account profiles (`"practice"` and/or `"live"`), copies keychain tokens to the new per-account format, and removes the old keys. No manual action required.
+If you have an existing database using the old flat-config account system (`practice_account_id`, `account_id`, `practice_mode` keys), FRoMaJ will auto-migrate on first run: it reads those keys, creates corresponding named account profiles (`"practice"` and/or `"live"`), and removes the old keys. No manual action required.
 
 ---
 
