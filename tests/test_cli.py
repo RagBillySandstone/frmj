@@ -77,8 +77,8 @@ def _row(oanda_id: str, account_id: str = "acct-1") -> TransactionRow:
 def db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Set FRMJ_DB_PATH to a temp location and seed a practice account.
 
-    OANDA_API_TOKEN is set as a legacy env var; get_account_token falls back
-    to it for practice accounts, so tests don't need to touch the keyring.
+    OANDA_API_TOKEN is set so that get_token falls back to it for practice
+    accounts, keeping tests independent of the OS keychain.
     """
     path = tmp_path / "frmj_test.db"
     monkeypatch.setenv("FRMJ_DB_PATH", str(path))
@@ -775,11 +775,11 @@ class TestAccountCommands:
     def test_account_add_creates_account(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """account add NAME prompts for oanda_id, type, token and creates the profile."""
+        """account add NAME prompts for oanda_id and type then creates the profile."""
         monkeypatch.setattr("frmj.app.keyring.set_password", lambda s, u, p: None)
-        # Input: oanda_id, type=practice, token (empty → skip)
+        # Input: oanda_id, type=practice
         result = runner.invoke(
-            app, ["account", "add", "demo"], input="101-001-99999-001\npractice\n\n"
+            app, ["account", "add", "demo"], input="101-001-99999-001\npractice\n"
         )
         assert result.exit_code == 0, result.output
         assert "demo" in result.output
@@ -790,7 +790,7 @@ class TestAccountCommands:
         """Adding an account with a name that already exists → exit 1."""
         # "practice" already exists from db_path fixture.
         result = runner.invoke(
-            app, ["account", "add", "practice"], input="acct-dup\npractice\n\n"
+            app, ["account", "add", "practice"], input="acct-dup\npractice\n"
         )
         assert result.exit_code == 1
         assert "already exists" in result.output + result.stderr
@@ -819,7 +819,7 @@ class TestAccountCommands:
         """account use NAME changes the active account."""
         monkeypatch.setattr("frmj.app.keyring.set_password", lambda s, u, p: None)
         # Add a second account first.
-        runner.invoke(app, ["account", "add", "funded"], input="live-001\nlive\n\n")
+        runner.invoke(app, ["account", "add", "funded"], input="live-001\nlive\n")
         result = runner.invoke(app, ["account", "use", "funded"])
         assert result.exit_code == 0, result.output
         assert "funded" in result.output
@@ -852,10 +852,9 @@ class TestAccountCommands:
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """account remove NAME deletes the profile (when it is not active)."""
-        monkeypatch.setattr("frmj.app.keyring.delete_password", lambda s, u: None)
         # Add a second account; keep 'practice' active.
         monkeypatch.setattr("frmj.app.keyring.set_password", lambda s, u, p: None)
-        runner.invoke(app, ["account", "add", "to-del"], input="del-001\npractice\n\n")
+        runner.invoke(app, ["account", "add", "to-del"], input="del-001\npractice\n")
         result = runner.invoke(app, ["account", "remove", "to-del"])
         assert result.exit_code == 0, result.output
         assert "removed" in result.output
@@ -884,10 +883,10 @@ class TestAccountCommands:
         assert result.exit_code == 0, result.output
         assert stored == ["my-tok"]
 
-    def test_account_set_token_for_named(
+    def test_account_set_token_for_env_type(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """account set-token NAME stores token for the named account."""
+        """account set-token practice stores token under the practice keychain key."""
         stored: list[tuple[str, str]] = []
         monkeypatch.setattr(
             "frmj.app.keyring.set_password",
@@ -897,14 +896,10 @@ class TestAccountCommands:
             app, ["account", "set-token", "practice"], input="practice-tok\n"
         )
         assert result.exit_code == 0, result.output
-        assert any("practice-tok" in tok for _, tok in stored)
+        assert any(u == "oanda_api_token_practice" and tok == "practice-tok" for u, tok in stored)
 
-    def test_account_rename_success(
-        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_account_rename_success(self, db_path: Path) -> None:
         """account rename OLD NEW exits 0 and prints a confirmation message."""
-        # No keychain entry stored for this account — get_password returns None.
-        monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: None)
         result = runner.invoke(app, ["account", "rename", "practice", "demo"])
         assert result.exit_code == 0, result.output
         assert "practice" in result.output
@@ -914,7 +909,6 @@ class TestAccountCommands:
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """After rename, account list shows only the new name as an account entry."""
-        monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: None)
         runner.invoke(app, ["account", "rename", "practice", "funded"])
         result = runner.invoke(app, ["account", "list"])
         assert result.exit_code == 0, result.output
@@ -929,62 +923,13 @@ class TestAccountCommands:
         assert "funded" in listed_names
         assert "practice" not in listed_names
 
-    def test_account_rename_active_pointer_updated(
-        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_account_rename_active_pointer_updated(self, db_path: Path) -> None:
         """Renaming the active account updates the active pointer."""
-        monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: None)
         runner.invoke(app, ["account", "rename", "practice", "funded"])
         # account current should report the new name.
         current = runner.invoke(app, ["account", "current"])
         assert current.exit_code == 0, current.output
         assert "funded" in current.output
-
-    def test_account_rename_migrates_keychain_token(
-        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """When a keychain entry exists it is copied to the new name and the old one deleted."""
-        written: list[tuple[str, str]] = []
-        deleted: list[str] = []
-        # Return a token only for the old account's keychain key.
-        monkeypatch.setattr(
-            "frmj.app.keyring.get_password",
-            lambda s, u: "stored-token" if u == "oanda_token_practice" else None,
-        )
-        monkeypatch.setattr(
-            "frmj.app.keyring.set_password",
-            lambda s, u, p: written.append((u, p)),
-        )
-        monkeypatch.setattr(
-            "frmj.app.keyring.delete_password",
-            lambda s, u: deleted.append(u),
-        )
-        result = runner.invoke(app, ["account", "rename", "practice", "funded"])
-        assert result.exit_code == 0, result.output
-        # Token should be written under the new keychain key.
-        assert any(
-            u == "oanda_token_funded" and p == "stored-token" for u, p in written
-        )
-        # Old keychain entry should be deleted.
-        assert "oanda_token_practice" in deleted
-
-    def test_account_rename_no_keychain_entry_is_noop(
-        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """When no keychain entry exists, rename still succeeds without writing or deleting."""
-        written: list[str] = []
-        deleted: list[str] = []
-        monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: None)
-        monkeypatch.setattr(
-            "frmj.app.keyring.set_password", lambda s, u, p: written.append(u)
-        )
-        monkeypatch.setattr(
-            "frmj.app.keyring.delete_password", lambda s, u: deleted.append(u)
-        )
-        result = runner.invoke(app, ["account", "rename", "practice", "demo"])
-        assert result.exit_code == 0, result.output
-        assert written == []
-        assert deleted == []
 
     def test_account_rename_old_name_not_found_exits_1(self, db_path: Path) -> None:
         """Renaming an account that doesn't exist → exit 1 with 'not found'."""
@@ -998,7 +943,7 @@ class TestAccountCommands:
         """Renaming to an existing account name → exit 1 with 'already exists'."""
         monkeypatch.setattr("frmj.app.keyring.set_password", lambda s, u, p: None)
         # Add a second account to collide with.
-        runner.invoke(app, ["account", "add", "funded"], input="live-001\nlive\n\n")
+        runner.invoke(app, ["account", "add", "funded"], input="live-001\nlive\n")
         result = runner.invoke(app, ["account", "rename", "practice", "funded"])
         assert result.exit_code == 1
         assert "already exists" in result.output + result.stderr
@@ -1008,23 +953,6 @@ class TestAccountCommands:
         result = runner.invoke(app, ["account", "rename", "practice", "practice"])
         assert result.exit_code == 1
         assert "same" in result.output + result.stderr
-
-    def test_account_rename_keychain_error_warns_but_exits_0(
-        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A keyring backend error during token migration emits a warning but still exits 0."""
-        import keyring.errors
-
-        monkeypatch.setattr(
-            "frmj.app.keyring.get_password",
-            lambda s, u: (_ for _ in ()).throw(keyring.errors.NoKeyringError()),
-        )
-        result = runner.invoke(app, ["account", "rename", "practice", "demo"])
-        assert result.exit_code == 0, result.output
-        # Confirm the rename itself succeeded.
-        assert "renamed" in result.output
-        # A warning about the keychain should appear on stderr.
-        assert "keychain" in result.stderr.lower() or "keyring" in result.stderr.lower()
 
     def test_account_add_empty_oanda_id_exits_1(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1052,25 +980,6 @@ class TestAccountCommands:
             or "type" in result.output + result.stderr
         )
 
-    def test_account_add_token_storage_failure_warns_but_exits_0(
-        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """When token storage fails (no keyring), a warning is shown but the
-        account is still created and the command exits 0."""
-        import keyring.errors
-
-        monkeypatch.setattr(
-            "frmj.app.keyring.set_password",
-            lambda s, u, p: (_ for _ in ()).throw(keyring.errors.NoKeyringError()),
-        )
-        # Input: oanda_id, type=practice, token="mytoken" (non-empty → triggers store)
-        result = runner.invoke(
-            app,
-            ["account", "add", "new-acct"],
-            input="101-001-99999-001\npractice\nmytoken\n",
-        )
-        assert result.exit_code == 0, result.output
-        assert "Warning" in result.output + result.stderr
 
 
 # ---------------------------------------------------------------------------
