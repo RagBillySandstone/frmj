@@ -1314,14 +1314,6 @@ def trade(
             conn.close()
             raise typer.Exit(1)
 
-        # Auto-sync (silent unless error)
-        try:
-            sync_result = sync_incremental(conn, client)
-            if sync_result.rows_ingested:
-                typer.echo(f"[sync] +{sync_result.rows_ingested} transactions")
-        except Exception as exc:
-            typer.echo(f"[sync] Warning: sync failed — {exc}", err=True)
-
         # Fetch live account state
         try:
             summary = client.get_account_summary()

@@ -2093,17 +2093,9 @@ class TestTradeErrors:
         """A sync error after a successful fill emits a warning but exits 0."""
         monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
 
-        call_count = 0
-
         def _counting_sync(conn: object, client: object) -> object:
-            """First call is the pre-trade auto-sync; second is post-fill sync."""
-            nonlocal call_count
-            call_count += 1
-            if call_count > 1:
-                raise RuntimeError("sync exploded after fill")
-            from frmj.execution.sync import SyncResult
-
-            return SyncResult(rows_ingested=0, rows_skipped=0, last_oanda_id=None)
+            """The only sync call is the post-fill sync; always raise."""
+            raise RuntimeError("sync exploded after fill")
 
         monkeypatch.setattr("frmj.cli.sync_incremental", _counting_sync)
         # TP=50, SL=30, confirm=y, note=skip, tags=skip.
