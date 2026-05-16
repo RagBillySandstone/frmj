@@ -7,32 +7,26 @@ sizing, pricing) and the execution layer (oanda, sync) are all pure functions /
 classes that accept their dependencies as arguments; this module assembles those
 arguments from the environment and hands them to the CLI commands.
 
-API token storage (per-account)
----------------------------------
-Each named account stores its token in the OS keychain under the key
-``oanda_token_{account_name}`` (service ``frmj``).  The resolution order for
-``get_account_token(name, is_practice)`` is:
+API token storage
+-----------------
+Oanda issues one API token per environment (practice vs live), not per account.
+Tokens are stored in the OS keychain keyed by environment:
 
-  1. ``FRMJ_TOKEN_{NAME_UPPER}`` environment variable (new format).
-  2. ``oanda_token_{name}`` OS keychain entry (new format).
-  3. Legacy practice fallbacks (when ``is_practice=True``):
-       a. ``OANDA_API_TOKEN_PRACTICE`` env var.
-       b. ``oanda_api_token_practice`` OS keychain.
-       c. ``OANDA_API_TOKEN`` env var.
-       d. ``oanda_api_token`` OS keychain.
-  4. Legacy live fallbacks (when ``is_practice=False``):
-       a. ``OANDA_API_TOKEN`` env var.
-       b. ``oanda_api_token_live`` OS keychain.
-       c. ``oanda_api_token`` OS keychain.
+  ``oanda_api_token_practice`` — practice environment token.
+  ``oanda_api_token_live``     — live environment token.
 
-Legacy fallbacks exist solely to ease migration from v1 installations where
-tokens were stored globally rather than per-account.
+Resolution order for ``get_token(practice)``:
 
-API token storage (legacy — kept for migration)
-------------------------------------------------
-``get_token``, ``store_token``, and ``delete_token`` continue to work on the
-old global keyring keys so that the migration path can copy them to
-per-account keys without requiring manual re-entry.
+  Practice:
+    1. ``OANDA_API_TOKEN_PRACTICE`` env var.
+    2. ``oanda_api_token_practice`` OS keychain.
+    3. ``OANDA_API_TOKEN`` env var (legacy fallback).
+    4. ``oanda_api_token`` OS keychain (legacy fallback).
+
+  Live:
+    1. ``OANDA_API_TOKEN`` env var.
+    2. ``oanda_api_token_live`` OS keychain.
+    3. ``oanda_api_token`` OS keychain (legacy fallback).
 
 Other environment variables
 ---------------------------
@@ -292,130 +286,6 @@ def delete_token(practice: bool = False) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Per-account token helpers (OS keyring)
-# ---------------------------------------------------------------------------
-
-
-def _account_keyring_key(account_name: str) -> str:
-    """Return the OS keychain key for *account_name*'s token."""
-    return f"oanda_token_{account_name}"
-
-
-def _account_env_var(account_name: str) -> str:
-    """Return the env var name for *account_name*'s token override."""
-    safe_name = account_name.upper().replace("-", "_")
-    return f"FRMJ_TOKEN_{safe_name}"
-
-
-def get_account_token(account_name: str, is_practice: bool = False) -> str | None:
-    """
-    Resolve the Oanda API token for the named account.
-
-    Resolution order (first non-empty value wins):
-    1. ``FRMJ_TOKEN_{NAME_UPPER}`` env var.
-    2. ``oanda_token_{name}`` OS keychain (new per-account format).
-    3. Legacy env vars / keychain keys based on *is_practice*, preserved so
-       that v1 installations can be migrated without re-entering tokens.
-
-    Returns ``None`` when no source has the token.
-    """
-
-    def _kr(key: str) -> str | None:
-        try:
-            return keyring.get_password(_KEYRING_SERVICE, key)
-        except keyring.errors.KeyringError:
-            return None
-
-    # New-format lookup: account-namespaced env var or keyring key.
-    token = os.environ.get(_account_env_var(account_name)) or _kr(
-        _account_keyring_key(account_name)
-    )
-    if token:
-        return token
-
-    # Legacy fallbacks — match the v1 resolution order so migrating users
-    # don't need to re-enter their token immediately after upgrading.
-    if is_practice:
-        token = (
-            os.environ.get("OANDA_API_TOKEN_PRACTICE")
-            or _kr(_KEYRING_TOKEN_KEY_PRACTICE)
-            or os.environ.get("OANDA_API_TOKEN")
-            or _kr(_KEYRING_TOKEN_KEY_LEGACY)
-        )
-    else:
-        token = (
-            os.environ.get("OANDA_API_TOKEN")
-            or _kr(_KEYRING_TOKEN_KEY_LIVE)
-            or _kr(_KEYRING_TOKEN_KEY_LEGACY)
-        )
-
-    return token or None
-
-
-def store_account_token(account_name: str, token: str) -> None:
-    """
-    Save *token* for *account_name* in the OS keychain.
-
-    Raises ``RuntimeError`` when no keyring backend is available.
-    """
-    try:
-        keyring.set_password(
-            _KEYRING_SERVICE, _account_keyring_key(account_name), token
-        )
-    except keyring.errors.NoKeyringError as exc:
-        env_var = _account_env_var(account_name)
-        raise RuntimeError(
-            f"No system keyring is available on this machine. "
-            f"Set the {env_var} environment variable instead."
-        ) from exc
-
-
-def delete_account_token(account_name: str) -> None:
-    """
-    Remove *account_name*'s token from the OS keychain.
-
-    A no-op when the token was never stored.
-    Raises ``RuntimeError`` when no keyring backend is available.
-    """
-    try:
-        keyring.delete_password(_KEYRING_SERVICE, _account_keyring_key(account_name))
-    except keyring.errors.NoKeyringError as exc:
-        raise RuntimeError("No system keyring is available on this machine.") from exc
-    except keyring.errors.PasswordDeleteError:
-        # Token was never stored — not an error from the user's perspective.
-        pass
-
-
-def rename_account_token(old_name: str, new_name: str) -> None:
-    """
-    Move the OS keychain entry for *old_name* to *new_name*.
-
-    Reads only the account-namespaced keychain key (``oanda_token_{name}``),
-    not env-var or legacy fallback sources — those do not need migration
-    because they are not keyed by account name.  When no account-namespaced
-    entry exists the function is a no-op.
-
-    Raises ``RuntimeError`` when no keyring backend is available.
-    """
-    try:
-        token = keyring.get_password(_KEYRING_SERVICE, _account_keyring_key(old_name))
-    except keyring.errors.NoKeyringError as exc:
-        raise RuntimeError("No system keyring is available on this machine.") from exc
-    except keyring.errors.KeyringError:
-        # Any other keyring error — treat as "no entry to migrate".
-        return
-
-    if token is None:
-        # No account-namespaced entry stored; nothing to migrate.
-        return
-
-    # Write under the new name first, then remove the old entry so the token
-    # is never lost if the delete step fails.
-    store_account_token(new_name, token)
-    delete_account_token(old_name)
-
-
-# ---------------------------------------------------------------------------
 # V1 → V2 migration
 # ---------------------------------------------------------------------------
 
@@ -452,32 +322,11 @@ def migrate_v1_accounts(conn: sqlite3.Connection) -> None:
 
     if practice_id:
         add_account(conn, "practice", practice_id, is_practice=True)
-        # Attempt to copy the v1 keyring token to the new per-account key.
-        old_token = get_token(practice=True)
-        if old_token:
-            try:
-                keyring.set_password(
-                    _KEYRING_SERVICE,
-                    _account_keyring_key("practice"),
-                    old_token,
-                )
-            except keyring.errors.NoKeyringError:
-                pass  # Token is in an env var; nothing to copy.
         if is_practice_active:
             active_name = "practice"
 
     if live_id:
         add_account(conn, "live", live_id, is_practice=False)
-        old_token = get_token(practice=False)
-        if old_token:
-            try:
-                keyring.set_password(
-                    _KEYRING_SERVICE,
-                    _account_keyring_key("live"),
-                    old_token,
-                )
-            except keyring.errors.NoKeyringError:
-                pass
         if not is_practice_active:
             active_name = "live"
 
@@ -557,12 +406,15 @@ def get_client(conn: sqlite3.Connection) -> OandaClient:
             "  frmj account use NAME"
         )
 
-    token = get_account_token(account.name, is_practice=account.is_practice)
+    env_type = "practice" if account.is_practice else "live"
+    token = get_token(account.is_practice)
     if not token:
-        env_var = _account_env_var(account.name)
+        env_var = (
+            "OANDA_API_TOKEN_PRACTICE" if account.is_practice else "OANDA_API_TOKEN"
+        )
         raise RuntimeError(
-            f"No API token found for account '{account.name}'. Store it with:\n"
-            f"  frmj account set-token {account.name}\n"
+            f"No API token found for the {env_type} environment. Store it with:\n"
+            f"  frmj account set-token {env_type}\n"
             f"Or set the {env_var} environment variable."
         )
 

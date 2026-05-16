@@ -31,10 +31,9 @@ Commands
     Remove the stored token from the OS keychain.
 
 ``frmj account rename OLD_NAME NEW_NAME``
-    Rename a configured account profile.  The Oanda account ID, token, and all
-    other settings are preserved; only the friendly name changes.  If
-    *OLD_NAME* is the active account the active pointer is updated atomically.
-    The OS keychain entry is migrated to the new name automatically.
+    Rename a configured account profile.  The Oanda account ID and all other
+    settings are preserved; only the friendly name changes.  If *OLD_NAME* is
+    the active account the active pointer is updated atomically.
 
 ``frmj trade <INSTRUMENT> <long|short> [--dry-run]``
     Interactive trade flow: risk → sizing → TP/SL → confirm → execute →
@@ -115,19 +114,18 @@ from frmj.accounts import (
 )
 from frmj.app import (
     clear_draft_plan,
-    delete_account_token,
     delete_config,
-    get_account_token,
+    delete_token,
     get_all_config,
     get_client,
     get_config,
     get_db,
     get_risk_config,
+    get_token,
     load_draft_plan,
-    rename_account_token,
     save_draft_plan,
     set_config,
-    store_account_token,
+    store_token,
 )
 from frmj.domain.analytics import (
     ClosedTrade,
@@ -526,14 +524,6 @@ def account_add(
             raise typer.Exit(1)
         is_practice = acct_type == "practice"
 
-        # Optional token — users can also call 'account set-token' later.
-        token_raw: str = typer.prompt(
-            "API token (press Enter to skip and set later with "
-            f"'frmj account set-token {name}')",
-            default="",
-            hide_input=True,
-        ).strip()
-
         # Persist the account record.
         import sqlite3 as _sqlite3
 
@@ -544,13 +534,6 @@ def account_add(
             conn.close()
             raise typer.Exit(1)
 
-        # Store token if one was supplied.
-        if token_raw:
-            try:
-                store_account_token(name, token_raw)
-            except RuntimeError as exc:
-                typer.echo(f"Warning: could not store token — {exc}", err=True)
-
         # Auto-activate when this is the first account.
         from frmj.accounts import get_account_count as _count
 
@@ -560,6 +543,12 @@ def account_add(
         else:
             typer.echo(
                 f"Account '{name}' added. Run 'frmj account use {name}' to activate it."
+            )
+
+        # Remind the user to store a token if none is set for this environment.
+        if not get_token(is_practice):
+            typer.echo(
+                f"  No {acct_type} token stored. Run: frmj account set-token {acct_type}"
             )
 
     finally:
@@ -646,11 +635,6 @@ def account_remove(
         conn.close()
 
     if removed:
-        # Best-effort keyring cleanup — suppress errors so removal still succeeds.
-        try:
-            delete_account_token(name)
-        except Exception:
-            pass
         typer.echo(f"Account '{name}' removed.")
     else:
         typer.echo(f"Error: account '{name}' not found.", err=True)
@@ -659,43 +643,42 @@ def account_remove(
 
 @account_app.command("set-token")
 def account_set_token(
-    name: str | None = typer.Argument(
+    env_type: str | None = typer.Argument(
         None,
-        help="Account name (defaults to the active account).",
+        help="Token environment: 'practice' or 'live'. Defaults to the active account's type.",
     ),
 ) -> None:
-    """Store the API token for an account in the OS keychain."""
-    conn = get_db()
-    try:
-        if name is None:
+    """Store the Oanda API token for the practice or live environment in the OS keychain."""
+    # Resolve env_type from the argument or fall back to the active account's type.
+    if env_type is not None:
+        env_type = env_type.strip().lower()
+        if env_type not in ("practice", "live"):
+            typer.echo("Error: argument must be 'practice' or 'live'.", err=True)
+            raise typer.Exit(1)
+        is_practice = env_type == "practice"
+    else:
+        conn = get_db()
+        try:
             account = get_active_account(conn)
-            if account is None:
-                typer.echo(
-                    "Error: No active account. Specify an account name or run "
-                    "'frmj account use NAME' first.",
-                    err=True,
-                )
-                conn.close()
-                raise typer.Exit(1)
-            name = account.name
-        elif get_account(conn, name) is None:
+        finally:
+            conn.close()
+        if account is None:
             typer.echo(
-                f"Error: account '{name}' not found. "
-                "Run 'frmj account list' to see available accounts.",
+                "Error: No active account. Specify 'practice' or 'live', or run "
+                "'frmj account use NAME' first.",
                 err=True,
             )
-            conn.close()
             raise typer.Exit(1)
-    finally:
-        conn.close()
+        is_practice = account.is_practice
+        env_type = "practice" if is_practice else "live"
 
-    token = typer.prompt(f"Oanda API token for '{name}'", hide_input=True)
+    token = typer.prompt(f"Oanda API token for {env_type} accounts", hide_input=True)
     try:
-        store_account_token(name, token)
+        store_token(token, practice=is_practice)
     except RuntimeError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1)
-    typer.echo(f"Token for '{name}' stored in OS keychain.")
+    typer.echo(f"Token for {env_type} accounts stored in OS keychain.")
 
 
 @account_app.command("rename")
@@ -738,20 +721,6 @@ def account_rename(
         rename_account(conn, old_name, new_name)
     finally:
         conn.close()
-
-    # Migrate the keychain entry best-effort; missing keyring is a warning,
-    # not a fatal error, because the user may be relying on an env var instead.
-    try:
-        rename_account_token(old_name, new_name)
-    except RuntimeError as exc:
-        typer.echo(
-            f"Warning: could not migrate token in OS keychain — {exc}",
-            err=True,
-        )
-        typer.echo(
-            f"  Re-enter the token with: frmj account set-token {new_name}",
-            err=True,
-        )
 
     typer.echo(f"Account '{old_name}' renamed to '{new_name}'.")
 
@@ -897,9 +866,9 @@ def config_unset(
 
 @config_app.command("set-token")
 def config_set_token() -> None:
-    """Store the API token for the active account in the OS keychain.
+    """Store the Oanda API token for the active account's environment in the OS keychain.
 
-    Use ``frmj account set-token [NAME]`` to target a specific account.
+    Use ``frmj account set-token [practice|live]`` to specify the environment directly.
     """
     conn = get_db()
     try:
@@ -912,20 +881,21 @@ def config_set_token() -> None:
             err=True,
         )
         raise typer.Exit(1)
-    token = typer.prompt(f"Oanda API token for '{account.name}'", hide_input=True)
+    env_label = "practice" if account.is_practice else "live"
+    token = typer.prompt(f"Oanda API token for {env_label} accounts", hide_input=True)
     try:
-        store_account_token(account.name, token)
+        store_token(token, practice=account.is_practice)
     except RuntimeError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1)
-    typer.echo(f"Token for '{account.name}' stored in OS keychain.")
+    typer.echo(f"Token for {env_label} accounts stored in OS keychain.")
 
 
 @config_app.command("unset-token")
 def config_unset_token() -> None:
-    """Remove the API token for the active account from the OS keychain.
+    """Remove the Oanda API token for the active account's environment from the OS keychain.
 
-    Use ``frmj account set-token [NAME]`` to manage tokens for specific accounts.
+    Use ``frmj account set-token [practice|live]`` to manage tokens directly.
     """
     conn = get_db()
     try:
@@ -938,12 +908,13 @@ def config_unset_token() -> None:
             err=True,
         )
         raise typer.Exit(1)
+    env_label = "practice" if account.is_practice else "live"
     try:
-        delete_account_token(account.name)
+        delete_token(practice=account.is_practice)
     except RuntimeError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1)
-    typer.echo(f"Token for '{account.name}' removed from OS keychain.")
+    typer.echo(f"Token for {env_label} accounts removed from OS keychain.")
 
 
 @config_app.command("check")
@@ -989,33 +960,23 @@ def config_check(
 
         # --- Token for active account ----------------------------------------
         if account is not None:
-            from frmj.app import _account_env_var
-
-            token = get_account_token(account.name, is_practice=account.is_practice)
-            env_var = _account_env_var(account.name)
-            # Detect token source in same priority order as get_account_token.
-            if os.environ.get(env_var):
-                checks.append(("token", "OK", f"{env_var} env var"))
-            elif (
-                (account.is_practice and os.environ.get("OANDA_API_TOKEN_PRACTICE"))
-                or (not account.is_practice and os.environ.get("OANDA_API_TOKEN"))
-                or (account.is_practice and os.environ.get("OANDA_API_TOKEN"))
-            ):
-                legacy = (
-                    "OANDA_API_TOKEN_PRACTICE"
-                    if account.is_practice
-                    and os.environ.get("OANDA_API_TOKEN_PRACTICE")
-                    else "OANDA_API_TOKEN"
-                )
-                checks.append(("token", "OK", f"legacy env var ({legacy})"))
-            elif token:
+            env_type = "practice" if account.is_practice else "live"
+            # Detect token source in same priority order as get_token.
+            if account.is_practice and os.environ.get("OANDA_API_TOKEN_PRACTICE"):
+                checks.append(("token", "OK", "OANDA_API_TOKEN_PRACTICE env var"))
+            elif os.environ.get("OANDA_API_TOKEN"):
+                label = "OANDA_API_TOKEN env var"
+                if account.is_practice:
+                    label += " (legacy practice fallback)"
+                checks.append(("token", "OK", label))
+            elif get_token(account.is_practice):
                 checks.append(("token", "OK", "OS keychain"))
             else:
                 checks.append(
                     (
                         "token",
                         "MISSING",
-                        f"run: frmj account set-token {account.name}",
+                        f"run: frmj account set-token {env_type}",
                     )
                 )
 
@@ -1146,9 +1107,7 @@ def config_check(
 
         # --- Connectivity (opt-in) -------------------------------------------
         if connectivity:
-            if account is not None and get_account_token(
-                account.name, is_practice=account.is_practice
-            ):
+            if account is not None and get_token(account.is_practice):
                 try:
                     client = get_client(conn)
                     summary = client.get_account_summary()
@@ -2268,7 +2227,7 @@ def _records_to_json(records: list[dict]) -> str:
 
 
 def _print_token_status() -> None:
-    """Print the token status for the active account.
+    """Print the token status for the active account's environment.
 
     Called by ``config_get`` when showing all values.  Token values are never
     printed — only the source.
@@ -2285,31 +2244,20 @@ def _print_token_status() -> None:
         )
         return
 
-    from frmj.app import _account_env_var
+    env_label = "practice" if account.is_practice else "live"
 
-    env_var = _account_env_var(account.name)
-
-    # Detect source in priority order, mirroring get_account_token resolution.
-    if os.environ.get(env_var):
-        source = f"set via {env_var} env var"
-    elif (
-        # Token found via a legacy env var used as a migration-period fallback.
-        (account.is_practice and os.environ.get("OANDA_API_TOKEN_PRACTICE"))
-        or (not account.is_practice and os.environ.get("OANDA_API_TOKEN"))
-        or (account.is_practice and os.environ.get("OANDA_API_TOKEN"))
-    ):
-        legacy_var = (
-            "OANDA_API_TOKEN_PRACTICE"
-            if (account.is_practice and os.environ.get("OANDA_API_TOKEN_PRACTICE"))
-            else "OANDA_API_TOKEN"
-        )
-        source = f"set via legacy env var ({legacy_var}) — migrate to {env_var}"
-    elif get_account_token(account.name, is_practice=account.is_practice) is not None:
+    # Detect source in the same priority order as get_token.
+    if account.is_practice and os.environ.get("OANDA_API_TOKEN_PRACTICE"):
+        source = "set via OANDA_API_TOKEN_PRACTICE env var"
+    elif os.environ.get("OANDA_API_TOKEN"):
+        suffix = " (legacy practice fallback)" if account.is_practice else ""
+        source = f"set via OANDA_API_TOKEN env var{suffix}"
+    elif get_token(account.is_practice) is not None:
         source = "stored in OS keychain"
     else:
-        source = f"not set — run: frmj account set-token {account.name}"
+        source = f"not set — run: frmj account set-token {env_label}"
 
-    typer.echo(f"API token ({account.name:<10}) =  ({source})")
+    typer.echo(f"API token ({env_label:<8}) =  ({source})")
 
 
 def _format_direction_row(stats: DirectionStats, indent: bool = True) -> str:
