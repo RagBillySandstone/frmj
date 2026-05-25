@@ -2101,10 +2101,17 @@ def _display_stats(
         f"  Win rate:   {summary.win_rate * 100:.1f}%"
         f"  ({summary.wins}W / {summary.losses}L)"
     )
-    typer.echo(f"  Avg P/L:    {_color_pl(summary.avg_pl)}")
-    typer.echo(f"  Total P/L:  {_color_pl(summary.total_pl)}")
-    typer.echo(f"  Best:       {_color_pl(summary.best_pl)}")
-    typer.echo(f"  Worst:      {_color_pl(summary.worst_pl)}")
+    # Right-align all four dollar values to the widest one in the block.
+    summary_pl_w = max(
+        _pl_visible_width(summary.avg_pl),
+        _pl_visible_width(summary.total_pl),
+        _pl_visible_width(summary.best_pl),
+        _pl_visible_width(summary.worst_pl),
+    )
+    typer.echo(f"  Avg P/L:    {_color_pl_padded(summary.avg_pl, summary_pl_w)}")
+    typer.echo(f"  Total P/L:  {_color_pl_padded(summary.total_pl, summary_pl_w)}")
+    typer.echo(f"  Best:       {_color_pl_padded(summary.best_pl, summary_pl_w)}")
+    typer.echo(f"  Worst:      {_color_pl_padded(summary.worst_pl, summary_pl_w)}")
 
     # "By direction" — overall LONG vs SHORT side-by-side.  Helps spot a
     # systemic bias (e.g. only the long side is profitable).
@@ -2244,8 +2251,9 @@ def _display_stats(
         typer.echo("By tag")
         typer.echo("─" * 50)
         tw = max(len(r[0]) for r in by_tag)
+        tag_pl_w = max(_pl_visible_width(total) for _, _, total in by_tag)
         for t, count, total in by_tag:
-            typer.echo(f"  {t:<{tw}}  {count:>4}  {_color_pl(total)}")
+            typer.echo(f"  {t:<{tw}}  {count:>4}  {_color_pl_padded(total, tag_pl_w)}")
 
 
 def _make_export_record(
@@ -2411,12 +2419,12 @@ def _pl_visible_width(pl: Decimal) -> int:
 
 
 def _color_pl_padded(pl: Decimal, width: int) -> str:
-    """Return _color_pl(pl) followed by trailing spaces to reach *width* visible chars.
+    """Return _color_pl(pl) right-justified to *width* visible chars.
 
-    Trailing-space padding is invisible and keeps subsequent text in a fixed
-    column regardless of the numeric magnitude of *pl*.
+    Leading spaces are prepended so the dollar sign and digits are flush-right
+    within the column, regardless of the numeric magnitude of *pl*.
     """
-    return _color_pl(pl) + " " * max(0, width - _pl_visible_width(pl))
+    return " " * max(0, width - _pl_visible_width(pl)) + _color_pl(pl)
 
 
 def _display_transaction(txn: sqlite3.Row) -> None:
