@@ -2403,8 +2403,8 @@ def _fmt_time_bucket(data: tuple[int, Decimal] | None, pl_width: int = 0) -> str
 
 def _color_pl(pl: Decimal) -> str:
     """Return a colored P/L string like '+$45.23' or '-$3.50' (no leading spaces)."""
-    sign = "+" if pl > 0 else ""
-    text = f"{sign}${pl:,.2f}"
+    sign = "+" if pl > 0 else "-" if pl < 0 else ""
+    text = f"{sign}${abs(pl):,.2f}"
     if pl > 0:
         return typer.style(text, fg=typer.colors.GREEN)
     if pl < 0:
@@ -2414,8 +2414,8 @@ def _color_pl(pl: Decimal) -> str:
 
 def _pl_visible_width(pl: Decimal) -> int:
     """Return the visible (non-ANSI) character width of the string _color_pl produces."""
-    sign = "+" if pl > 0 else ""
-    return len(f"{sign}${pl:,.2f}")
+    sign = "+" if pl > 0 else "-" if pl < 0 else ""
+    return len(f"{sign}${abs(pl):,.2f}")
 
 
 def _color_pl_padded(pl: Decimal, width: int) -> str:
