@@ -32,6 +32,7 @@ def _trade(
     pl: str = "10.00",
     units: int = 10_000,
     direction: str = "LONG",
+    open_time: str | None = None,
 ) -> ClosedTrade:
     return ClosedTrade(
         oanda_id=oanda_id,
@@ -40,6 +41,7 @@ def _trade(
         pl=Decimal(pl),
         units=units,
         direction=direction,
+        open_time=open_time,
     )
 
 
@@ -276,6 +278,49 @@ class TestPlByHour:
         )
         assert rows[0][0] == 21
 
+    def test_use_open_time_buckets_by_open_time(self) -> None:
+        # Close time is 14:00; open time is 09:00.  use_open_time=True must
+        # bucket by 09, not 14.
+        trade = _trade(
+            time="2026-04-25T14:00:00.000000Z",
+            open_time="2026-04-25T09:00:00.000000Z",
+            pl="20.00",
+        )
+        rows = pl_by_hour([trade], use_open_time=True)
+        assert len(rows) == 1
+        hour, count, total = rows[0]
+        assert hour == 9
+        assert count == 1
+        assert total == Decimal("20.00")
+
+    def test_use_open_time_skips_trades_without_open_time(self) -> None:
+        # One trade has open_time; one does not.  Only the first should appear.
+        trades = [
+            _trade(
+                "1",
+                time="2026-04-25T14:00:00.000000Z",
+                open_time="2026-04-25T09:00:00.000000Z",
+                pl="10.00",
+            ),
+            _trade("2", time="2026-04-25T15:00:00.000000Z", open_time=None, pl="5.00"),
+        ]
+        rows = pl_by_hour(trades, use_open_time=True)
+        assert len(rows) == 1
+        assert rows[0][0] == 9
+
+    def test_use_open_time_false_uses_close_time(self) -> None:
+        # Explicit use_open_time=False should behave identically to the default.
+        trade = _trade(
+            time="2026-04-25T14:00:00.000000Z",
+            open_time="2026-04-25T09:00:00.000000Z",
+            pl="20.00",
+        )
+        rows_default = pl_by_hour([trade])
+        rows_explicit = pl_by_hour([trade], use_open_time=False)
+        assert rows_default == rows_explicit
+        # Both must bucket by the close hour (14), not the open hour (09).
+        assert rows_default[0][0] == 14
+
 
 # ---------------------------------------------------------------------------
 # pl_by_weekday
@@ -361,6 +406,49 @@ class TestPlByWeekday:
         assert len(rows) == 1
         day, _, _ = rows[0]
         assert day == "Sun"
+
+    def test_use_open_time_buckets_by_open_weekday(self) -> None:
+        # Close time is Friday (2026-04-24); open time is Thursday (2026-04-23).
+        # use_open_time=True must bucket by Thursday.
+        trade = _trade(
+            time="2026-04-24T10:00:00.000000Z",
+            open_time="2026-04-23T10:00:00.000000Z",
+            pl="15.00",
+        )
+        rows = pl_by_weekday([trade], use_open_time=True)
+        assert len(rows) == 1
+        day, count, total = rows[0]
+        assert day == "Thu"
+        assert count == 1
+        assert total == Decimal("15.00")
+
+    def test_use_open_time_skips_trades_without_open_time(self) -> None:
+        # One trade has open_time set; one does not.  Only the first should appear.
+        trades = [
+            _trade(
+                "1",
+                time="2026-04-24T10:00:00.000000Z",
+                open_time="2026-04-23T10:00:00.000000Z",
+                pl="15.00",
+            ),
+            _trade("2", time="2026-04-25T10:00:00.000000Z", open_time=None, pl="5.00"),
+        ]
+        rows = pl_by_weekday(trades, use_open_time=True)
+        assert len(rows) == 1
+        assert rows[0][0] == "Thu"
+
+    def test_use_open_time_false_uses_close_weekday(self) -> None:
+        # Explicit use_open_time=False must behave identically to the default.
+        trade = _trade(
+            time="2026-04-24T10:00:00.000000Z",  # Friday
+            open_time="2026-04-23T10:00:00.000000Z",  # Thursday
+            pl="15.00",
+        )
+        rows_default = pl_by_weekday([trade])
+        rows_explicit = pl_by_weekday([trade], use_open_time=False)
+        assert rows_default == rows_explicit
+        # Both must bucket by the close day (Friday), not the open day (Thursday).
+        assert rows_default[0][0] == "Fri"
 
 
 # ---------------------------------------------------------------------------

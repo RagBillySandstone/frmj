@@ -39,14 +39,20 @@ class ClosedTrade:
       - SHORT → closing fill has positive units  (bought to close)
 
     ``pl`` is signed: positive for profit, negative for loss.
+
+    ``open_time`` is the ISO-8601 timestamp of the opening ORDER_FILL for this
+    trade, populated when the opener is present in the local database.  None
+    when the opener was not found (e.g. cold-sync was never run, or the opening
+    fill pre-dates the sync window).
     """
 
     oanda_id: str
     instrument: str
-    time: str  # ISO-8601, verbatim from Oanda
+    time: str  # ISO-8601 close time, verbatim from Oanda
     pl: Decimal
     units: int  # absolute value
     direction: str  # "LONG" or "SHORT"
+    open_time: str | None = None  # ISO-8601 open time; None when opener absent
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +251,7 @@ def pl_by_instrument_direction(
 def pl_by_hour(
     trades: list[ClosedTrade],
     tz: tzinfo | None = None,
+    use_open_time: bool = False,
 ) -> list[tuple[int, int, Decimal]]:
     """Return ``(hour, count, total_pl)`` for hours 0-23 that have trades.
 
@@ -254,14 +261,23 @@ def pl_by_hour(
     When *tz* is None, the parsed datetime's hour is used verbatim (UTC
     for the typical Oanda payload, preserving the original behaviour).
 
+    When *use_open_time* is True, each trade is bucketed by its ``open_time``
+    rather than its close ``time``.  Trades with ``open_time`` of None (opener
+    absent from the local database) are silently skipped.
+
     Hours with no trades are omitted to keep the table compact.
     """
     groups: dict[int, tuple[int, Decimal]] = {}
     for t in trades:
+        # Select the timestamp to bucket by: open or close time.
+        raw_ts = t.open_time if use_open_time else t.time
+        if raw_ts is None:
+            # open_time is absent when the opening fill is not in the DB.
+            continue
         try:
             # Oanda emits ISO-8601 with a trailing "Z"; trim to the seconds
             # field for compatibility with Python < 3.11 fromisoformat().
-            dt = datetime.fromisoformat(t.time[:19])
+            dt = datetime.fromisoformat(raw_ts[:19])
         except ValueError:
             continue
         if tz is not None:
@@ -277,6 +293,7 @@ def pl_by_hour(
 def pl_by_weekday(
     trades: list[ClosedTrade],
     tz: tzinfo | None = None,
+    use_open_time: bool = False,
 ) -> list[tuple[str, int, Decimal]]:
     """Return ``(weekday_name, count, total_pl)`` Mon-Sun for days that have trades.
 
@@ -285,13 +302,22 @@ def pl_by_weekday(
     calendar day is extracted, so the buckets reflect the local date in *tz*.
     When *tz* is None, the raw UTC date is used (original behaviour).
 
+    When *use_open_time* is True, each trade is bucketed by its ``open_time``
+    rather than its close ``time``.  Trades with ``open_time`` of None (opener
+    absent from the local database) are silently skipped.
+
     Days with no trades are omitted to keep the table compact.
     """
     groups: dict[int, tuple[int, Decimal]] = {}
     for t in trades:
+        # Select the timestamp to bucket by: open or close time.
+        raw_ts = t.open_time if use_open_time else t.time
+        if raw_ts is None:
+            # open_time is absent when the opening fill is not in the DB.
+            continue
         try:
             # Trim to seconds for Python < 3.11 compat (same approach as pl_by_hour).
-            dt = datetime.fromisoformat(t.time[:19])
+            dt = datetime.fromisoformat(raw_ts[:19])
         except ValueError:
             continue
         if tz is not None:

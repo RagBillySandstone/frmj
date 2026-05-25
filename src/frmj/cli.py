@@ -1682,8 +1682,19 @@ def stats() -> None:
     try:
         rows = conn.execute(
             """
-            SELECT t.id, t.oanda_id, t.time, t.raw_json
+            SELECT t.id, t.oanda_id, t.time, t.raw_json,
+                   open_t.time AS open_time
             FROM transactions t
+            -- Resolve the opening fill so we can also bucket by open time.
+            -- COALESCE covers both full closes (tradesClosed array) and
+            -- partial reduces (tradeReduced object), each carrying tradeID.
+            LEFT JOIN transactions open_t
+                ON  open_t.account_id = t.account_id
+                AND open_t.type       = 'ORDER_FILL'
+                AND open_t.oanda_id   = COALESCE(
+                        json_extract(t.raw_json, '$.tradesClosed[0].tradeID'),
+                        json_extract(t.raw_json, '$.tradeReduced.tradeID')
+                    )
             WHERE t.type = 'ORDER_FILL'
             """
         ).fetchall()
@@ -1716,6 +1727,8 @@ def stats() -> None:
                     units=abs(units_raw),
                     # Closing a long = negative units in close txn; short = positive.
                     direction="LONG" if units_raw < 0 else "SHORT",
+                    # None when the opening fill was not found via the JOIN.
+                    open_time=row["open_time"],
                 )
             )
         except Exception:
@@ -2100,8 +2113,13 @@ def _display_stats(
         typer.echo("")
         typer.echo("By direction")
         typer.echo("─" * 50)
+        # Pre-compute max P/L widths so total and avg columns align across rows.
+        dir_total_w = max(_pl_visible_width(s.total_pl) for s in by_dir)
+        dir_avg_w = max(_pl_visible_width(s.avg_pl) for s in by_dir)
         for stats in by_dir:
-            typer.echo(_format_direction_row(stats))
+            typer.echo(
+                _format_direction_row(stats, total_w=dir_total_w, avg_w=dir_avg_w)
+            )
 
     by_instr = pl_by_instrument(trades)
     if by_instr:
@@ -2109,10 +2127,13 @@ def _display_stats(
         typer.echo("By instrument")
         typer.echo("─" * 50)
         iw = max(len(r[0]) for r in by_instr)
+        # Pre-compute max P/L widths so total and avg columns align across rows.
+        instr_total_w = max(_pl_visible_width(r[2]) for r in by_instr)
+        instr_avg_w = max(_pl_visible_width(r[3]) for r in by_instr)
         for instr, count, total, avg in by_instr:
             typer.echo(
-                f"  {instr:<{iw}}  {count:>4}  {_color_pl(total)}"
-                f"    avg {_color_pl(avg)}"
+                f"  {instr:<{iw}}  {count:>4}  {_color_pl_padded(total, instr_total_w)}"
+                f"  avg {_color_pl_padded(avg, instr_avg_w)}"
             )
 
     # "By instrument & direction" — surfaces (pair, side) edges that the
@@ -2126,9 +2147,13 @@ def _display_stats(
         typer.echo("─" * 50)
         # Pad instrument column to the widest instrument name for alignment.
         iw = max(len(instr) for instr, _ in by_instr_dir)
-        for instrument, stats in by_instr_dir:
+        # Pre-compute max P/L widths so total and avg columns align across rows.
+        id_total_w = max(_pl_visible_width(s.total_pl) for _, s in by_instr_dir)
+        id_avg_w = max(_pl_visible_width(s.avg_pl) for _, s in by_instr_dir)
+        for instr_name, stats in by_instr_dir:
             typer.echo(
-                f"  {instrument:<{iw}}  {_format_direction_row(stats, indent=False)}"
+                f"  {instr_name:<{iw}}  "
+                f"{_format_direction_row(stats, total_w=id_total_w, avg_w=id_avg_w, indent=False)}"
             )
 
     # Fixed UTC+10 (AEST) aligns day boundaries with the Sydney market open,
@@ -2136,23 +2161,79 @@ def _display_stats(
     # than zoneinfo.ZoneInfo("Australia/Sydney") ensures DST never shifts the
     # bucket boundaries.
     _AEST = timezone(timedelta(hours=10))
+    # Local timezone for the hour table — matches the trader's wall-clock.
+    _local_tz = datetime.now().astimezone().tzinfo
+
     by_day = pl_by_weekday(trades, tz=_AEST)
-    if by_day:
+    by_day_opened = pl_by_weekday(trades, tz=_AEST, use_open_time=True)
+    if by_day or by_day_opened:
         typer.echo("")
         typer.echo("By weekday (AEST)")
         typer.echo("─" * 50)
-        for day, count, total in by_day:
-            typer.echo(f"  {day}  {count:>4}  {_color_pl(total)}")
+        # Pre-compute max P/L widths for each column so cells are fixed-width;
+        # this keeps the "opened" column aligned even when "closed" has no data.
+        day_close_pl_w = max((_pl_visible_width(t) for _, _, t in by_day), default=10)
+        day_open_pl_w = max(
+            (_pl_visible_width(t) for _, _, t in by_day_opened), default=10
+        )
+        day_closed_cell_w = 6 + day_close_pl_w  # 4-char count + 2-char gap + P/L
+        day_opened_cell_w = 6 + day_open_pl_w
+        # Sub-header right-aligned over each column group.
+        typer.echo(
+            f"  {'':3}  {'closed':>{day_closed_cell_w}}    {'opened':>{day_opened_cell_w}}"
+        )
+        # Build lookup maps keyed by day name for O(1) access in the loop.
+        close_day: dict[str, tuple[int, Decimal]] = {n: (c, t) for n, c, t in by_day}
+        open_day: dict[str, tuple[int, Decimal]] = {
+            n: (c, t) for n, c, t in by_day_opened
+        }
+        # Forex trades Mon-Fri only.  Late-Friday UTC fills can map to
+        # Saturday AEST (NY close ≈ 07:00 AEST Sat), so we cap at Friday
+        # to prevent ghost weekend rows appearing in the opened column.
+        _WEEKDAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri")
+        for day in _WEEKDAY_NAMES:
+            c = close_day.get(day)
+            o = open_day.get(day)
+            if c is None and o is None:
+                continue
+            typer.echo(
+                f"  {day}  {_fmt_time_bucket(c, day_close_pl_w)}"
+                f"    {_fmt_time_bucket(o, day_open_pl_w)}"
+            )
 
-    # Convert UTC trade timestamps to the system local zone before
-    # bucketing so the table matches the trader's wall-clock experience.
-    by_hour = pl_by_hour(trades, tz=datetime.now().astimezone().tzinfo)
-    if by_hour:
+    by_hour = pl_by_hour(trades, tz=_local_tz)
+    by_hour_opened = pl_by_hour(trades, tz=_local_tz, use_open_time=True)
+    if by_hour or by_hour_opened:
         typer.echo("")
         typer.echo("By hour (local)")
         typer.echo("─" * 50)
-        for hour, count, total in by_hour:
-            typer.echo(f"  {hour:02d}:00  {count:>4}  {_color_pl(total)}")
+        # Pre-compute max P/L widths for each column so cells are fixed-width;
+        # this keeps the "opened" column aligned even when "closed" has no data.
+        hr_close_pl_w = max((_pl_visible_width(t) for _, _, t in by_hour), default=10)
+        hr_open_pl_w = max(
+            (_pl_visible_width(t) for _, _, t in by_hour_opened), default=10
+        )
+        hr_closed_cell_w = 6 + hr_close_pl_w  # 4-char count + 2-char gap + P/L
+        hr_opened_cell_w = 6 + hr_open_pl_w
+        # Sub-header right-aligned over each column group.
+        typer.echo(
+            f"  {'':5}  {'closed':>{hr_closed_cell_w}}    {'opened':>{hr_opened_cell_w}}"
+        )
+        # Build lookup maps keyed by hour (0-23).
+        close_hr: dict[int, tuple[int, Decimal]] = {h: (c, t) for h, c, t in by_hour}
+        open_hr: dict[int, tuple[int, Decimal]] = {
+            h: (c, t) for h, c, t in by_hour_opened
+        }
+        # Iterate hours in order; emit rows only for hours with data in either column.
+        for hour in range(24):
+            c = close_hr.get(hour)
+            o = open_hr.get(hour)
+            if c is None and o is None:
+                continue
+            typer.echo(
+                f"  {hour:02d}:00  {_fmt_time_bucket(c, hr_close_pl_w)}"
+                f"    {_fmt_time_bucket(o, hr_open_pl_w)}"
+            )
 
     if tag_pl:
         by_tag: list[tuple[str, int, Decimal]] = []
@@ -2260,21 +2341,27 @@ def _print_token_status() -> None:
     typer.echo(f"API token ({env_label:<8}) =  ({source})")
 
 
-def _format_direction_row(stats: DirectionStats, indent: bool = True) -> str:
+def _format_direction_row(
+    stats: DirectionStats,
+    total_w: int = 0,
+    avg_w: int = 0,
+    indent: bool = True,
+) -> str:
     """Render one DirectionStats as a single fixed-width line.
 
-    Used both by the "By direction" and "By instrument & direction" tables;
-    *indent* controls the leading two-space gutter that direct table rows
-    expect (the instrument-prefixed variant supplies its own indent).
+    Used both by the "By direction" and "By instrument & direction" tables.
+    *total_w* and *avg_w* are the max visible widths of P/L values across all
+    rows in the table; non-zero values pad each cell so columns align.
+    *indent* controls the leading two-space gutter (the instrument-prefixed
+    variant supplies its own indent so passes False).
     """
-    # Direction label is padded to "SHORT" width so LONG/SHORT rows align;
-    # count is right-aligned in a 4-char field consistent with other tables.
+    # Direction label padded to "SHORT" width; count right-aligned in 4 chars.
     prefix = "  " if indent else ""
     return (
         f"{prefix}{stats.direction:<5}  {stats.count:>4}"
         f"  win {stats.win_rate * 100:5.1f}%"
-        f"  total {_color_pl(stats.total_pl)}"
-        f"  avg {_color_pl(stats.avg_pl)}"
+        f"  total {_color_pl_padded(stats.total_pl, total_w)}"
+        f"  avg {_color_pl_padded(stats.avg_pl, avg_w)}"
     )
 
 
@@ -2290,6 +2377,22 @@ def _has_both_sides(rows: list[tuple[str, DirectionStats]]) -> bool:
     return any(len(sides) > 1 for sides in seen.values())
 
 
+def _fmt_time_bucket(data: tuple[int, Decimal] | None, pl_width: int = 0) -> str:
+    """Return a formatted (count, total_pl) cell for the combined weekday/hour tables.
+
+    When *pl_width* > 0, the P/L value is padded to that visible width so that
+    the column following this cell starts at a consistent horizontal position.
+    When *data* is None, a dash placeholder padded to the same total width is
+    returned so both column groups stay aligned even when one side has no trades.
+    """
+    if data is None:
+        # "   —" fills the 4-char count field; trailing spaces fill the
+        # 2-char gap plus P/L field so the next column lands correctly.
+        return "   —" + " " * (2 + pl_width)
+    count, total = data
+    return f"{count:>4}  {_color_pl_padded(total, pl_width)}"
+
+
 def _color_pl(pl: Decimal) -> str:
     """Return a colored P/L string like '+$45.23' or '-$3.50' (no leading spaces)."""
     sign = "+" if pl > 0 else ""
@@ -2299,6 +2402,21 @@ def _color_pl(pl: Decimal) -> str:
     if pl < 0:
         return typer.style(text, fg=typer.colors.RED)
     return text
+
+
+def _pl_visible_width(pl: Decimal) -> int:
+    """Return the visible (non-ANSI) character width of the string _color_pl produces."""
+    sign = "+" if pl > 0 else ""
+    return len(f"{sign}${pl:,.2f}")
+
+
+def _color_pl_padded(pl: Decimal, width: int) -> str:
+    """Return _color_pl(pl) followed by trailing spaces to reach *width* visible chars.
+
+    Trailing-space padding is invisible and keeps subsequent text in a fixed
+    column regardless of the numeric magnitude of *pl*.
+    """
+    return _color_pl(pl) + " " * max(0, width - _pl_visible_width(pl))
 
 
 def _display_transaction(txn: sqlite3.Row) -> None:
