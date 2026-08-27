@@ -1095,6 +1095,7 @@ class FakeFullClient:
             margin_rate=Decimal("0.02"),
             min_units=1,
             units_increment=1,
+            display_precision=5,
         )
 
     def get_price(self, instrument: str, home_currency: str = "USD") -> PriceQuote:

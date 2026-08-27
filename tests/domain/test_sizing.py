@@ -34,6 +34,7 @@ def _eur_usd() -> InstrumentSpec:
         margin_rate=Decimal("0.02"),
         min_units=1,
         units_increment=1,
+        display_precision=5,
     )
 
 
@@ -55,6 +56,7 @@ def _usd_jpy() -> InstrumentSpec:
         margin_rate=Decimal("0.04"),
         min_units=1,
         units_increment=1,
+        display_precision=3,
     )
 
 
@@ -84,6 +86,7 @@ class TestInstrumentSpecValidation:
                 margin_rate=rate,
                 min_units=1,
                 units_increment=1,
+                display_precision=5,
             )
 
     def test_rejects_zero_min_units(self) -> None:
@@ -94,6 +97,7 @@ class TestInstrumentSpecValidation:
                 margin_rate=Decimal("0.02"),
                 min_units=0,
                 units_increment=1,
+                display_precision=5,
             )
 
     def test_rejects_zero_increment(self) -> None:
@@ -104,6 +108,7 @@ class TestInstrumentSpecValidation:
                 margin_rate=Decimal("0.02"),
                 min_units=1,
                 units_increment=0,
+                display_precision=5,
             )
 
 
@@ -221,6 +226,7 @@ class TestUnitsIncrement:
             margin_rate=Decimal("0.05"),
             min_units=1000,
             units_increment=1000,
+            display_precision=2,
         )
         # Per-unit margin = 0.05 * 2_000 = 100; $1_750_000 / 100 = 17_500
         # Pick a number that doesn't divide cleanly: $1_743_270.
@@ -255,6 +261,7 @@ class TestErrors:
             margin_rate=Decimal("0.05"),
             min_units=1000,
             units_increment=1000,
+            display_precision=2,
         )
         quote = PriceQuote(
             bid=Decimal("1999"),

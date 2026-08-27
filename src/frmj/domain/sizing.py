@@ -75,6 +75,13 @@ class InstrumentSpec:
         Granularity. Most FX pairs accept any integer (increment = 1), but
         some instruments (CFDs, metals) require 10 / 100 / 1000 unit lots.
         We always round *down* to a multiple of this.
+    display_precision:
+        Number of decimal places Oanda accepts for prices on this
+        instrument (its ``displayPrecision`` field). Not derivable from
+        ``pip_location`` alone — metals/CFDs break the "pip_location + 1"
+        pattern FX pairs follow — so it is carried separately. Prices we
+        submit to Oanda (TP/SL) must be quantized to this precision or the
+        order is rejected with a 400.
     """
 
     name: str
@@ -82,6 +89,7 @@ class InstrumentSpec:
     margin_rate: Decimal
     min_units: int
     units_increment: int
+    display_precision: int
 
     def __post_init__(self) -> None:
         # Cheap structural validation — catches typos in tests and bad data
@@ -93,6 +101,10 @@ class InstrumentSpec:
         if self.units_increment < 1:
             raise ValueError(
                 f"units_increment must be >= 1; got {self.units_increment!r}"
+            )
+        if self.display_precision < 0:
+            raise ValueError(
+                f"display_precision must be >= 0; got {self.display_precision!r}"
             )
 
 

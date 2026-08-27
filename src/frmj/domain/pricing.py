@@ -32,7 +32,7 @@ negate the SL?" foot-gun.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from enum import Enum
 
 from frmj.domain.sizing import Direction, InstrumentSpec, PriceQuote
@@ -178,6 +178,21 @@ def _favorable_offset_in_quote(
     return profit_home / (Decimal(units) * quote.quote_to_home)
 
 
+def _quantize_price(price: Decimal, spec: InstrumentSpec) -> Decimal:
+    """Round a price to the instrument's broker-accepted decimal precision.
+
+    Oanda rejects TP/SL orders with a 400 if the price carries more decimal
+    places than ``displayPrecision`` allows — and the raw PERCENT_RETURN
+    division in ``_favorable_offset_in_quote`` routinely produces far more
+    (Decimal division doesn't terminate cleanly for arbitrary margin/unit
+    combinations). We quantize here, at the one place both TP and SL prices
+    are finalized, so every caller (CLI display, draft-plan persistence,
+    order submission) sees the same broker-legal value.
+    """
+    quantum = Decimal(1).scaleb(-spec.display_precision)
+    return price.quantize(quantum, rounding=ROUND_HALF_UP)
+
+
 def _profit_home_for_offset(
     *,
     favorable_offset_quote: Decimal,
@@ -222,8 +237,12 @@ def compute_exit_levels(
     * For SHORT, favorable means DOWN, adverse means UP.
     * TP is favorable, SL is adverse.
 
-    All arithmetic stays in Decimal to avoid float drift; we never round
-    here (the caller handles display rounding to broker-quoted decimals).
+    All arithmetic stays in Decimal to avoid float drift. ``profit_home``
+    and ``return_on_margin_*`` are computed from the exact, unrounded price
+    offset; ``take_profit_price`` / ``stop_loss_price`` are quantized to
+    ``spec.display_precision`` (see ``_quantize_price``) since those values
+    are submitted to Oanda directly and the broker rejects prices with
+    excess decimal places.
     """
     # --- input validation -------------------------------------------------
     # We trust callers from within the domain layer but still guard the
@@ -256,7 +275,7 @@ def compute_exit_levels(
             quote=quote,
             margin_used=margin_used,
         )
-        tp_price = entry_price + favor_sign * tp_offset_quote
+        tp_price = _quantize_price(entry_price + favor_sign * tp_offset_quote, spec)
         profit_home = _profit_home_for_offset(
             favorable_offset_quote=tp_offset_quote,
             units=units,
@@ -297,7 +316,7 @@ def compute_exit_levels(
         )
         # SL sits on the *adverse* side of entry, so we subtract a
         # favorable offset.
-        sl_price = entry_price - favor_sign * sl_offset_quote
+        sl_price = _quantize_price(entry_price - favor_sign * sl_offset_quote, spec)
         # Loss is negative by convention so the CLI doesn't have to
         # remember to flip the sign.
         loss_home = -_profit_home_for_offset(

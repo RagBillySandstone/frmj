@@ -45,6 +45,7 @@ def _eur_usd_spec() -> InstrumentSpec:
         margin_rate=Decimal("0.02"),
         min_units=1,
         units_increment=1,
+        display_precision=5,
     )
 
 
@@ -55,6 +56,7 @@ def _usd_jpy_spec() -> InstrumentSpec:
         margin_rate=Decimal("0.04"),
         min_units=1,
         units_increment=1,
+        display_precision=3,
     )
 
 
@@ -305,6 +307,21 @@ class TestPercentTakeProfit:
             )
         )
         assert any("take-profit" in w and "return" in w for w in result.warnings)
+
+    def test_price_quantized_to_display_precision(self) -> None:
+        """A percent-return TP that doesn't divide evenly must still land on
+        a broker-legal price — regression test for the 400 Bad Request Oanda
+        returns when a submitted price carries more decimals than
+        ``displayPrecision`` allows."""
+        result = _call(
+            entry=Decimal("1.10000"),
+            units=3333,
+            margin=Decimal("221.34"),
+            tp=TPSLSpec(TPSLKind.PERCENT_RETURN, Decimal("0.037")),
+        )
+        assert result.take_profit_price is not None
+        # EUR_USD display_precision=5 in the fixture spec.
+        assert -result.take_profit_price.as_tuple().exponent <= 5
 
     def test_no_warning_at_exactly_threshold(self) -> None:
         # Exactly 100% should NOT warn (boundary is strictly greater than).

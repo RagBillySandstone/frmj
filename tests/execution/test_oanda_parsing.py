@@ -67,12 +67,14 @@ def _instrument_payload(
     pip_location: int = -4,
     margin_rate: str = "0.02",
     min_trade_size: str = "1",
+    display_precision: int = 5,
 ) -> dict:
     return {
         "name": name,
         "pipLocation": pip_location,
         "marginRate": margin_rate,
         "minimumTradeSize": min_trade_size,
+        "displayPrecision": display_precision,
     }
 
 
@@ -157,6 +159,16 @@ class TestParseInstrumentSpec:
     def test_returns_instrument_spec_dataclass(self) -> None:
         result = _parse_instrument_spec(_instrument_payload())
         assert isinstance(result, InstrumentSpec)
+
+    def test_display_precision_from_int(self) -> None:
+        result = _parse_instrument_spec(_instrument_payload(display_precision=5))
+        assert result.display_precision == 5
+
+    def test_usd_jpy_display_precision(self) -> None:
+        result = _parse_instrument_spec(
+            _instrument_payload(name="USD_JPY", display_precision=3)
+        )
+        assert result.display_precision == 3
 
 
 # ---------------------------------------------------------------------------

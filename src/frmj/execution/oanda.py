@@ -324,6 +324,11 @@ def _parse_instrument_spec(instr: dict[str, Any]) -> InstrumentSpec:
     ``min_units`` comes from Oanda's ``minimumTradeSize`` (a string like
     ``"1"``).  We convert via Decimal to handle any decimal-valued minimums
     safely before truncating to int.
+
+    ``display_precision`` comes from Oanda's ``displayPrecision`` — the
+    number of decimal places the API accepts for prices on this instrument.
+    We need it to quantize TP/SL prices before submitting them; sending a
+    price with more decimals than Oanda expects is rejected with a 400.
     """
     return InstrumentSpec(
         name=instr["name"],
@@ -331,6 +336,7 @@ def _parse_instrument_spec(instr: dict[str, Any]) -> InstrumentSpec:
         margin_rate=Decimal(instr["marginRate"]),
         min_units=int(Decimal(instr["minimumTradeSize"])),
         units_increment=1,
+        display_precision=int(instr["displayPrecision"]),
     )
 
 
