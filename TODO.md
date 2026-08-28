@@ -31,11 +31,24 @@ abstraction over `OandaClient`. Currently out of scope.
 
 Currently `frmj note` only appends. For cases where a note has a typo or needs updating, add an `--edit` flag that opens the most recent note on the given transaction in `$EDITOR` (or prompts inline if the env var is unset).
 
-### 5. Service layer extraction
+### 5. `frmj trade --limit` — place a limit (pending) order
+
+Add a `--limit` flag to `frmj trade`. When set, the dialog inserts a
+limit-entry prompt after displaying the current market price. The intended
+input model is a pip offset from the current ask/bid (e.g. `15` → 15 pips
+below ask for a long), mirroring the existing TP/SL pip format so the user
+never has to type an absolute price. The limit price and TP/SL targets are
+then displayed before confirmation. Oanda requires limit orders to embed
+`takeProfitOnFill`/`stopLossOnFill` in the order body rather than attaching
+them after fill; the API layer needs a `place_limit_order()` method alongside
+the existing `place_market_order()`. Exact UX and validation rules TBD pending
+architectural discussion.
+
+### 6. Service layer extraction
 
 The CLI commands currently call `app.py` factories directly. Before building a GUI or REST API wrapper, extract a `services.py` layer that encapsulates multi-step operations (the full trade flow, the sync flow) as callable functions with no Typer dependency. The CLI then becomes a thin argument-parsing shell over the service layer. This is the prerequisite for all non-CLI interfaces.
 
-### 6. CSV import from Oanda Hub download
+### 7. CSV import from Oanda Hub download
 
 Allow bootstrapping the DB from the CSV file Oanda provides in the account hub (`History → Download`). Gives a way to back-fill history for accounts that have years of transactions before the first `frmj sync --cold` run, and provides a cross-check against the API sync. Parser should map CSV column names to the `transactions` schema and skip rows already present.
 
@@ -43,7 +56,7 @@ Allow bootstrapping the DB from the CSV file Oanda provides in the account hub (
 
 ## P3 — Test coverage
 
-### 7. OandaClient HTTP method coverage
+### 8. OandaClient HTTP method coverage
 
 `oanda.py` is at 62% line coverage. The untested lines are the HTTP client
 methods beyond `place_market_order` (`get_transactions_since`, `get_account_summary`,
