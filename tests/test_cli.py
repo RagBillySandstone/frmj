@@ -1637,6 +1637,48 @@ class TestJournalCommand:
         assert result.exit_code == 0, result.output
         assert "18.40" in result.output
 
+    def test_columns_align_across_rows_of_differing_content(
+        self, journal_db: Path
+    ) -> None:
+        """The time column must start at the same offset on every row, even
+        when the instrument/direction/units/P-L text differs in length."""
+        conn = sqlite3.connect(str(journal_db))
+        # Give the seeded rows deliberately mismatched extra/P-L lengths:
+        # a bare fill, a long instrument+direction+units combo with P/L, and
+        # a financing row with no direction/units at all.
+        conn.execute(
+            "UPDATE transactions SET raw_json = ? WHERE oanda_id = '1001'",
+            ('{"instrument":"EUR_USD","units":"1000"}',),
+        )
+        conn.execute(
+            "UPDATE transactions SET raw_json = ? WHERE oanda_id = '1002'",
+            (
+                '{"instrument":"GBP_USD","units":"-250000",'
+                '"reason":"STOP_LOSS_ORDER","pl":"-1234.56"}',
+            ),
+        )
+        conn.execute(
+            "UPDATE transactions SET type = ?, raw_json = ? WHERE oanda_id = '1003'",
+            ("DAILY_FINANCING", '{"instrument":"EUR_USD","amount":"-1.23"}'),
+        )
+        conn.commit()
+        conn.close()
+
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        lines = [
+            line
+            for line in result.output.splitlines()
+            if line.startswith("#1001")
+            or line.startswith("#1002")
+            or line.startswith("#1003")
+        ]
+        assert len(lines) == 3
+        # The trailing "YYYY-MM-DD HH:MM:SS" timestamp is a fixed-width token,
+        # so if every row's time column starts at the same index the rows
+        # must all be the same total length.
+        assert len({len(line) for line in lines}) == 1
+
     def test_daily_financing_amount_shown(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

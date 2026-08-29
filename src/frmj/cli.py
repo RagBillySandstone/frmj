@@ -2431,6 +2431,13 @@ def _color_pl_padded(pl: Decimal, width: int) -> str:
     return " " * max(0, width - _pl_visible_width(pl)) + _color_pl(pl)
 
 
+# Fixed widths for the variable-length "extra" (instrument/direction/units)
+# and P/L segments of a journal row, so the trailing time column lands in the
+# same place regardless of how long those segments are for a given row.
+_JOURNAL_EXTRA_W = 36
+_JOURNAL_PL_W = 12
+
+
 def _display_transaction(txn: sqlite3.Row) -> None:
     """Format one transaction row for journal display."""
     # Trim the ISO-8601 timestamp to seconds for readability.
@@ -2473,7 +2480,12 @@ def _display_transaction(txn: sqlite3.Row) -> None:
         except Exception:
             pass
 
-    pl_str = f"  {_color_pl(pl)}" if pl is not None else ""
+    extra = extra.ljust(_JOURNAL_EXTRA_W)
+    pl_str = (
+        f"  {_color_pl_padded(pl, _JOURNAL_PL_W)}"
+        if pl is not None
+        else " " * (_JOURNAL_PL_W + 2)
+    )
     typer.echo(
         f"#{txn['oanda_id']:<12}  {txn['type']:<24}{extra}{pl_str}  {time_short}"
     )
