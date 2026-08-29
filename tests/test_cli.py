@@ -981,7 +981,6 @@ class TestAccountCommands:
         )
 
 
-
 # ---------------------------------------------------------------------------
 # mode sub-commands
 # ---------------------------------------------------------------------------
@@ -1502,6 +1501,44 @@ class TestJournalCommand:
         result = runner.invoke(app, ["journal"])
         assert "EUR_USD" in result.output
         assert "LONG" in result.output
+
+    def test_take_profit_fill_shows_tp_label(self, journal_db: Path) -> None:
+        """An ORDER_FILL closed by a take-profit order shows 'TP', not LONG/SHORT."""
+        conn = sqlite3.connect(str(journal_db))
+        conn.execute(
+            "UPDATE transactions SET raw_json = ? WHERE oanda_id = '1001'",
+            (
+                '{"instrument":"EUR_USD","units":"-1000",'
+                '"reason":"TAKE_PROFIT_ORDER","pl":"12.00"}',
+            ),
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        line = next(line for line in result.output.splitlines() if "1001" in line)
+        assert "EUR_USD TP" in line
+        assert "LONG" not in line
+        assert "SHORT" not in line
+
+    def test_stop_loss_fill_shows_sl_label(self, journal_db: Path) -> None:
+        """An ORDER_FILL closed by a stop-loss order shows 'SL', not LONG/SHORT."""
+        conn = sqlite3.connect(str(journal_db))
+        conn.execute(
+            "UPDATE transactions SET raw_json = ? WHERE oanda_id = '1001'",
+            (
+                '{"instrument":"EUR_USD","units":"-1000",'
+                '"reason":"STOP_LOSS_ORDER","pl":"-8.00"}',
+            ),
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        line = next(line for line in result.output.splitlines() if "1001" in line)
+        assert "EUR_USD SL" in line
+        assert "LONG" not in line
+        assert "SHORT" not in line
 
     def test_plan_shown_under_order_fill(self, journal_db: Path) -> None:
         """A trade plan row is shown as '    Plan: TP ...  SL ...' under its fill."""

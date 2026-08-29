@@ -2440,7 +2440,13 @@ def _display_transaction(txn: sqlite3.Row) -> None:
             data = json.loads(txn["raw_json"])
             instrument = data.get("instrument", "")
             units = int(Decimal(data.get("units", "0")))
-            direction = "LONG" if units >= 0 else "SHORT"
+            reason = data.get("reason", "")
+            if reason == "TAKE_PROFIT_ORDER":
+                direction = "TP"
+            elif reason == "STOP_LOSS_ORDER":
+                direction = "SL"
+            else:
+                direction = "LONG" if units >= 0 else "SHORT"
             extra = f"  {instrument} {direction} {abs(units):,} units"
             # pl is non-zero only on closing fills; opening fills carry "0".
             pl_val = Decimal(data.get("pl", "0") or "0")
