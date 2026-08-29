@@ -416,7 +416,7 @@ def close(
         )
 
     if len(trades) > 1:
-        total_pl = sum(t.unrealised_pl for t in trades)
+        total_pl = sum((t.unrealised_pl for t in trades), Decimal("0"))
         typer.echo(f"\n  Total P/L: {_pl_str(total_pl)}")
 
     typer.echo("")
@@ -1265,6 +1265,8 @@ def trade(
             return
 
     else:
+        # instrument/direction_str were already validated non-None above.
+        assert instrument is not None and direction_str is not None
         # --- Normal path: risk + sizing + TP/SL prompts + confirmation -------
         try:
             risk_config = get_risk_config(conn)
@@ -1408,6 +1410,8 @@ def trade(
     # =========================================================================
     # Shared post-planning section: place order, attach TP/SL, sync, note
     # =========================================================================
+    # Both branches above set instrument to a concrete value before reaching here.
+    assert instrument is not None
 
     # --- Live mode gate: block live orders when mode is practice -------------
     active_account = get_active_account(conn)
@@ -2511,13 +2515,19 @@ def _parse_tpsl(raw: str) -> TPSLSpec:
 def _display_exits(exits: ExitLevels, margin_used: Decimal) -> None:
     """Print the exit-levels table and any warnings."""
     typer.echo("Exit levels:")
+    # compute_exit_levels sets projected_profit_home/return_on_margin_at_tp
+    # together with take_profit_price — never independently None.
     if exits.take_profit_price is not None:
+        assert exits.projected_profit_home is not None
+        assert exits.return_on_margin_at_tp is not None
         typer.echo(
             f"  TP: {exits.take_profit_price}"
             f"  →  +${exits.projected_profit_home:,.2f}"
             f"  ({exits.return_on_margin_at_tp * 100:+.1f}% RoM)"
         )
     if exits.stop_loss_price is not None:
+        assert exits.projected_loss_home is not None
+        assert exits.return_on_margin_at_sl is not None
         typer.echo(
             f"  SL: {exits.stop_loss_price}"
             f"  →  ${exits.projected_loss_home:,.2f}"
