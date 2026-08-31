@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from frmj.execution.oanda import ClientProtocol, TransactionRow
+from frmj.execution.oanda import TransactionRow
 from frmj.execution.sync import SyncResult, sync_cold, sync_incremental
 from frmj.persistence.schema import ensure_schema
 

@@ -28,7 +28,6 @@ from frmj.app import (
     get_risk_config,
     get_token,
     load_draft_plan,
-    migrate_v1_accounts,
     save_draft_plan,
     set_config,
     store_token,
