@@ -146,10 +146,12 @@ from frmj.domain.pricing import (
 )
 from frmj.domain.risk import (
     BlockingMode,
+    CorrelatedPositionForbidden,
     MaxTradesExceeded,
     RiskStrategy,
     ScaleInForbidden,
     ScaleInPolicy,
+    evaluate_correlation,
     evaluate_trade,
 )
 from frmj.domain.sizing import Direction, compute_units
@@ -785,6 +787,7 @@ def mode_live() -> None:
 VALID_CONFIG_KEYS: frozenset[str] = frozenset(
     {
         "blocking_mode",
+        "correlation_blocking_mode",
         "fixed_dollar",
         "max_open_trades",
         "percent_of_equity",
@@ -1070,6 +1073,21 @@ def config_check(
                 )
             )
 
+        # --- correlation_blocking_mode ----------------------------------------
+        cbm_val = all_cfg.get("correlation_blocking_mode")
+        if cbm_val is None:
+            checks.append(("correlation_blocking_mode", "OK", "warning_only (default)"))
+        elif cbm_val in valid_modes:
+            checks.append(("correlation_blocking_mode", "OK", cbm_val))
+        else:
+            checks.append(
+                (
+                    "correlation_blocking_mode",
+                    "INVALID",
+                    f"{cbm_val!r} — must be one of: {', '.join(valid_modes)}",
+                )
+            )
+
         # --- scale_in --------------------------------------------------------
         si_val = all_cfg.get("scale_in")
         valid_si = [p.value for p in ScaleInPolicy]
@@ -1281,6 +1299,7 @@ def trade(
             open_on_instr = client.get_open_tickets_on_instrument(instrument)
             spec = client.get_instrument(instrument)
             quote = client.get_price(instrument)
+            open_trades = client.get_open_trades()
         except Exception as exc:
             typer.echo(f"Error fetching market data: {exc}", err=True)
             conn.close()
@@ -1305,6 +1324,23 @@ def trade(
             raise typer.Exit(1)
 
         for warn in sizing_decision.warnings:
+            typer.echo(f"Warning: {warn}", err=True)
+
+        # Correlated-position check: does this trade share directional
+        # currency exposure with an already-open position?
+        try:
+            correlation_warnings = evaluate_correlation(
+                open_positions=[(t.instrument, t.direction) for t in open_trades],
+                new_instrument=instrument,
+                new_direction=direction,
+                blocking_mode=risk_config.correlation_blocking_mode,
+            )
+        except CorrelatedPositionForbidden as exc:
+            typer.echo(f"Cannot trade: {exc}", err=True)
+            conn.close()
+            raise typer.Exit(1)
+
+        for warn in correlation_warnings:
             typer.echo(f"Warning: {warn}", err=True)
 
         # Sizing

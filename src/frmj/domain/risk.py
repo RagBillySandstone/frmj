@@ -21,10 +21,13 @@ exists to feed this module the right inputs and act on its outputs.
 # runtime cost, and it sidesteps forward-reference headaches inside dataclasses.
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 from fractions import Fraction
+
+from frmj.domain.sizing import Direction
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +122,11 @@ class RiskConfig:
 
     # What to do when scaling into an instrument (see ScaleInPolicy docstring).
     scale_in: ScaleInPolicy
+
+    # What to do when a new trade shares directional currency exposure with an
+    # already-open position (see evaluate_correlation). Defaults to warning so
+    # existing configs see no behaviour change until the user opts in.
+    correlation_blocking_mode: BlockingMode = BlockingMode.WARNING_ONLY
 
     # Fraction of equity that must never be deployed, regardless of strategy.
     # Expressed as a Decimal in [0, 1]. The reserve guards against margin calls
@@ -220,6 +228,30 @@ class ScaleInForbidden(Exception):
     relax the policy", whereas max-trade failures suggest "close some other
     ticket or relax the cap".
     """
+
+
+class CorrelatedPositionForbidden(Exception):
+    """Raised when a new trade shares directional currency exposure with an
+    already-open position and ``correlation_blocking_mode`` is ``HARD_BLOCK``.
+
+    Under ``WARNING_ONLY`` mode the same condition produces warning strings
+    from ``evaluate_correlation`` instead.
+    """
+
+
+# ---------------------------------------------------------------------------
+# Data classes (correlation)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class CorrelatedPosition:
+    """One open position that shares same-sign currency exposure with a
+    proposed new trade — see ``find_correlated_positions``."""
+
+    instrument: str
+    direction: str  # "LONG" or "SHORT", matching OpenTrade.direction
+    shared_currency: str
 
 
 # ---------------------------------------------------------------------------
@@ -436,3 +468,112 @@ def evaluate_trade(
         # hashable/immutable.
         warnings=tuple(warnings),
     )
+
+
+def _currency_exposure(instrument: str, direction: Direction) -> dict[str, int]:
+    """Return the signed currency exposure of one trade.
+
+    Oanda instrument names are ``BASE_QUOTE`` (e.g. ``"EUR_USD"``). Going LONG
+    means buying the base currency and selling the quote currency, so exposure
+    is ``+1`` base / ``-1`` quote; SHORT flips both signs. This is a directional
+    sign only — not a position-size-weighted exposure — since the correlation
+    check only cares whether two positions bet the *same way* on a currency,
+    not by how much.
+    """
+
+    base, quote = instrument.split("_")
+    sign = 1 if direction is Direction.LONG else -1
+    return {base: sign, quote: -sign}
+
+
+def find_correlated_positions(
+    *,
+    open_positions: Sequence[tuple[str, str]],
+    new_instrument: str,
+    new_direction: Direction,
+) -> tuple[CorrelatedPosition, ...]:
+    """Find open positions that share same-sign currency exposure with a
+    proposed new trade.
+
+    Args:
+        open_positions: ``(instrument, direction)`` pairs for currently open
+            tickets, with ``direction`` as ``"LONG"``/``"SHORT"`` (matching
+            ``OpenTrade.direction``).
+        new_instrument: Instrument of the proposed new trade.
+        new_direction: Direction of the proposed new trade.
+
+    Returns:
+        One ``CorrelatedPosition`` per open position that shares a same-sign
+        currency with the new trade. Same-instrument positions are skipped —
+        that overlap is ``ScaleInPolicy``'s job, not this check's.
+    """
+
+    new_exposure = _currency_exposure(new_instrument, new_direction)
+
+    matches: list[CorrelatedPosition] = []
+    for instrument, direction_str in open_positions:
+        if instrument == new_instrument:
+            continue
+        open_exposure = _currency_exposure(instrument, Direction[direction_str])
+        for currency, sign in new_exposure.items():
+            if open_exposure.get(currency) == sign:
+                matches.append(
+                    CorrelatedPosition(
+                        instrument=instrument,
+                        direction=direction_str,
+                        shared_currency=currency,
+                    )
+                )
+                # One flagged currency per open position is enough; a pair can
+                # only share both currencies if they're the same instrument,
+                # which is already excluded above.
+                break
+
+    return tuple(matches)
+
+
+def evaluate_correlation(
+    *,
+    open_positions: Sequence[tuple[str, str]],
+    new_instrument: str,
+    new_direction: Direction,
+    blocking_mode: BlockingMode,
+) -> tuple[str, ...]:
+    """Check a proposed trade for shared currency exposure with open positions.
+
+    Args:
+        open_positions: ``(instrument, direction)`` pairs for currently open
+            tickets, as in ``find_correlated_positions``.
+        new_instrument: Instrument of the proposed new trade.
+        new_direction: Direction of the proposed new trade.
+        blocking_mode: ``HARD_BLOCK`` raises instead of warning.
+
+    Returns:
+        Human-readable warning strings, one per correlated open position.
+        Empty if none found.
+
+    Raises:
+        CorrelatedPositionForbidden: matches were found and ``blocking_mode``
+            is ``HARD_BLOCK``.
+    """
+
+    matches = find_correlated_positions(
+        open_positions=open_positions,
+        new_instrument=new_instrument,
+        new_direction=new_direction,
+    )
+    if not matches:
+        return ()
+
+    new_direction_label = new_direction.name  # "LONG" or "SHORT"
+    messages = tuple(
+        f"{new_instrument} {new_direction_label} shares {match.shared_currency} "
+        f"exposure with open {match.instrument} {match.direction} — this "
+        f"doubles your {match.shared_currency} risk"
+        for match in matches
+    )
+
+    if blocking_mode is BlockingMode.HARD_BLOCK:
+        raise CorrelatedPositionForbidden("; ".join(messages))
+
+    return messages

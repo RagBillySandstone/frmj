@@ -451,10 +451,12 @@ def get_risk_config(conn: sqlite3.Connection) -> RiskConfig:
     blocking_str = get_config(conn, "blocking_mode") or "hard_block"
     scale_in_str = get_config(conn, "scale_in") or "never"
     reserve_str = get_config(conn, "safety_reserve_pct") or "0"
+    corr_blocking_str = get_config(conn, "correlation_blocking_mode") or "warning_only"
 
     strategy = RiskStrategy(strategy_str)
     blocking_mode = BlockingMode(blocking_str)
     scale_in = ScaleInPolicy(scale_in_str)
+    correlation_blocking_mode = BlockingMode(corr_blocking_str)
 
     # Strategy-specific optional fields.
     pct_str = get_config(conn, "percent_of_equity")
@@ -465,6 +467,7 @@ def get_risk_config(conn: sqlite3.Connection) -> RiskConfig:
         strategy=strategy,
         blocking_mode=blocking_mode,
         scale_in=scale_in,
+        correlation_blocking_mode=correlation_blocking_mode,
         safety_reserve_pct=Decimal(reserve_str),
         percent_of_equity=Decimal(pct_str) if pct_str else None,
         fixed_dollar=Decimal(fixed_str) if fixed_str else None,

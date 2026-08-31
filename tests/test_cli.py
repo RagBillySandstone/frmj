@@ -896,7 +896,10 @@ class TestAccountCommands:
             app, ["account", "set-token", "practice"], input="practice-tok\n"
         )
         assert result.exit_code == 0, result.output
-        assert any(u == "oanda_api_token_practice" and tok == "practice-tok" for u, tok in stored)
+        assert any(
+            u == "oanda_api_token_practice" and tok == "practice-tok"
+            for u, tok in stored
+        )
 
     def test_account_rename_success(self, db_path: Path) -> None:
         """account rename OLD NEW exits 0 and prints a confirmation message."""
@@ -2010,6 +2013,53 @@ class TestTradeErrors:
         result = runner.invoke(app, ["trade", "EUR_USD", "long"])
         assert result.exit_code == 1
         assert "Cannot trade" in result.output + result.stderr
+
+    def test_correlated_position_warns_by_default(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WARNING_ONLY (default): a correlated open position emits a warning
+        but does not block the trade."""
+        fake = FakeFullClient(
+            open_trades=[_open_trade(instrument="GBP_USD", direction="LONG")]
+        )
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="\n\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "shares USD exposure" in result.output + result.stderr
+
+    def test_correlated_position_hard_block_exits_1(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """HARD_BLOCK: a correlated open position refuses the trade outright."""
+        conn = get_db(path=trade_db)
+        set_config(conn, "correlation_blocking_mode", "hard_block")
+        conn.close()
+
+        fake = FakeFullClient(
+            open_trades=[_open_trade(instrument="GBP_USD", direction="LONG")]
+        )
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["trade", "EUR_USD", "long"])
+        assert result.exit_code == 1
+        assert "Cannot trade" in result.output + result.stderr
+
+    def test_uncorrelated_position_no_warning(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No shared-currency exposure means no correlation warning."""
+        fake = FakeFullClient(
+            open_trades=[_open_trade(instrument="USD_JPY", direction="LONG")]
+        )
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        # EUR_USD long is net-short USD; USD_JPY long is net-long USD — opposite
+        # bets on USD, so no conflict is flagged.
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="\n\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "shares" not in result.output + result.stderr
 
     def test_sizing_warnings_shown(
         self, trade_db: Path, monkeypatch: pytest.MonkeyPatch

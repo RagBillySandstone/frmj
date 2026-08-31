@@ -302,6 +302,7 @@ Account IDs and active account selection are managed via `frmj account`, not `fr
 | `risk_strategy` | No | `remaining_margin_fraction` | Sizing strategy (see Risk Model) |
 | `blocking_mode` | No | `hard_block` | `hard_block` or `warning_only` at the trade cap |
 | `scale_in` | No | `never` | `never`, `warn`, or `allow` for same-instrument adds |
+| `correlation_blocking_mode` | No | `warning_only` | `hard_block` or `warning_only` for correlated open positions |
 | `safety_reserve_pct` | No | `0` | Fraction of equity to never deploy, e.g. `0.10` for 10% |
 | `percent_of_equity` | Conditional | — | Required when `risk_strategy = percent_of_equity` |
 | `fixed_dollar` | Conditional | — | Required when `risk_strategy = fixed_dollar` |

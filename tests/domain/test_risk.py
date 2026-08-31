@@ -5,14 +5,18 @@ import pytest
 
 from frmj.domain.risk import (
     BlockingMode,
+    CorrelatedPositionForbidden,
     MaxTradesExceeded,
     RiskConfig,
     RiskStrategy,
     ScaleInForbidden,
     ScaleInPolicy,
+    evaluate_correlation,
     evaluate_trade,
+    find_correlated_positions,
     size_fraction,
 )
+from frmj.domain.sizing import Direction
 
 
 def _cfg(**overrides) -> RiskConfig:
@@ -316,4 +320,63 @@ class TestInputValidation:
                 open_tickets_on_instrument=0,
                 available_margin=Decimal("-1"),
                 equity=Decimal("10000"),
+            )
+
+
+class TestCorrelation:
+    def test_shared_currency_same_sign_is_detected(self) -> None:
+        """EUR_USD long and GBP_USD long are both net-short USD."""
+        matches = find_correlated_positions(
+            open_positions=[("GBP_USD", "LONG")],
+            new_instrument="EUR_USD",
+            new_direction=Direction.LONG,
+        )
+        assert len(matches) == 1
+        assert matches[0].instrument == "GBP_USD"
+        assert matches[0].shared_currency == "USD"
+
+    def test_opposite_sign_on_shared_currency_not_flagged(self) -> None:
+        """EUR_USD long (net-short USD) vs USD_JPY long (net-long USD) are
+        opposite bets on USD, so no conflict."""
+        matches = find_correlated_positions(
+            open_positions=[("USD_JPY", "LONG")],
+            new_instrument="EUR_USD",
+            new_direction=Direction.LONG,
+        )
+        assert matches == ()
+
+    def test_same_instrument_is_excluded(self) -> None:
+        """Same-instrument overlap is scale-in's job, not correlation's."""
+        matches = find_correlated_positions(
+            open_positions=[("EUR_USD", "LONG")],
+            new_instrument="EUR_USD",
+            new_direction=Direction.LONG,
+        )
+        assert matches == ()
+
+    def test_no_shared_currency_no_warning(self) -> None:
+        matches = find_correlated_positions(
+            open_positions=[("USD_JPY", "SHORT")],
+            new_instrument="AUD_NZD",
+            new_direction=Direction.LONG,
+        )
+        assert matches == ()
+
+    def test_warning_only_returns_messages_without_raising(self) -> None:
+        messages = evaluate_correlation(
+            open_positions=[("GBP_USD", "LONG")],
+            new_instrument="EUR_USD",
+            new_direction=Direction.LONG,
+            blocking_mode=BlockingMode.WARNING_ONLY,
+        )
+        assert len(messages) == 1
+        assert "USD" in messages[0]
+
+    def test_hard_block_raises(self) -> None:
+        with pytest.raises(CorrelatedPositionForbidden):
+            evaluate_correlation(
+                open_positions=[("GBP_USD", "LONG")],
+                new_instrument="EUR_USD",
+                new_direction=Direction.LONG,
+                blocking_mode=BlockingMode.HARD_BLOCK,
             )
