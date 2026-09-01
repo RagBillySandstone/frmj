@@ -14,24 +14,33 @@ Items are grouped by priority. Within each group, order reflects logical build s
 
 ## P2 — UX and extensibility
 
-### 2. Per-command account override
+### 2. Require acknowledgement for correlated-exposure warnings
+
+`evaluate_correlation()` (src/frmj/domain/risk.py) currently prints
+warnings to stderr in `frmj trade` (src/frmj/cli.py ~line 1343) but lets the
+trade flow continue unattended. In `warning_only` mode the user should have
+to explicitly confirm ("Proceed anyway? [y/N]") before the trade proceeds,
+rather than the warning scrolling past unacknowledged. `blocking` mode is
+unaffected since it already aborts the trade.
+
+### 3. Per-command account override
 
 The `frmj trade`, `sync`, `positions`, and `close` commands always use the
 active account. A `--account NAME` flag would allow targeting a specific
 profile without switching the global active account. Tracked as a future
 enhancement to the `get_client()` callsite.
 
-### 3. Additional broker support
+### 4. Additional broker support
 
 The `accounts` table and `AccountRecord` are Oanda-specific. Extending to a
 second broker (e.g. IBKR) would require a `broker` column and a protocol
 abstraction over `OandaClient`. Currently out of scope.
 
-### 4. `frmj note --edit` — amend an existing note
+### 5. `frmj note --edit` — amend an existing note
 
 Currently `frmj note` only appends. For cases where a note has a typo or needs updating, add an `--edit` flag that opens the most recent note on the given transaction in `$EDITOR` (or prompts inline if the env var is unset).
 
-### 5. `frmj trade --limit` — place a limit (pending) order
+### 6. `frmj trade --limit` — place a limit (pending) order
 
 Add a `--limit` flag to `frmj trade`. When set, the dialog inserts a
 limit-entry prompt after displaying the current market price. The intended
@@ -44,11 +53,11 @@ them after fill; the API layer needs a `place_limit_order()` method alongside
 the existing `place_market_order()`. Exact UX and validation rules TBD pending
 architectural discussion.
 
-### 6. Service layer extraction
+### 7. Service layer extraction
 
 The CLI commands currently call `app.py` factories directly. Before building a GUI or REST API wrapper, extract a `services.py` layer that encapsulates multi-step operations (the full trade flow, the sync flow) as callable functions with no Typer dependency. The CLI then becomes a thin argument-parsing shell over the service layer. This is the prerequisite for all non-CLI interfaces.
 
-### 7. CSV import from Oanda Hub download
+### 8. CSV import from Oanda Hub download
 
 Allow bootstrapping the DB from the CSV file Oanda provides in the account hub (`History → Download`). Gives a way to back-fill history for accounts that have years of transactions before the first `frmj sync --cold` run, and provides a cross-check against the API sync. Parser should map CSV column names to the `transactions` schema and skip rows already present.
 
@@ -56,7 +65,7 @@ Allow bootstrapping the DB from the CSV file Oanda provides in the account hub (
 
 ## P3 — Test coverage
 
-### 8. OandaClient HTTP method coverage
+### 9. OandaClient HTTP method coverage
 
 `oanda.py` is at 62% line coverage. The untested lines are the HTTP client
 methods beyond `place_market_order` (`get_transactions_since`, `get_account_summary`,
