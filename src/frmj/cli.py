@@ -1343,6 +1343,14 @@ def trade(
         for warn in correlation_warnings:
             typer.echo(f"Warning: {warn}", err=True)
 
+        # Correlated-exposure warnings must be explicitly acknowledged rather
+        # than scrolling past unread — HARD_BLOCK already aborted above via
+        # CorrelatedPositionForbidden, so reaching here means warning_only.
+        if correlation_warnings and not typer.confirm("Proceed anyway?", default=False):
+            typer.echo("Order cancelled.")
+            conn.close()
+            raise typer.Exit(0)
+
         # Sizing
         try:
             units_calc = compute_units(

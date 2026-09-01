@@ -2018,16 +2018,32 @@ class TestTradeErrors:
         self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """WARNING_ONLY (default): a correlated open position emits a warning
-        but does not block the trade."""
+        and requires acknowledgement, but does not block the trade once
+        acknowledged."""
         fake = FakeFullClient(
             open_trades=[_open_trade(instrument="GBP_USD", direction="LONG")]
         )
         monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        # "y" acknowledges the "Proceed anyway?" prompt; then TP/SL are skipped.
         result = runner.invoke(
-            app, ["trade", "EUR_USD", "long", "--dry-run"], input="\n\n"
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="y\n\n\n"
         )
         assert result.exit_code == 0, result.output
         assert "shares USD exposure" in result.output + result.stderr
+        assert "Proceed anyway?" in result.output + result.stderr
+
+    def test_correlated_position_decline_cancels(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WARNING_ONLY: declining the acknowledgement prompt cancels the
+        trade before any TP/SL prompts or order placement."""
+        fake = FakeFullClient(
+            open_trades=[_open_trade(instrument="GBP_USD", direction="LONG")]
+        )
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["trade", "EUR_USD", "long"], input="n\n")
+        assert result.exit_code == 0, result.output
+        assert "Order cancelled" in result.output + result.stderr
 
     def test_correlated_position_hard_block_exits_1(
         self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
