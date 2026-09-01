@@ -798,9 +798,16 @@ VALID_CONFIG_KEYS: frozenset[str] = frozenset(
 )
 
 
+def _complete_config_key(incomplete: str) -> list[str]:
+    """Return valid config keys whose names start with *incomplete*."""
+    return sorted(k for k in VALID_CONFIG_KEYS if k.startswith(incomplete.lower()))
+
+
 @config_app.command("set")
 def config_set(
-    key: str = typer.Argument(..., help="Config key, e.g. account_id"),
+    key: str = typer.Argument(
+        ..., help="Config key, e.g. account_id", autocompletion=_complete_config_key
+    ),
     value: str = typer.Argument(..., help="Config value"),
 ) -> None:
     """Set a configuration value."""
@@ -822,6 +829,7 @@ def config_get(
     key: str | None = typer.Argument(
         None,
         help="Config key to retrieve. Omit to show all configured values.",
+        autocompletion=_complete_config_key,
     ),
 ) -> None:
     """Read a configuration value, or show all values if no key is given."""

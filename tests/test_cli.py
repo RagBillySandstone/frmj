@@ -26,7 +26,7 @@ from typer.testing import CliRunner
 
 from frmj.accounts import add_account, set_active_account
 from frmj.app import get_db, set_config
-from frmj.cli import app
+from frmj.cli import VALID_CONFIG_KEYS, _complete_config_key, app
 from frmj.domain.sizing import InstrumentSpec, PriceQuote
 from frmj.execution.oanda import (
     AccountSummary,
@@ -457,6 +457,16 @@ class TestConfigCommands:
         result = runner.invoke(app, ["config", "set", "account_id", "101-001"])
         assert result.exit_code == 1
         assert "not a valid config key" in result.output
+
+    def test_complete_config_key_matches_prefix(self) -> None:
+        """Tab completion suggests only valid keys starting with the prefix."""
+        assert _complete_config_key("max") == ["max_open_trades"]
+        assert _complete_config_key("") == sorted(VALID_CONFIG_KEYS)
+        assert _complete_config_key("nonexistent") == []
+
+    def test_complete_config_key_case_insensitive(self) -> None:
+        """Completion matches regardless of the case the user typed."""
+        assert _complete_config_key("SCALE") == ["scale_in"]
 
     def test_config_get_all_shows_all_keys(self, db_path: Path) -> None:
         """``frmj config get`` with no argument shows every configured key."""
