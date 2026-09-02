@@ -1469,8 +1469,8 @@ class TestJournalCommand:
             assert str(1000 + i) in result.output
 
     def test_n_flag_limits_output(self, journal_db: Path) -> None:
-        """``--n 2`` should show only the 2 most recent transactions."""
-        result = runner.invoke(app, ["journal", "--n", "2"])
+        """``--number 2`` should show only the 2 most recent transactions."""
+        result = runner.invoke(app, ["journal", "--number", "2"])
         assert result.exit_code == 0
         # The 2 most recent are 1005 and 1004 (ordered DESC by time).
         assert "1005" in result.output
@@ -2353,8 +2353,10 @@ class TestJournalFiltering:
         assert "No transactions" in result.output
 
     def test_n_still_limits_after_filter(self, filter_db: Path) -> None:
-        """--n 1 with matching rows returns only the most recent match."""
-        result = runner.invoke(app, ["journal", "--instrument", "EUR_USD", "--n", "1"])
+        """--number 1 with matching rows returns only the most recent match."""
+        result = runner.invoke(
+            app, ["journal", "--instrument", "EUR_USD", "--number", "1"]
+        )
         assert result.exit_code == 0, result.output
         assert "103" in result.output  # most recent EUR_USD
         assert "101" not in result.output

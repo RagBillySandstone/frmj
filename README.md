@@ -194,7 +194,7 @@ Display recent transactions with any attached notes and tags. Auto-syncs before 
 
 ```sh
 frmj journal                          # last 20 transactions
-frmj journal --n 50                   # last 50 transactions
+frmj journal --number 50              # last 50 transactions
 frmj journal --instrument EUR_USD     # filter by instrument
 frmj journal --type ORDER_FILL        # filter by transaction type
 frmj journal --since 2026-04-01       # on or after a date

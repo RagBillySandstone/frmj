@@ -73,7 +73,7 @@ Commands
     breakdowns by instrument, weekday, and hour (local time).  Auto-syncs
     before displaying.
 
-``frmj journal [--n N]``
+``frmj journal [--number N]``
     Show the most recent N transactions (default 20) with any attached notes.
     Auto-syncs before displaying.
 
@@ -286,6 +286,7 @@ def sync(
     cold: bool = typer.Option(
         False,
         "--cold",
+        "-c",
         help="Full history re-fetch instead of incremental.",
     ),
     watch: bool = typer.Option(
@@ -297,6 +298,7 @@ def sync(
     interval: int = typer.Option(
         60,
         "--interval",
+        "-i",
         help="Polling interval in seconds when --watch is active.",
     ),
 ) -> None:
@@ -933,6 +935,7 @@ def config_check(
     connectivity: bool = typer.Option(
         False,
         "--connectivity",
+        "-c",
         help="Also verify the token and account_id are accepted by Oanda.",
     ),
 ) -> None:
@@ -1217,11 +1220,13 @@ def trade(
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
+        "-d",
         help="Show the full trade plan without placing an order.",
     ),
     resume: bool = typer.Option(
         False,
         "--resume",
+        "-r",
         help="Execute the previously saved draft plan (after a failed order attempt).",
     ),
 ) -> None:
@@ -1646,12 +1651,14 @@ def export(
     since: str | None = typer.Option(
         None,
         "--since",
+        "-s",
         help="Export transactions on or after this date, e.g. 2026-04-01.",
         show_default=False,
     ),
     include_notes: bool = typer.Option(
         False,
         "--include-notes",
+        "-n",
         help="Join notes as an extra column in the export.",
     ),
 ) -> None:
@@ -1881,7 +1888,7 @@ def tag(
 @app.command()
 def journal(
     n: int = typer.Option(
-        20, "--n", "-n", help="Number of recent transactions to show."
+        20, "--number", "-n", help="Number of recent transactions to show."
     ),
     instrument: str | None = typer.Option(
         None,
@@ -1901,17 +1908,20 @@ def journal(
     since: str | None = typer.Option(
         None,
         "--since",
+        "-s",
         help="Show transactions on or after this date, e.g. 2026-04-01.",
         show_default=False,
     ),
     with_notes: bool = typer.Option(
         False,
         "--with-notes",
+        "-w",
         help="Only show transactions that have at least one note.",
     ),
     filter_tag: str | None = typer.Option(
         None,
         "--tag",
+        "-T",
         help="Filter to transactions tagged with this label.",
         show_default=False,
     ),
