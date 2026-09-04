@@ -16,13 +16,14 @@ from pathlib import Path
 
 import pytest
 
-from frmj.accounts import add_account, set_active_account
+from frmj.accounts import AccountRecord, add_account, set_active_account
 from frmj.app import (
     _resolve_default_data_dir,
     clear_draft_plan,
     delete_token,
     get_all_config,
     get_client,
+    get_client_for_account,
     get_config,
     get_db,
     get_risk_config,
@@ -306,6 +307,50 @@ class TestGetClient:
         client.close()
 
 
+class TestGetClientForAccount:
+    """get_client_for_account builds a client for an explicit profile, no active-account lookup."""
+
+    def test_raises_without_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
+        monkeypatch.delenv("OANDA_API_TOKEN_PRACTICE", raising=False)
+        account = AccountRecord(
+            name="practice", oanda_id="101-001-1", is_practice=True, created_at="now"
+        )
+        with pytest.raises(RuntimeError, match="No API token"):
+            get_client_for_account(account)
+
+    def test_returns_client_with_correct_account_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token")
+        account = AccountRecord(
+            name="live",
+            oanda_id="101-001-99999-001",
+            is_practice=False,
+            created_at="now",
+        )
+        client = get_client_for_account(account)
+        assert isinstance(client, OandaClient)
+        assert client.account_id == "101-001-99999-001"
+        client.close()
+
+    def test_does_not_require_an_active_account(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No active account is configured; get_client_for_account still works."""
+        monkeypatch.setenv("FRMJ_DB_PATH", str(tmp_path / "test.db"))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token")
+        conn = get_db()
+        add_account(conn, "unactivated", "101-001-1", is_practice=True)
+        conn.close()
+        account = AccountRecord(
+            name="unactivated", oanda_id="101-001-1", is_practice=True, created_at="now"
+        )
+        client = get_client_for_account(account)
+        assert client.account_id == "101-001-1"
+        client.close()
+
+
 # ---------------------------------------------------------------------------
 # get_risk_config
 # ---------------------------------------------------------------------------
@@ -574,5 +619,3 @@ class TestDeleteToken:
         )
         with pytest.raises(RuntimeError, match="No system keyring"):
             delete_token()
-
-

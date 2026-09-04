@@ -384,28 +384,17 @@ def clear_draft_plan() -> None:
 # ---------------------------------------------------------------------------
 
 
-def get_client(conn: sqlite3.Connection) -> OandaClient:
+def get_client_for_account(account: AccountRecord) -> OandaClient:
     """
-    Build an ``OandaClient`` from the active account profile.
+    Build an ``OandaClient`` for a specific account profile.
 
-    Reads the active account name from config, looks up its profile in the
-    ``accounts`` table, resolves the API token, and constructs an
-    ``OandaClient`` pointed at the correct Oanda environment
-    (practice.oanda.com vs fxtrade.oanda.com based on ``is_practice``).
+    Resolves the API token for *account*'s environment and constructs an
+    ``OandaClient`` pointed at the correct Oanda host (practice.oanda.com vs
+    fxtrade.oanda.com based on ``is_practice``).
 
-    Raises ``RuntimeError`` with a clear message when a required value is
-    missing so the CLI can surface it as a user-facing error rather than a
-    traceback.
+    Raises ``RuntimeError`` with a clear message when no token is found so the
+    CLI can surface it as a user-facing error rather than a traceback.
     """
-    account: AccountRecord | None = get_active_account(conn)
-    if account is None:
-        raise RuntimeError(
-            "No active account selected. Add an account with:\n"
-            "  frmj account add NAME\n"
-            "Then activate it with:\n"
-            "  frmj account use NAME"
-        )
-
     env_type = "practice" if account.is_practice else "live"
     token = get_token(account.is_practice)
     if not token:
@@ -423,6 +412,28 @@ def get_client(conn: sqlite3.Connection) -> OandaClient:
         account_id=account.oanda_id,
         practice=account.is_practice,
     )
+
+
+def get_client(conn: sqlite3.Connection) -> OandaClient:
+    """
+    Build an ``OandaClient`` from the active account profile.
+
+    Reads the active account name from config, looks up its profile in the
+    ``accounts`` table, and delegates to ``get_client_for_account``.
+
+    Raises ``RuntimeError`` with a clear message when a required value is
+    missing so the CLI can surface it as a user-facing error rather than a
+    traceback.
+    """
+    account: AccountRecord | None = get_active_account(conn)
+    if account is None:
+        raise RuntimeError(
+            "No active account selected. Add an account with:\n"
+            "  frmj account add NAME\n"
+            "Then activate it with:\n"
+            "  frmj account use NAME"
+        )
+    return get_client_for_account(account)
 
 
 # ---------------------------------------------------------------------------
