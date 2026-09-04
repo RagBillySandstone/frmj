@@ -35,11 +35,14 @@ Commands
     settings are preserved; only the friendly name changes.  If *OLD_NAME* is
     the active account the active pointer is updated atomically.
 
-``frmj trade <INSTRUMENT> <long|short> [--dry-run]``
+``frmj trade <INSTRUMENT> <long|short> [--dry-run] [--multi GROUP]``
     Interactive trade flow: risk → sizing → TP/SL → confirm → execute →
     attach TP/SL on Oanda → note.  ``--dry-run`` shows the full plan
     (including exit levels) without placing the order or prompting for
-    confirmation.
+    confirmation.  ``--multi GROUP`` fans the same trade out to every account
+    in a saved group (see ``frmj account group``) instead of just the active
+    account; risk, sizing, and correlation are evaluated independently per
+    account. Not supported together with ``--resume``.
 
 ``frmj positions``
     Show all open trades fetched live from Oanda: instrument, direction,
@@ -94,6 +97,7 @@ import json
 import os
 import sqlite3
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -101,13 +105,19 @@ import httpx
 import typer
 
 from frmj.accounts import (
+    AccountRecord,
+    add_group_member,
+    delete_group,
     get_active_account,
     get_active_account_name,
     is_live_mode,
     list_accounts,
+    list_group_members,
+    list_group_names,
     get_account,
     add_account,
     remove_account,
+    remove_group_member,
     rename_account,
     set_active_account,
     set_live_mode,
@@ -118,6 +128,7 @@ from frmj.app import (
     delete_token,
     get_all_config,
     get_client,
+    get_client_for_account,
     get_config,
     get_db,
     get_risk_config,
@@ -151,11 +162,12 @@ from frmj.domain.risk import (
     RiskStrategy,
     ScaleInForbidden,
     ScaleInPolicy,
+    SizingDecision,
     evaluate_correlation,
     evaluate_trade,
 )
-from frmj.domain.sizing import Direction, compute_units
-from frmj.execution.oanda import AccountSummary, OpenTrade
+from frmj.domain.sizing import Direction, UnitsCalc, compute_units
+from frmj.execution.oanda import AccountSummary, OandaClient, OpenTrade, OrderFill
 from frmj.execution.sync import sync_cold, sync_incremental
 
 # ---------------------------------------------------------------------------
@@ -181,6 +193,13 @@ account_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(account_app, name="account")
+
+group_app = typer.Typer(
+    name="group",
+    help="Manage named account groups for multi-account trades.",
+    no_args_is_help=True,
+)
+account_app.add_typer(group_app, name="group")
 
 mode_app = typer.Typer(
     name="mode",
@@ -730,6 +749,146 @@ def account_rename(
 
 
 # ---------------------------------------------------------------------------
+# account group sub-commands
+# ---------------------------------------------------------------------------
+
+
+def _complete_account_group(incomplete: str) -> list[str]:
+    """Return saved group names whose names start with *incomplete*.
+
+    Unlike the other completion helpers (static lists), group names are
+    per-database data, so this opens a connection to look them up.
+    """
+    conn = get_db()
+    try:
+        names = list_group_names(conn)
+    finally:
+        conn.close()
+    return [n for n in names if n.startswith(incomplete)]
+
+
+@group_app.command("add")
+def account_group_add(
+    group_name: str = typer.Argument(
+        ..., help="Group name, e.g. prop-firms", autocompletion=_complete_account_group
+    ),
+    account_name: str = typer.Argument(..., help="Account name to add to the group"),
+) -> None:
+    """Add an account to a group, creating the group if it doesn't exist yet."""
+    conn = get_db()
+    try:
+        if get_account(conn, account_name) is None:
+            typer.echo(
+                f"Error: account '{account_name}' not found. "
+                "Run 'frmj account list' to see available accounts.",
+                err=True,
+            )
+            conn.close()
+            raise typer.Exit(1)
+
+        import sqlite3 as _sqlite3
+
+        try:
+            add_group_member(conn, group_name, account_name)
+        except _sqlite3.IntegrityError:
+            typer.echo(
+                f"Error: '{account_name}' is already in group '{group_name}'.", err=True
+            )
+            conn.close()
+            raise typer.Exit(1)
+    finally:
+        conn.close()
+    typer.echo(f"Added '{account_name}' to group '{group_name}'.")
+
+
+@group_app.command("remove")
+def account_group_remove(
+    group_name: str = typer.Argument(
+        ..., help="Group name", autocompletion=_complete_account_group
+    ),
+    account_name: str = typer.Argument(
+        ..., help="Account name to remove from the group"
+    ),
+) -> None:
+    """Remove an account from a group."""
+    conn = get_db()
+    try:
+        removed = remove_group_member(conn, group_name, account_name)
+    finally:
+        conn.close()
+    if removed:
+        typer.echo(f"Removed '{account_name}' from group '{group_name}'.")
+    else:
+        typer.echo(f"Error: '{account_name}' is not in group '{group_name}'.", err=True)
+        raise typer.Exit(1)
+
+
+@group_app.command("delete")
+def account_group_delete(
+    group_name: str = typer.Argument(
+        ..., help="Group name to delete", autocompletion=_complete_account_group
+    ),
+) -> None:
+    """Delete a group entirely (removes all its memberships)."""
+    conn = get_db()
+    try:
+        removed = delete_group(conn, group_name)
+    finally:
+        conn.close()
+    if removed:
+        typer.echo(f"Deleted group '{group_name}' ({removed} member(s) removed).")
+    else:
+        typer.echo(f"Error: group '{group_name}' not found.", err=True)
+        raise typer.Exit(1)
+
+
+@group_app.command("list")
+def account_group_list() -> None:
+    """List all saved account groups and their members."""
+    conn = get_db()
+    try:
+        names = list_group_names(conn)
+        members_by_group = {name: list_group_members(conn, name) for name in names}
+    finally:
+        conn.close()
+
+    if not names:
+        typer.echo(
+            "No account groups configured. "
+            "Add one with: frmj account group add GROUP ACCOUNT"
+        )
+        return
+
+    for name in names:
+        members = ", ".join(m.name for m in members_by_group[name])
+        typer.echo(f"  {name}: {members}")
+
+
+@group_app.command("show")
+def account_group_show(
+    group_name: str = typer.Argument(
+        ..., help="Group name", autocompletion=_complete_account_group
+    ),
+) -> None:
+    """Show the members of a single group."""
+    conn = get_db()
+    try:
+        members = list_group_members(conn, group_name)
+    finally:
+        conn.close()
+
+    if not members:
+        typer.echo(
+            f"Error: group '{group_name}' not found or has no members.", err=True
+        )
+        raise typer.Exit(1)
+
+    for acct in members:
+        acct_type = "practice" if acct.is_practice else "live"
+        typer.echo(f"  {acct.name}  [{acct_type}, {acct.oanda_id}]")
+
+
+# ---------------------------------------------------------------------------
 # mode sub-commands
 # ---------------------------------------------------------------------------
 
@@ -1229,6 +1388,14 @@ def trade(
         "-r",
         help="Execute the previously saved draft plan (after a failed order attempt).",
     ),
+    multi: str | None = typer.Option(
+        None,
+        "--multi",
+        "-m",
+        help="Fan this trade out to every account in the named group "
+        "(see 'frmj account group').",
+        autocompletion=_complete_account_group,
+    ),
 ) -> None:
     """Plan and (optionally) execute a trade."""
     # --- Validate argument combinations --------------------------------------
@@ -1237,6 +1404,9 @@ def trade(
             typer.echo(
                 "Error: instrument and direction are not used with --resume.", err=True
             )
+            raise typer.Exit(1)
+        if multi is not None:
+            typer.echo("Error: --multi is not supported with --resume.", err=True)
             raise typer.Exit(1)
     else:
         if instrument is None or direction_str is None:
@@ -1248,6 +1418,29 @@ def trade(
             typer.echo("DIRECTION must be 'long' or 'short'.", err=True)
             raise typer.Exit(1)
         direction = Direction.LONG if direction_str == "long" else Direction.SHORT
+
+    # --- Multi-account dispatch: resolve the group and hand off entirely -----
+    # Kept as a separate flow rather than unifying with the single-account path
+    # below: risk/sizing/correlation must run independently per account (each
+    # has its own NAV and open positions), which changes enough of the
+    # planning logic that sharing it here would risk the single-account path's
+    # behavior for a feature most trades never touch.
+    if multi is not None:
+        conn = get_db()
+        accounts = list_group_members(conn, multi)
+        if not accounts:
+            typer.echo(
+                f"Error: group '{multi}' not found or has no members. "
+                f"Add one with: frmj account group add {multi} ACCOUNT",
+                err=True,
+            )
+            conn.close()
+            raise typer.Exit(1)
+        assert instrument is not None and direction_str is not None
+        _trade_multi_account(
+            conn, accounts, instrument, direction, direction_str, dry_run
+        )
+        return
 
     conn = get_db()
     try:
@@ -2711,3 +2904,398 @@ def _save_trade_plan(
         (row["id"], tp_str, sl_str),
     )
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Multi-account trade flow (frmj trade ... --multi GROUP)
+# ---------------------------------------------------------------------------
+
+
+def _prompt_retry_or_skip() -> str:
+    """Prompt after a failed order attempt on one account in a multi-account trade.
+
+    Returns 'r' (retry this account) or 's' (skip this account and continue
+    with the rest of the group). Unlike the single-account
+    ``_prompt_retry_save_abort``, there is no "abort" option here — other
+    accounts in the group may already have filled, so the only choices are to
+    keep trying this one account or move on to the next.
+    """
+    while True:
+        raw = typer.prompt("[R]etry / [S]kip this account").strip().lower()
+        if raw in ("r", "s"):
+            return raw
+        typer.echo("  Enter R or S.")
+
+
+@dataclass(slots=True)
+class _AccountPlan:
+    """Per-account risk/sizing result within a multi-account trade."""
+
+    account: AccountRecord
+    client: OandaClient
+    sizing_decision: SizingDecision
+    units_calc: UnitsCalc
+
+
+def _trade_multi_account(
+    conn: sqlite3.Connection,
+    accounts: list[AccountRecord],
+    instrument: str,
+    direction: Direction,
+    direction_str: str,
+    dry_run: bool,
+) -> None:
+    """Plan and execute the same trade across every account in *accounts*.
+
+    Mirrors the single-account flow in ``trade()`` — risk model, sizing,
+    TP/SL prompt, confirm, execute, attach TP/SL, sync, note/tags — but risk,
+    sizing, and correlation are evaluated independently per account (each has
+    its own NAV, margin, and open positions), while the instrument,
+    direction, TP/SL choice, and final confirmation are shared, since it's
+    the same intended trade replicated across accounts.
+    """
+    try:
+        risk_config = get_risk_config(conn)
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        conn.close()
+        raise typer.Exit(1)
+
+    # --- Build one client per account, up front -------------------------------
+    clients: dict[str, OandaClient] = {}
+    for acct in accounts:
+        try:
+            clients[acct.name] = get_client_for_account(acct)
+        except RuntimeError as exc:
+            typer.echo(f"Error [{acct.name}]: {exc}", err=True)
+            conn.close()
+            raise typer.Exit(1)
+
+    # --- Shared market snapshot -------------------------------------------------
+    # Fetched once, from the first account's client. Used only for the plan
+    # display and to translate TP/SL into absolute prices — the actual fill
+    # price for each account is whatever Oanda returns when that account's
+    # own order is placed.
+    primary_client = clients[accounts[0].name]
+    try:
+        spec = primary_client.get_instrument(instrument)
+        quote = primary_client.get_price(instrument)
+    except Exception as exc:
+        typer.echo(f"Error fetching market data: {exc}", err=True)
+        conn.close()
+        raise typer.Exit(1)
+    entry_price = quote.entry_price(direction)
+
+    # --- Per-account risk model, sizing, and correlation check ----------------
+    plans: list[_AccountPlan] = []
+    any_correlation_warnings = False
+    for acct in accounts:
+        client = clients[acct.name]
+        try:
+            summary = client.get_account_summary()
+            open_on_instr = client.get_open_tickets_on_instrument(instrument)
+            open_trades = client.get_open_trades()
+        except Exception as exc:
+            typer.echo(f"Error fetching account data [{acct.name}]: {exc}", err=True)
+            conn.close()
+            raise typer.Exit(1)
+
+        try:
+            sizing_decision = evaluate_trade(
+                config=risk_config,
+                open_trades=summary.open_trade_count,
+                open_tickets_on_instrument=open_on_instr,
+                available_margin=summary.margin_available,
+                equity=summary.nav,
+            )
+        except (MaxTradesExceeded, ScaleInForbidden) as exc:
+            typer.echo(f"Cannot trade on '{acct.name}': {exc}", err=True)
+            conn.close()
+            raise typer.Exit(1)
+
+        for warn in sizing_decision.warnings:
+            typer.echo(f"Warning [{acct.name}]: {warn}", err=True)
+
+        try:
+            correlation_warnings = evaluate_correlation(
+                open_positions=[(t.instrument, t.direction) for t in open_trades],
+                new_instrument=instrument,
+                new_direction=direction,
+                blocking_mode=risk_config.correlation_blocking_mode,
+            )
+        except CorrelatedPositionForbidden as exc:
+            typer.echo(f"Cannot trade on '{acct.name}': {exc}", err=True)
+            conn.close()
+            raise typer.Exit(1)
+
+        for warn in correlation_warnings:
+            typer.echo(f"Warning [{acct.name}]: {warn}", err=True)
+        if correlation_warnings:
+            any_correlation_warnings = True
+
+        try:
+            units_calc = compute_units(
+                capital_to_deploy=sizing_decision.capital_to_deploy,
+                spec=spec,
+                quote=quote,
+                direction=direction,
+            )
+        except Exception as exc:
+            typer.echo(f"Error computing units [{acct.name}]: {exc}", err=True)
+            conn.close()
+            raise typer.Exit(1)
+
+        plans.append(
+            _AccountPlan(
+                account=acct,
+                client=client,
+                sizing_decision=sizing_decision,
+                units_calc=units_calc,
+            )
+        )
+
+    # Correlated-exposure warnings must be explicitly acknowledged rather than
+    # scrolling past unread — one combined prompt covers the whole group,
+    # mirroring the single-account behavior for the same underlying check.
+    if any_correlation_warnings and not typer.confirm("Proceed anyway?", default=False):
+        typer.echo("Order cancelled.")
+        conn.close()
+        raise typer.Exit(0)
+
+    # --- Trade plan table -------------------------------------------------------
+    typer.echo("")
+    typer.echo(
+        f"Trade plan: {instrument} {direction_str.upper()}  ({len(plans)} accounts)"
+    )
+    typer.echo("─" * 60)
+    typer.echo(f"  Entry:   {entry_price} ({direction_str})")
+    typer.echo("")
+    for plan in plans:
+        acct_type = "practice" if plan.account.is_practice else "live"
+        pv = pip_value_home(plan.units_calc.units, spec, quote)
+        typer.echo(
+            f"  {plan.account.name}  [{acct_type}]  "
+            f"Capital at risk ${plan.sizing_decision.capital_to_deploy:,.2f}  "
+            f"Units {plan.units_calc.units:,}  "
+            f"Margin ${plan.units_calc.margin_used:,.2f}  "
+            f"Pip ${pv:.2f}"
+        )
+    typer.echo("")
+
+    # --- TP/SL prompt (once) and per-account exit levels -----------------------
+    # A %RoM target translates to a different absolute price per account
+    # (each has its own margin_used from independent sizing) — that's
+    # expected: it holds the risk/reward ratio constant per account rather
+    # than the raw price. A pip target is identical across accounts since
+    # entry_price is shared.
+    tp_spec = _prompt_tpsl("Take-profit")
+    sl_spec = _prompt_tpsl("Stop-loss  ")
+
+    def _compute_all_exits() -> list[ExitLevels]:
+        return [
+            compute_exit_levels(
+                entry_price=entry_price,
+                units=plan.units_calc.units,
+                direction=direction,
+                spec=spec,
+                quote=quote,
+                margin_used=plan.units_calc.margin_used,
+                take_profit=tp_spec,
+                stop_loss=sl_spec,
+            )
+            for plan in plans
+        ]
+
+    exits_list = _compute_all_exits()
+    for plan, exits in zip(plans, exits_list):
+        typer.echo(f"{plan.account.name}:")
+        _display_exits(exits, plan.units_calc.margin_used)
+    typer.echo("")
+
+    if dry_run:
+        typer.echo("[DRY RUN] Plan complete. No orders placed.")
+        conn.close()
+        return
+
+    # --- Confirm ------------------------------------------------------------
+    while True:
+        answer = (
+            typer.prompt(f"Confirm order on {len(plans)} accounts? [y/N/e=edit]")
+            .strip()
+            .lower()
+        )
+        if answer in ("n", ""):
+            typer.echo("Order cancelled.")
+            conn.close()
+            return
+        if answer == "y":
+            break
+        if answer == "e":
+            tp_spec = _prompt_tpsl("Take-profit (new)")
+            sl_spec = _prompt_tpsl("Stop-loss   (new)")
+            exits_list = _compute_all_exits()
+            for plan, exits in zip(plans, exits_list):
+                typer.echo(f"{plan.account.name}:")
+                _display_exits(exits, plan.units_calc.margin_used)
+            typer.echo("")
+
+    # --- Live mode gate: check every target account before placing anything ---
+    blocked = [
+        plan.account.name
+        for plan in plans
+        if not plan.account.is_practice and not is_live_mode(conn)
+    ]
+    if blocked:
+        typer.echo(
+            "Error: the following accounts are live accounts, but live trading "
+            f"mode is not enabled: {', '.join(blocked)}\n"
+            "Run: frmj mode live",
+            err=True,
+        )
+        conn.close()
+        raise typer.Exit(1)
+
+    # --- Place orders, one account at a time ------------------------------------
+    # A failure on one account does not roll back accounts that already
+    # filled — nothing to roll back, Oanda is the system of record for each
+    # account independently. Each failure is reported and the operator
+    # chooses retry-this-account or skip-this-account; the rest of the group
+    # proceeds regardless.
+    results: list[tuple[_AccountPlan, OrderFill | None]] = []
+    for plan, exits in zip(plans, exits_list):
+        units_signed = (
+            plan.units_calc.units
+            if direction is Direction.LONG
+            else -plan.units_calc.units
+        )
+        fill: OrderFill | None = None
+        while True:
+            try:
+                fill = plan.client.place_market_order(instrument, units_signed)
+                break
+            except httpx.TimeoutException as exc:
+                typer.echo(
+                    f"Warning [{plan.account.name}]: request timed out ({exc}). "
+                    "The order may have been placed — check Oanda before retrying "
+                    "to avoid a double fill.",
+                    err=True,
+                )
+            except Exception as exc:
+                typer.echo(
+                    f"Error placing order [{plan.account.name}]: {exc}", err=True
+                )
+
+            if _prompt_retry_or_skip() == "r":
+                continue
+            typer.echo(f"Skipped '{plan.account.name}'.")
+            fill = None
+            break
+
+        if fill is None:
+            results.append((plan, None))
+            continue
+
+        typer.echo(
+            f"[{plan.account.name}] Order filled at {fill.fill_price} "
+            f"— transaction #{fill.transaction_id}"
+        )
+
+        if fill.trade_id is None:
+            if exits.take_profit_price is not None or exits.stop_loss_price is not None:
+                typer.echo(
+                    f"Warning [{plan.account.name}]: Oanda did not return a trade ID "
+                    "— cannot attach TP/SL. Set them manually in the Oanda interface.",
+                    err=True,
+                )
+        else:
+            if exits.take_profit_price is not None:
+                try:
+                    tp_txn = plan.client.attach_take_profit(
+                        fill.trade_id, exits.take_profit_price
+                    )
+                    typer.echo(
+                        f"[{plan.account.name}] Take-profit set at "
+                        f"{exits.take_profit_price} — order #{tp_txn}"
+                    )
+                except Exception as exc:
+                    typer.echo(
+                        f"Warning [{plan.account.name}]: failed to attach "
+                        f"take-profit — {exc}",
+                        err=True,
+                    )
+            if exits.stop_loss_price is not None:
+                try:
+                    sl_txn = plan.client.attach_stop_loss(
+                        fill.trade_id, exits.stop_loss_price
+                    )
+                    typer.echo(
+                        f"[{plan.account.name}] Stop-loss set at "
+                        f"{exits.stop_loss_price} — order #{sl_txn}"
+                    )
+                except Exception as exc:
+                    typer.echo(
+                        f"Warning [{plan.account.name}]: failed to attach "
+                        f"stop-loss — {exc}",
+                        err=True,
+                    )
+                    typer.echo(
+                        f"  [{plan.account.name}] Position is unprotected "
+                        "— set SL in Oanda immediately.",
+                        err=True,
+                    )
+
+        try:
+            sync_incremental(conn, plan.client)
+        except Exception as exc:
+            typer.echo(
+                f"[sync] Warning [{plan.account.name}]: post-fill sync failed — {exc}",
+                err=True,
+            )
+
+        _save_trade_plan(
+            conn,
+            fill.transaction_id,
+            plan.client.account_id,
+            exits.take_profit_price,
+            exits.stop_loss_price,
+        )
+        results.append((plan, fill))
+
+    # --- Summary -----------------------------------------------------------
+    filled = [(plan, fill) for plan, fill in results if fill is not None]
+    skipped = [plan for plan, fill in results if fill is None]
+    typer.echo("")
+    typer.echo(f"Order placed on {len(filled)}/{len(plans)} accounts.")
+    if skipped:
+        typer.echo(f"  Skipped: {', '.join(p.account.name for p in skipped)}", err=True)
+
+    # --- Optional entry note and tags, applied to every filled account --------
+    # Asked once rather than per account — it's the same trade rationale.
+    note_text = typer.prompt("Add a note (Enter to skip)", default="").strip()
+    tags_raw = typer.prompt("Tags (space-separated, Enter to skip)", default="").strip()
+    for plan, fill in filled:
+        assert fill is not None
+        fill_row = conn.execute(
+            "SELECT id FROM transactions WHERE oanda_id = ? AND account_id = ?",
+            (fill.transaction_id, plan.client.account_id),
+        ).fetchone()
+        if not fill_row:
+            if note_text or tags_raw:
+                typer.echo(
+                    f"[{plan.account.name}] Note/tags not saved: fill transaction "
+                    "not yet in local DB. Run 'frmj sync' then add them manually.",
+                    err=True,
+                )
+            continue
+        if note_text:
+            conn.execute(
+                "INSERT INTO notes (transaction_id, body) VALUES (?, ?)",
+                (fill_row["id"], note_text),
+            )
+            conn.commit()
+        if tags_raw:
+            _attach_tags(conn, fill_row["id"], tags_raw.split())
+    if note_text or tags_raw:
+        typer.echo("Note/tags saved.")
+
+    conn.close()

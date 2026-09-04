@@ -11,6 +11,10 @@ Two scalar settings live in the existing ``config`` table:
                         "false" (the default) keeps the system in safe
                         read-only mode even for live accounts.
 
+Named, reusable sets of accounts (for fanning a single trade out across
+several profiles) live in the ``account_groups`` table — see the account
+group helpers below.
+
 Token storage (OS keychain) is intentionally kept in ``app.py``, the one
 module allowed to perform external I/O. This module is pure SQLite CRUD.
 """
@@ -225,3 +229,87 @@ def set_live_mode(conn: sqlite3.Connection, *, enabled: bool) -> None:
         (_LIVE_MODE_KEY, "true" if enabled else "false"),
     )
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Account groups — named sets of accounts for multi-account trades
+# ---------------------------------------------------------------------------
+
+
+def add_group_member(
+    conn: sqlite3.Connection, group_name: str, account_name: str
+) -> None:
+    """
+    Add *account_name* to *group_name*, creating the group if it doesn't exist.
+
+    Raises ``sqlite3.IntegrityError`` if *account_name* is already a member of
+    *group_name* (unique index), or if *account_name* does not exist in the
+    ``accounts`` table (foreign key). The caller is responsible for converting
+    either into a user-friendly error.
+    """
+    conn.execute(
+        "INSERT INTO account_groups (group_name, account_name) VALUES (?, ?)",
+        (group_name, account_name),
+    )
+    conn.commit()
+
+
+def remove_group_member(
+    conn: sqlite3.Connection, group_name: str, account_name: str
+) -> bool:
+    """
+    Remove *account_name* from *group_name*.
+
+    Returns ``True`` when a membership row was removed, ``False`` when the
+    pair was not found. Removing the last member makes the group disappear
+    from ``list_group_names`` — there is no separate row for the group itself.
+    """
+    cursor = conn.execute(
+        "DELETE FROM account_groups WHERE group_name = ? AND account_name = ?",
+        (group_name, account_name),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def delete_group(conn: sqlite3.Connection, group_name: str) -> int:
+    """Remove every membership row for *group_name*. Returns the number removed."""
+    cursor = conn.execute(
+        "DELETE FROM account_groups WHERE group_name = ?",
+        (group_name,),
+    )
+    conn.commit()
+    return cursor.rowcount
+
+
+def list_group_names(conn: sqlite3.Connection) -> list[str]:
+    """Return every distinct group name, alphabetically sorted."""
+    rows = conn.execute(
+        "SELECT DISTINCT group_name FROM account_groups ORDER BY group_name"
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
+def list_group_members(
+    conn: sqlite3.Connection, group_name: str
+) -> list[AccountRecord]:
+    """Return the ``AccountRecord`` for every member of *group_name*, sorted by name."""
+    rows = conn.execute(
+        """
+        SELECT a.name, a.oanda_id, a.is_practice, a.created_at
+        FROM account_groups g
+        JOIN accounts a ON a.name = g.account_name
+        WHERE g.group_name = ?
+        ORDER BY a.name
+        """,
+        (group_name,),
+    ).fetchall()
+    return [
+        AccountRecord(
+            name=row[0],
+            oanda_id=row[1],
+            is_practice=bool(row[2]),
+            created_at=row[3],
+        )
+        for row in rows
+    ]

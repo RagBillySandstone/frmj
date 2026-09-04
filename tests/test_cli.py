@@ -24,7 +24,12 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
-from frmj.accounts import add_account, set_active_account
+from frmj.accounts import (
+    AccountRecord,
+    add_account,
+    add_group_member,
+    set_active_account,
+)
 from frmj.app import get_db, set_config
 from frmj.cli import VALID_CONFIG_KEYS, _complete_config_key, app
 from frmj.domain.sizing import InstrumentSpec, PriceQuote
@@ -992,6 +997,88 @@ class TestAccountCommands:
             "practice" in result.output + result.stderr
             or "type" in result.output + result.stderr
         )
+
+
+# ---------------------------------------------------------------------------
+# account group sub-commands
+# ---------------------------------------------------------------------------
+
+
+class TestAccountGroupCommands:
+    """Tests for ``frmj account group`` sub-commands. db_path seeds 'practice'."""
+
+    def test_add_creates_membership(self, db_path: Path) -> None:
+        result = runner.invoke(app, ["account", "group", "add", "g1", "practice"])
+        assert result.exit_code == 0, result.output
+        show = runner.invoke(app, ["account", "group", "show", "g1"])
+        assert "practice" in show.output
+
+    def test_add_unknown_account_exits_1(self, db_path: Path) -> None:
+        result = runner.invoke(app, ["account", "group", "add", "g1", "ghost"])
+        assert result.exit_code == 1
+        assert "not found" in result.output + result.stderr
+
+    def test_add_duplicate_member_exits_1(self, db_path: Path) -> None:
+        runner.invoke(app, ["account", "group", "add", "g1", "practice"])
+        result = runner.invoke(app, ["account", "group", "add", "g1", "practice"])
+        assert result.exit_code == 1
+        assert "already" in result.output + result.stderr
+
+    def test_remove_member(self, db_path: Path) -> None:
+        runner.invoke(app, ["account", "group", "add", "g1", "practice"])
+        result = runner.invoke(app, ["account", "group", "remove", "g1", "practice"])
+        assert result.exit_code == 0, result.output
+        show = runner.invoke(app, ["account", "group", "show", "g1"])
+        assert show.exit_code == 1
+
+    def test_remove_nonmember_exits_1(self, db_path: Path) -> None:
+        result = runner.invoke(app, ["account", "group", "remove", "g1", "practice"])
+        assert result.exit_code == 1
+        assert "not in group" in result.output + result.stderr
+
+    def test_delete_group_removes_all_members(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("frmj.app.keyring.set_password", lambda s, u, p: None)
+        runner.invoke(app, ["account", "add", "funded"], input="live-001\nlive\n")
+        runner.invoke(app, ["account", "group", "add", "g1", "practice"])
+        runner.invoke(app, ["account", "group", "add", "g1", "funded"])
+        result = runner.invoke(app, ["account", "group", "delete", "g1"])
+        assert result.exit_code == 0, result.output
+        assert "2" in result.output
+        assert (
+            runner.invoke(app, ["account", "group", "list"])
+            .output.strip()
+            .startswith("No account groups")
+        )
+
+    def test_delete_nonexistent_group_exits_1(self, db_path: Path) -> None:
+        result = runner.invoke(app, ["account", "group", "delete", "ghost"])
+        assert result.exit_code == 1
+        assert "not found" in result.output + result.stderr
+
+    def test_list_shows_groups_and_members(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("frmj.app.keyring.set_password", lambda s, u, p: None)
+        runner.invoke(app, ["account", "add", "funded"], input="live-001\nlive\n")
+        runner.invoke(app, ["account", "group", "add", "g1", "practice"])
+        runner.invoke(app, ["account", "group", "add", "g1", "funded"])
+        result = runner.invoke(app, ["account", "group", "list"])
+        assert result.exit_code == 0, result.output
+        assert "g1" in result.output
+        assert "practice" in result.output
+        assert "funded" in result.output
+
+    def test_list_empty_shows_message(self, db_path: Path) -> None:
+        result = runner.invoke(app, ["account", "group", "list"])
+        assert result.exit_code == 0
+        assert "No account groups" in result.output
+
+    def test_show_unknown_group_exits_1(self, db_path: Path) -> None:
+        result = runner.invoke(app, ["account", "group", "show", "ghost"])
+        assert result.exit_code == 1
+        assert "not found" in result.output + result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -3161,3 +3248,253 @@ class TestTradeResume:
         result = runner.invoke(app, ["trade", "EUR_USD", "--resume"])
         assert result.exit_code == 1
         assert "not used with --resume" in result.output + result.stderr
+
+
+# ---------------------------------------------------------------------------
+# trade --multi GROUP
+# ---------------------------------------------------------------------------
+
+
+class TestTradeMultiAccount:
+    """Tests for ``frmj trade ... --multi GROUP`` fanning a trade out to a group."""
+
+    @pytest.fixture()
+    def multi_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """DB with two practice accounts ('alpha', 'beta') in group 'grp'."""
+        path = tmp_path / "multi_trade_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        add_account(conn, "alpha", "alpha-acct", is_practice=True)
+        add_account(conn, "beta", "beta-acct", is_practice=True)
+        add_group_member(conn, "grp", "alpha")
+        add_group_member(conn, "grp", "beta")
+        set_config(conn, "max_open_trades", "5")
+        conn.close()
+        return path
+
+    @staticmethod
+    def _fake(
+        account_id: str, margin_available: Decimal = Decimal("8000.00")
+    ) -> FakeFullClient:
+        """A FakeFullClient with a distinct account_id and margin_available."""
+        fake = FakeFullClient(account_id=account_id)
+        base_summary = fake.get_account_summary
+
+        def _summary() -> AccountSummary:
+            s = base_summary()
+            return AccountSummary(
+                nav=s.nav,
+                balance=s.balance,
+                unrealized_pl=s.unrealized_pl,
+                realized_pl=s.realized_pl,
+                position_value=s.position_value,
+                margin_used=s.margin_used,
+                margin_available=margin_available,
+                open_trade_count=s.open_trade_count,
+            )
+
+        fake.get_account_summary = _summary  # type: ignore[method-assign]
+        return fake
+
+    def _invoke(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fakes: dict[str, FakeFullClient],
+        inputs: str,
+        args: list[str] | None = None,
+    ) -> object:
+        monkeypatch.setattr(
+            "frmj.cli.get_client_for_account", lambda account: fakes[account.name]
+        )
+        return runner.invoke(
+            app, args or ["trade", "EUR_USD", "long", "--multi", "grp"], input=inputs
+        )
+
+    def test_dry_run_shows_both_accounts(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
+        result = self._invoke(
+            monkeypatch,
+            fakes,
+            "\n\n",
+            ["trade", "EUR_USD", "long", "--multi", "grp", "--dry-run"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "alpha" in result.output
+        assert "beta" in result.output
+        assert "2 accounts" in result.output
+        assert not fakes["alpha"].order_placed
+        assert not fakes["beta"].order_placed
+
+    def test_independent_sizing_differs_by_account(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Accounts with different margin_available get different unit counts."""
+        fakes = {
+            "alpha": self._fake("alpha-acct", margin_available=Decimal("8000.00")),
+            "beta": self._fake("beta-acct", margin_available=Decimal("16000.00")),
+        }
+        result = self._invoke(
+            monkeypatch,
+            fakes,
+            "\n\n",
+            ["trade", "EUR_USD", "long", "--multi", "grp", "--dry-run"],
+        )
+        assert result.exit_code == 0, result.output
+        lines = [
+            line for line in result.output.splitlines() if "Capital at risk" in line
+        ]
+        assert len(lines) == 2
+        assert lines[0] != lines[1]
+
+    def test_execute_places_orders_on_both_accounts(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
+        # TP=50, SL=30, confirm=y, note=skip, tags=skip.
+        result = self._invoke(monkeypatch, fakes, "50\n30\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert fakes["alpha"].order_placed
+        assert fakes["beta"].order_placed
+        assert "2/2 accounts" in result.output
+
+    def test_group_not_found_exits_1(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--multi", "ghost-group"]
+        )
+        assert result.exit_code == 1
+        assert "not found" in result.output + result.stderr
+
+    def test_resume_with_multi_exits_1(self, multi_db: Path) -> None:
+        result = runner.invoke(app, ["trade", "--resume", "--multi", "grp"])
+        assert result.exit_code == 1
+        assert "not supported" in result.output + result.stderr
+
+    def test_live_mode_gate_blocks_mixed_group(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A live account in the group blocks the whole trade when live mode is off."""
+        conn = get_db(path=multi_db)
+        add_account(conn, "gamma", "gamma-acct", is_practice=False)
+        add_group_member(conn, "grp", "gamma")
+        conn.close()
+        fakes = {
+            "alpha": self._fake("alpha-acct"),
+            "beta": self._fake("beta-acct"),
+            "gamma": self._fake("gamma-acct"),
+        }
+        # TP=50, SL=30, confirm=y → live mode gate fires before any order is placed.
+        result = self._invoke(monkeypatch, fakes, "50\n30\ny\n")
+        assert result.exit_code == 1
+        assert "live trading mode is not enabled" in result.output + result.stderr
+        assert not fakes["alpha"].order_placed
+        assert not fakes["gamma"].order_placed
+
+    def test_note_and_tags_applied_to_every_filled_account(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = get_db(path=multi_db)
+        for account_id in ("alpha-acct", "beta-acct"):
+            conn.execute(
+                "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+                "VALUES ('99999', ?, 'ORDER_FILL', '2026-04-29T12:00:00Z', '{}')",
+                (account_id,),
+            )
+        conn.commit()
+        conn.close()
+
+        fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
+        # TP=50, SL=30, confirm=y, note='shared note', tags='tag1 tag2'.
+        result = self._invoke(monkeypatch, fakes, "50\n30\ny\nshared note\ntag1 tag2\n")
+        assert result.exit_code == 0, result.output
+
+        conn = get_db(path=multi_db)
+        note_count = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+        tag_count = conn.execute(
+            "SELECT COUNT(DISTINCT transaction_id) FROM tags"
+        ).fetchone()[0]
+        conn.close()
+        assert note_count == 2
+        assert tag_count == 2
+
+    def test_skip_failing_account_continues_with_rest(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        alpha = self._fake("alpha-acct")
+        beta = self._fake("beta-acct")
+
+        def _always_fail(instrument: str, units_signed: int) -> OrderFill:
+            raise RuntimeError("Order rejected by Oanda")
+
+        alpha.place_market_order = _always_fail  # type: ignore[method-assign]
+        fakes = {"alpha": alpha, "beta": beta}
+        # TP=50, SL=30, confirm=y, [alpha fails] skip='s', note=skip, tags=skip.
+        result = self._invoke(monkeypatch, fakes, "50\n30\ny\ns\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert not alpha.order_placed
+        assert beta.order_placed
+        assert "1/2 accounts" in result.output
+        assert "alpha" in result.output
+
+    def test_hard_block_on_one_account_aborts_before_any_order(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A HARD_BLOCK risk failure on any account aborts the whole group."""
+        from frmj.domain.risk import MaxTradesExceeded
+
+        fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
+        monkeypatch.setattr(
+            "frmj.cli.get_client_for_account", lambda account: fakes[account.name]
+        )
+        monkeypatch.setattr(
+            "frmj.cli.evaluate_trade",
+            lambda **kw: (_ for _ in ()).throw(
+                MaxTradesExceeded("too many open trades")
+            ),
+        )
+        result = runner.invoke(app, ["trade", "EUR_USD", "long", "--multi", "grp"])
+        assert result.exit_code == 1
+        assert "Cannot trade on 'alpha'" in result.output + result.stderr
+        assert not fakes["alpha"].order_placed
+        assert not fakes["beta"].order_placed
+
+    def test_correlation_warning_decline_cancels_whole_group(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A correlation warning (WARNING_ONLY) needs one combined acknowledgement;
+        declining it cancels the order on every account."""
+        fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
+        monkeypatch.setattr(
+            "frmj.cli.get_client_for_account", lambda account: fakes[account.name]
+        )
+        monkeypatch.setattr(
+            "frmj.cli.evaluate_correlation",
+            lambda **kw: ["shares USD exposure with an existing GBP_USD position"],
+        )
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--multi", "grp"], input="n\n"
+        )
+        assert result.exit_code == 0
+        assert "Proceed anyway?" in result.output + result.stderr
+        assert "Order cancelled" in result.output + result.stderr
+        assert not fakes["alpha"].order_placed
+        assert not fakes["beta"].order_placed
+
+    def test_missing_token_for_one_account_aborts_before_market_data(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A missing token for any group member aborts before fetching market data."""
+
+        def _get_client(account: AccountRecord) -> FakeFullClient:
+            if account.name == "beta":
+                raise RuntimeError("No API token found for the practice environment.")
+            return self._fake(account.oanda_id)
+
+        monkeypatch.setattr("frmj.cli.get_client_for_account", _get_client)
+        result = runner.invoke(app, ["trade", "EUR_USD", "long", "--multi", "grp"])
+        assert result.exit_code == 1
+        assert "Error [beta]" in result.output + result.stderr

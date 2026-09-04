@@ -229,6 +229,32 @@ CREATE TABLE IF NOT EXISTS accounts (
 
 
 -- -------------------------------------------------------------------------
+-- Account groups — named, reusable sets of accounts for multi-account trades
+-- -------------------------------------------------------------------------
+-- A group is just a set of (group_name, account_name) membership rows; there
+-- is no separate "groups" table row for the group itself, so an empty group
+-- has no footprint (it simply doesn't appear until a member is added, and
+-- disappears once the last member is removed). Membership may freely mix
+-- practice and live accounts — is_practice is looked up per member via the
+-- accounts table when a group is resolved.
+CREATE TABLE IF NOT EXISTS account_groups (
+    id           INTEGER PRIMARY KEY,
+    group_name   TEXT    NOT NULL,
+    account_name TEXT    NOT NULL REFERENCES accounts(name),
+    created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Prevent the same account being added twice to the same group.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_account_groups_name_account
+    ON account_groups (group_name, account_name);
+
+-- "List every group name" and "list members of this group" — both driven by
+-- a leading group_name lookup.
+CREATE INDEX IF NOT EXISTS idx_account_groups_group
+    ON account_groups (group_name);
+
+
+-- -------------------------------------------------------------------------
 -- Config — flat key/value store for account settings
 -- -------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS config (

@@ -17,13 +17,18 @@ import pytest
 from frmj.accounts import (
     AccountRecord,
     add_account,
+    add_group_member,
+    delete_group,
     get_account,
     get_account_count,
     get_active_account,
     get_active_account_name,
     is_live_mode,
     list_accounts,
+    list_group_members,
+    list_group_names,
     remove_account,
+    remove_group_member,
     rename_account,
     set_active_account,
     set_live_mode,
@@ -435,6 +440,96 @@ class TestRenameAccount:
 # ---------------------------------------------------------------------------
 # Account switching
 # ---------------------------------------------------------------------------
+
+
+class TestAccountGroups:
+    """Named account groups for multi-account trades (account_groups table)."""
+
+    def test_add_creates_membership(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "alpha", "a-id", is_practice=True)
+        add_group_member(conn, "prop-firms", "alpha")
+        assert [m.name for m in list_group_members(conn, "prop-firms")] == ["alpha"]
+
+    def test_add_duplicate_member_raises(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "alpha", "a-id", is_practice=True)
+        add_group_member(conn, "prop-firms", "alpha")
+        with pytest.raises(sqlite3.IntegrityError):
+            add_group_member(conn, "prop-firms", "alpha")
+
+    def test_add_nonexistent_account_raises(self, conn: sqlite3.Connection) -> None:
+        """The account_name FK requires a matching row in accounts."""
+        with pytest.raises(sqlite3.IntegrityError):
+            add_group_member(conn, "prop-firms", "ghost")
+
+    def test_list_group_names_empty(self, conn: sqlite3.Connection) -> None:
+        assert list_group_names(conn) == []
+
+    def test_list_group_names_sorted(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "alpha", "a-id", is_practice=True)
+        add_group_member(conn, "zebra-group", "alpha")
+        add_group_member(conn, "alpha-group", "alpha")
+        assert list_group_names(conn) == ["alpha-group", "zebra-group"]
+
+    def test_list_group_members_sorted_by_name(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "zebra", "z-id", is_practice=True)
+        add_account(conn, "alpha", "a-id", is_practice=True)
+        add_group_member(conn, "g", "zebra")
+        add_group_member(conn, "g", "alpha")
+        assert [m.name for m in list_group_members(conn, "g")] == ["alpha", "zebra"]
+
+    def test_list_group_members_unknown_group_is_empty(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        assert list_group_members(conn, "ghost-group") == []
+
+    def test_group_can_mix_live_and_practice(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "demo", "d-id", is_practice=True)
+        add_account(conn, "funded", "f-id", is_practice=False)
+        add_group_member(conn, "mixed", "demo")
+        add_group_member(conn, "mixed", "funded")
+        members = {m.name: m.is_practice for m in list_group_members(conn, "mixed")}
+        assert members == {"demo": True, "funded": False}
+
+    def test_remove_member_returns_true(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "alpha", "a-id", is_practice=True)
+        add_group_member(conn, "g", "alpha")
+        assert remove_group_member(conn, "g", "alpha") is True
+        assert list_group_members(conn, "g") == []
+
+    def test_remove_nonexistent_member_returns_false(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        assert remove_group_member(conn, "g", "alpha") is False
+
+    def test_removing_last_member_drops_group_from_list_names(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        add_account(conn, "alpha", "a-id", is_practice=True)
+        add_group_member(conn, "g", "alpha")
+        remove_group_member(conn, "g", "alpha")
+        assert list_group_names(conn) == []
+
+    def test_delete_group_removes_all_members(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "alpha", "a-id", is_practice=True)
+        add_account(conn, "beta", "b-id", is_practice=True)
+        add_group_member(conn, "g", "alpha")
+        add_group_member(conn, "g", "beta")
+        assert delete_group(conn, "g") == 2
+        assert list_group_names(conn) == []
+
+    def test_delete_nonexistent_group_returns_zero(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        assert delete_group(conn, "ghost") == 0
+
+    def test_groups_are_independent(self, conn: sqlite3.Connection) -> None:
+        """An account can belong to multiple groups without interference."""
+        add_account(conn, "alpha", "a-id", is_practice=True)
+        add_group_member(conn, "g1", "alpha")
+        add_group_member(conn, "g2", "alpha")
+        remove_group_member(conn, "g1", "alpha")
+        assert list_group_members(conn, "g1") == []
+        assert [m.name for m in list_group_members(conn, "g2")] == ["alpha"]
 
 
 class TestAccountSwitching:

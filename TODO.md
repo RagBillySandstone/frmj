@@ -52,6 +52,10 @@ The CLI commands currently call `app.py` factories directly. Before building a G
 
 Allow bootstrapping the DB from the CSV file Oanda provides in the account hub (`History → Download`). Gives a way to back-fill history for accounts that have years of transactions before the first `frmj sync --cold` run, and provides a cross-check against the API sync. Parser should map CSV column names to the `transactions` schema and skip rows already present.
 
+### 9. Unify single- and multi-account trade planning
+
+`trade()` and `_trade_multi_account()` in `cli.py` duplicate the risk/sizing/correlation/TP-SL/confirm/execute logic — kept deliberately separate so `--multi` couldn't regress the single-account path's behavior or its large existing test suite. Once the service-layer extraction (item 6) lands, both should become thin CLI wrappers around one shared per-account planning function, removing the duplication.
+
 ---
 
 ## P3 — Test coverage

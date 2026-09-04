@@ -141,6 +141,7 @@ frmj trade EUR_USD long
 frmj trade USD_JPY short
 frmj trade AUD_USD long --dry-run    # show plan only; no order placed
 frmj trade --resume                  # execute a previously saved draft plan
+frmj trade EUR_USD long --multi my-props   # fan the same trade out to a saved account group
 ```
 
 The flow:
@@ -167,6 +168,8 @@ The flow:
 If the active account is a live account and live mode is not enabled, the `trade` command exits with a clear error before placing any order.
 
 If the order placement request times out or fails, the plan can be saved (`s`) and resumed later with `frmj trade --resume`.
+
+**`--multi GROUP`** places the same trade on every account in a saved group (see `frmj account group` below) instead of just the active account. Risk, sizing, and correlation are evaluated independently per account (each has its own NAV and open positions); the instrument, direction, and TP/SL choice are shared, and a single confirmation covers the whole group. Not supported together with `--resume`.
 
 ### `frmj close`
 
@@ -247,6 +250,19 @@ frmj account current               # show the currently active account
 frmj account remove NAME           # remove an account profile
 frmj account set-token practice    # store or update the practice API token
 frmj account set-token live        # store or update the live API token
+```
+
+#### `frmj account group`
+
+Named, reusable sets of accounts, used by `frmj trade --multi GROUP` to place the same trade on several accounts at once. A group may freely mix practice and live accounts.
+
+```sh
+frmj account group add my-props alpha    # add 'alpha' to group 'my-props' (creates the group if new)
+frmj account group add my-props beta
+frmj account group remove my-props beta  # remove one member
+frmj account group list                  # list all groups and their members
+frmj account group show my-props         # show one group's members
+frmj account group delete my-props       # delete the group entirely
 ```
 
 ### `frmj mode`
