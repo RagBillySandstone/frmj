@@ -1684,7 +1684,9 @@ class TestTagCommand:
             def commit(self) -> None:
                 pass
 
-        attached = _attach_tags(ExplodingConn(), transaction_id=1, raw_tags=["breakout"])
+        attached = _attach_tags(
+            ExplodingConn(), transaction_id=1, raw_tags=["breakout"]
+        )
         assert attached == 0
 
     def test_journal_shows_tags(
@@ -3248,9 +3250,7 @@ class TestExportCommand:
         )
         assert "3 rows" in result.output
 
-    def test_malformed_row_exported_with_blank_fields(
-        self, export_db: Path
-    ) -> None:
+    def test_malformed_row_exported_with_blank_fields(self, export_db: Path) -> None:
         """A row whose raw_json can't be parsed still appears in the export,
         with its type-specific fields left at their defaults."""
         conn = sqlite3.connect(str(export_db))
@@ -3685,6 +3685,14 @@ class TestTradeFailureAndRetry:
         combined = result.output + result.stderr
         assert "double fill" in combined or "may have been placed" in combined
 
+    def test_invalid_retry_choice_reprompts(
+        self, trade_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unrecognised retry-prompt answer re-prompts instead of crashing."""
+        result = self._invoke_with_failure(monkeypatch, "x\na")
+        assert result.exit_code == 0, result.output
+        assert "Enter R, S, or A." in result.output + result.stderr
+
     def test_successful_retry_clears_draft_plan(
         self, trade_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -4081,3 +4089,267 @@ class TestTradeMultiAccount:
         result = runner.invoke(app, ["trade", "EUR_USD", "long", "--multi", "grp"])
         assert result.exit_code == 1
         assert "Error [beta]" in result.output + result.stderr
+
+    def test_missing_risk_config_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No max_open_trades configured aborts before building any clients."""
+        path = tmp_path / "multi_no_risk.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        add_account(conn, "alpha", "alpha-acct", is_practice=True)
+        add_account(conn, "beta", "beta-acct", is_practice=True)
+        add_group_member(conn, "grp", "alpha")
+        add_group_member(conn, "grp", "beta")
+        conn.close()
+        result = runner.invoke(app, ["trade", "EUR_USD", "long", "--multi", "grp"])
+        assert result.exit_code == 1
+        assert "Error" in result.output + result.stderr
+
+    def test_market_data_failure_exits_1(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A market-data fetch failure on the primary account aborts the group."""
+
+        class FailingClient(FakeFullClient):
+            def get_instrument(self, name: str) -> InstrumentSpec:  # type: ignore[override]
+                raise RuntimeError("network down")
+
+        fakes = {
+            "alpha": FailingClient(account_id="alpha-acct"),
+            "beta": self._fake("beta-acct"),
+        }
+        result = self._invoke(monkeypatch, fakes, "")
+        assert result.exit_code == 1
+        assert "Error fetching market data" in result.output + result.stderr
+
+    def test_account_data_failure_exits_1(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An account-data fetch failure on any account aborts the group."""
+
+        class FailingClient(FakeFullClient):
+            def get_account_summary(self) -> AccountSummary:  # type: ignore[override]
+                raise RuntimeError("account data unavailable")
+
+        fakes = {
+            "alpha": self._fake("alpha-acct"),
+            "beta": FailingClient(account_id="beta-acct"),
+        }
+        result = self._invoke(monkeypatch, fakes, "")
+        assert result.exit_code == 1
+        assert "Error fetching account data [beta]" in result.output + result.stderr
+
+    def test_sizing_warnings_shown_per_account(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-fatal sizing warnings are echoed per account before the plan table."""
+        from frmj.domain.risk import RiskStrategy, SizingDecision
+
+        decision = SizingDecision(
+            capital_to_deploy=Decimal("500"),
+            strategy_used=RiskStrategy.REMAINING_MARGIN_FRACTION,
+            size_fraction=None,
+            warnings=("near max open trades",),
+        )
+        fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
+        monkeypatch.setattr("frmj.cli.evaluate_trade", lambda **kw: decision)
+        result = self._invoke(
+            monkeypatch,
+            fakes,
+            "\n\n",
+            ["trade", "EUR_USD", "long", "--multi", "grp", "--dry-run"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "near max open trades" in result.output + result.stderr
+
+    def test_correlation_hard_block_on_one_account_aborts(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CorrelatedPositionForbidden (HARD_BLOCK) on any account aborts the group."""
+        from frmj.domain.risk import CorrelatedPositionForbidden
+
+        fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
+        monkeypatch.setattr(
+            "frmj.cli.get_client_for_account", lambda account: fakes[account.name]
+        )
+        monkeypatch.setattr(
+            "frmj.cli.evaluate_correlation",
+            lambda **kw: (_ for _ in ()).throw(
+                CorrelatedPositionForbidden("blocked: correlated exposure")
+            ),
+        )
+        result = runner.invoke(app, ["trade", "EUR_USD", "long", "--multi", "grp"])
+        assert result.exit_code == 1
+        assert "Cannot trade on 'alpha'" in result.output + result.stderr
+
+    def test_compute_units_failure_exits_1(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An exception from compute_units for any account aborts the group."""
+        fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
+        monkeypatch.setattr(
+            "frmj.cli.get_client_for_account", lambda account: fakes[account.name]
+        )
+        monkeypatch.setattr(
+            "frmj.cli.compute_units",
+            lambda **kw: (_ for _ in ()).throw(ValueError("bad sizing")),
+        )
+        result = runner.invoke(app, ["trade", "EUR_USD", "long", "--multi", "grp"])
+        assert result.exit_code == 1
+        assert "Error computing units [alpha]" in result.output + result.stderr
+
+    def test_declining_confirm_cancels_group_order(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Answering 'n' at the group confirm prompt cancels without placing
+        any orders."""
+        fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
+        result = self._invoke(monkeypatch, fakes, "\n\nn\n")
+        assert result.exit_code == 0, result.output
+        assert "Order cancelled" in result.output
+        assert not fakes["alpha"].order_placed
+        assert not fakes["beta"].order_placed
+
+    def test_edit_at_confirm_reprompts_tpsl(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Answering 'e' at the group confirm prompt re-prompts for new TP/SL
+        and redisplays exit levels before confirming again."""
+        fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
+        # TP=50, SL=30, edit=e, new TP=60, new SL=40, confirm=y, note/tags skip.
+        result = self._invoke(monkeypatch, fakes, "50\n30\ne\n60\n40\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert fakes["alpha"].order_placed
+        assert fakes["beta"].order_placed
+
+    def test_invalid_retry_choice_then_retry_succeeds(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unrecognised retry-prompt answer re-prompts; choosing R after
+        that retries the failed account, which then succeeds."""
+        alpha = self._fake("alpha-acct")
+        beta = self._fake("beta-acct")
+        calls: list[int] = []
+
+        def _flaky_order(instrument: str, units_signed: int) -> OrderFill:
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("Network error")
+            alpha.order_placed = True
+            return OrderFill(
+                transaction_id="99999",
+                fill_price=Decimal("1.10005"),
+                units_filled=units_signed,
+                trade_id="99999",
+            )
+
+        alpha.place_market_order = _flaky_order  # type: ignore[method-assign]
+        fakes = {"alpha": alpha, "beta": beta}
+        # TP=50, SL=30, confirm=y, [alpha fails] invalid='x', retry='r', note/tags skip.
+        result = self._invoke(monkeypatch, fakes, "50\n30\ny\nx\nr\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert "Enter R or S." in result.output + result.stderr
+        assert alpha.order_placed
+        assert beta.order_placed
+        assert "2/2 accounts" in result.output
+
+    def test_timeout_shows_double_fill_warning(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """httpx.TimeoutException on one account's order prints a double-fill
+        caution and offers retry/skip."""
+        alpha = self._fake("alpha-acct")
+        beta = self._fake("beta-acct")
+
+        def _timeout_order(instrument: str, units_signed: int) -> OrderFill:
+            raise httpx.TimeoutException("timed out")
+
+        alpha.place_market_order = _timeout_order  # type: ignore[method-assign]
+        fakes = {"alpha": alpha, "beta": beta}
+        # TP=50, SL=30, confirm=y, [alpha times out] skip='s', note/tags skip.
+        result = self._invoke(monkeypatch, fakes, "50\n30\ny\ns\n\n\n")
+        assert result.exit_code == 0, result.output
+        combined = result.output + result.stderr
+        assert "double fill" in combined or "may have been placed" in combined
+        assert not alpha.order_placed
+        assert beta.order_placed
+
+    def test_missing_trade_id_warns_per_account(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If Oanda returns no trade_id for a filled account, a warning is
+        shown instead of attempting to attach TP/SL."""
+        alpha = self._fake("alpha-acct")
+        beta = self._fake("beta-acct")
+
+        def _no_trade_id_fill(instrument: str, units_signed: int) -> OrderFill:
+            alpha.order_placed = True
+            return OrderFill(
+                transaction_id="99999",
+                fill_price=Decimal("1.10005"),
+                units_filled=units_signed,
+                trade_id=None,
+            )
+
+        alpha.place_market_order = _no_trade_id_fill  # type: ignore[method-assign]
+        fakes = {"alpha": alpha, "beta": beta}
+        result = self._invoke(monkeypatch, fakes, "50\n30\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert "trade ID" in result.output + result.stderr
+
+    def test_tp_attach_failure_warns_per_account(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A take-profit attach failure on one account is a warning only."""
+        alpha = self._fake("alpha-acct")
+        alpha.tp_should_fail = True
+        beta = self._fake("beta-acct")
+        fakes = {"alpha": alpha, "beta": beta}
+        result = self._invoke(monkeypatch, fakes, "50\n30\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert "failed to attach take-profit" in result.output + result.stderr
+        assert alpha.order_placed
+        assert beta.order_placed
+
+    def test_sl_attach_failure_warns_unprotected_per_account(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stop-loss attach failure on one account warns that the position
+        is unprotected."""
+        alpha = self._fake("alpha-acct")
+        alpha.sl_should_fail = True
+        beta = self._fake("beta-acct")
+        fakes = {"alpha": alpha, "beta": beta}
+        result = self._invoke(monkeypatch, fakes, "50\n30\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        combined = result.output + result.stderr
+        assert "failed to attach stop-loss" in combined
+        assert "unprotected" in combined
+
+    def test_post_fill_sync_failure_warns_per_account(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A post-fill sync failure on one account is a warning only."""
+        alpha = self._fake("alpha-acct")
+        alpha.sync_should_fail = True
+        beta = self._fake("beta-acct")
+        fakes = {"alpha": alpha, "beta": beta}
+        result = self._invoke(monkeypatch, fakes, "50\n30\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert "post-fill sync failed" in result.output + result.stderr
+        assert alpha.order_placed
+
+    def test_note_and_tags_not_saved_when_fill_row_missing(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When post-fill sync hasn't brought a fill into the local DB yet,
+        the note/tags prompt warns for that account rather than discarding
+        the input silently."""
+        fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
+        # TP=50, SL=30, confirm=y, note='lost note', tags='lost-tag'.
+        result = self._invoke(monkeypatch, fakes, "50\n30\ny\nlost note\nlost-tag\n")
+        assert result.exit_code == 0, result.output
+        combined = result.output + result.stderr
+        assert "Note/tags not saved" in combined
