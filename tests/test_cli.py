@@ -31,7 +31,12 @@ from frmj.accounts import (
     set_active_account,
 )
 from frmj.app import get_db, set_config
-from frmj.cli import VALID_CONFIG_KEYS, _complete_config_key, app
+from frmj.cli import (
+    VALID_CONFIG_KEYS,
+    _complete_account_group,
+    _complete_config_key,
+    app,
+)
 from frmj.domain.sizing import InstrumentSpec, PriceQuote
 from frmj.execution.oanda import (
     AccountSummary,
@@ -998,6 +1003,89 @@ class TestAccountCommands:
             or "type" in result.output + result.stderr
         )
 
+    def test_account_add_empty_name_exits_1(self, db_path: Path) -> None:
+        """A whitespace-only account name exits 1 before any prompting."""
+        result = runner.invoke(app, ["account", "add", "   "])
+        assert result.exit_code == 1
+        assert "cannot be empty" in result.output + result.stderr
+
+    def test_account_add_integrity_error_exits_1(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A duplicate-name race at insert time (past the pre-check) surfaces
+        the same 'already exists' error rather than an unhandled traceback."""
+        import sqlite3
+
+        def _raise(
+            conn: object, name: str, oanda_id: str, *, is_practice: bool
+        ) -> None:
+            raise sqlite3.IntegrityError("UNIQUE constraint failed")
+
+        monkeypatch.setattr("frmj.cli.add_account", _raise)
+        result = runner.invoke(
+            app, ["account", "add", "new-acct"], input="101-001-99999-001\npractice\n"
+        )
+        assert result.exit_code == 1
+        assert "already exists" in result.output + result.stderr
+
+    def test_account_add_first_account_auto_activates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Adding an account to an empty database auto-activates it."""
+        monkeypatch.setenv("FRMJ_DB_PATH", str(tmp_path / "fresh.db"))
+        result = runner.invoke(
+            app, ["account", "add", "first"], input="101-001-99999-001\npractice\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "set as active" in result.output
+
+    def test_account_add_no_token_shows_reminder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When no token is stored for the new account's environment, a
+        reminder to run 'account set-token' is printed."""
+        monkeypatch.setenv("FRMJ_DB_PATH", str(tmp_path / "fresh.db"))
+        monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
+        result = runner.invoke(
+            app, ["account", "add", "first"], input="101-001-99999-001\npractice\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "No practice token stored" in result.output
+
+    def test_account_set_token_invalid_env_type_exits_1(self, db_path: Path) -> None:
+        """An env-type argument other than 'practice'/'live' exits 1."""
+        result = runner.invoke(app, ["account", "set-token", "foo"])
+        assert result.exit_code == 1
+        assert "must be 'practice' or 'live'" in result.output + result.stderr
+
+    def test_account_set_token_no_active_account_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Calling set-token with no argument and no active account exits 1."""
+        monkeypatch.setenv("FRMJ_DB_PATH", str(tmp_path / "no-active.db"))
+        result = runner.invoke(app, ["account", "set-token"])
+        assert result.exit_code == 1
+        assert "No active account" in result.output + result.stderr
+
+    def test_account_set_token_store_failure_exits_1(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A keychain-unavailable error from store_token surfaces as exit 1."""
+
+        def _raise(token: str, *, practice: bool) -> None:
+            raise RuntimeError("No keyring backend available")
+
+        monkeypatch.setattr("frmj.cli.store_token", _raise)
+        result = runner.invoke(app, ["account", "set-token"], input="my-tok\n")
+        assert result.exit_code == 1
+        assert "Error" in result.output + result.stderr
+
+    def test_account_rename_empty_new_name_exits_1(self, db_path: Path) -> None:
+        """A whitespace-only new name exits 1 before touching the database."""
+        result = runner.invoke(app, ["account", "rename", "practice", "   "])
+        assert result.exit_code == 1
+        assert "cannot be empty" in result.output + result.stderr
+
 
 # ---------------------------------------------------------------------------
 # account group sub-commands
@@ -1069,6 +1157,16 @@ class TestAccountGroupCommands:
         assert "g1" in result.output
         assert "practice" in result.output
         assert "funded" in result.output
+
+    def test_complete_account_group_filters_by_prefix(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The shell tab-completion callback returns only matching group names,
+        opening its own DB connection independently of any CLI invocation."""
+        runner.invoke(app, ["account", "group", "add", "prop-firms", "practice"])
+        runner.invoke(app, ["account", "group", "add", "personal", "practice"])
+        assert _complete_account_group("prop") == ["prop-firms"]
+        assert set(_complete_account_group("")) == {"prop-firms", "personal"}
 
     def test_list_empty_shows_message(self, db_path: Path) -> None:
         result = runner.invoke(app, ["account", "group", "list"])
