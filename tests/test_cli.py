@@ -3114,6 +3114,86 @@ class TestStatsCommand:
         assert result.exit_code == 0, result.output
         assert "1 closed trades" in result.output
 
+    def _insert_financing(
+        self,
+        path: Path,
+        oanda_id: str,
+        raw_json: str,
+    ) -> None:
+        conn = sqlite3.connect(str(path))
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+            "VALUES (?, 'acct-1', 'DAILY_FINANCING', '2026-04-25T22:00:00Z', ?)",
+            (oanda_id, raw_json),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_financing_by_instrument_section_shown(self, stats_db: Path) -> None:
+        """DAILY_FINANCING children are summed per instrument and shown under
+        a 'Financing by instrument' section."""
+        self._seed_fills(
+            stats_db,
+            [("1", "2026-04-25T09:00:00Z", "-10000", "30.00")],
+        )
+        self._insert_financing(
+            stats_db, "500", '{"instrument":"EUR_USD","amount":"-1.25"}'
+        )
+        self._insert_financing(
+            stats_db, "501", '{"instrument":"GBP_USD","amount":"0.50"}'
+        )
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        assert "Financing by instrument" in result.output
+        assert "EUR_USD" in result.output
+        assert "GBP_USD" in result.output
+        assert "1.25" in result.output
+        assert "0.50" in result.output
+
+    def test_financing_entries_summed_per_instrument(self, stats_db: Path) -> None:
+        """Multiple financing rows for the same instrument are summed."""
+        self._seed_fills(
+            stats_db,
+            [("1", "2026-04-25T09:00:00Z", "-10000", "30.00")],
+        )
+        self._insert_financing(
+            stats_db, "500", '{"instrument":"EUR_USD","amount":"-1.25"}'
+        )
+        self._insert_financing(
+            stats_db, "501", '{"instrument":"EUR_USD","amount":"-0.75"}'
+        )
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        assert "2.00" in result.output
+
+    def test_financing_parent_row_excluded_from_breakdown(
+        self, stats_db: Path
+    ) -> None:
+        """The DAILY_FINANCING parent summary row (no 'instrument' field) is
+        skipped rather than producing a spurious breakdown entry."""
+        self._seed_fills(
+            stats_db,
+            [("1", "2026-04-25T09:00:00Z", "-10000", "30.00")],
+        )
+        self._insert_financing(stats_db, "500", '{"financing":"-2.00"}')
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        assert "Financing by instrument" not in result.output
+
+    def test_malformed_financing_row_skipped(self, stats_db: Path) -> None:
+        """A financing row with a non-numeric amount is skipped rather than
+        crashing stats."""
+        self._seed_fills(
+            stats_db,
+            [("1", "2026-04-25T09:00:00Z", "-10000", "30.00")],
+        )
+        self._insert_financing(
+            stats_db, "500", '{"instrument":"EUR_USD","amount":"not-a-number"}'
+        )
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        assert "Financing by instrument" not in result.output
+
 
 # ---------------------------------------------------------------------------
 # export command

@@ -1963,6 +1963,12 @@ def stats() -> None:
             WHERE tx.type = 'ORDER_FILL'
             """
         ).fetchall()
+        # Financing breakdown: per-instrument DAILY_FINANCING children only —
+        # the parent summary row carries no "instrument" field and is
+        # skipped below.
+        financing_rows = conn.execute(
+            "SELECT raw_json FROM transactions WHERE type = 'DAILY_FINANCING'"
+        ).fetchall()
     finally:
         conn.close()
 
@@ -2005,7 +2011,21 @@ def stats() -> None:
         except Exception:
             continue
 
-    _display_stats(trades, tag_pl)
+    # Build instrument → list[Decimal] map of financing amounts.
+    financing_by_instrument: dict[str, list[Decimal]] = {}
+    for fr in financing_rows:
+        try:
+            data = json.loads(fr["raw_json"])
+            instrument = data.get("instrument")
+            if not instrument:
+                continue  # parent summary row — no per-instrument detail
+            amount = Decimal(data.get("amount") or data.get("financing") or "0")
+            if amount != 0:
+                financing_by_instrument.setdefault(instrument, []).append(amount)
+        except Exception:
+            continue
+
+    _display_stats(trades, tag_pl, financing_by_instrument)
 
 
 # ---------------------------------------------------------------------------
@@ -2349,6 +2369,7 @@ def _watch_loop(interval: int) -> None:
 def _display_stats(
     trades: list[ClosedTrade],
     tag_pl: dict[str, list[Decimal]] | None = None,
+    financing_by_instrument: dict[str, list[Decimal]] | None = None,
 ) -> None:
     """Render the full stats report for the given closed trades."""
     summary = compute_summary(trades)
@@ -2513,6 +2534,21 @@ def _display_stats(
         tag_pl_w = max(_pl_visible_width(total) for _, _, total in by_tag)
         for t, count, total in by_tag:
             typer.echo(f"  {t:<{tw}}  {count:>4}  {_color_pl_padded(total, tag_pl_w)}")
+
+    if financing_by_instrument:
+        by_financing: list[tuple[str, int, Decimal]] = []
+        for instr, amounts in financing_by_instrument.items():
+            by_financing.append((instr, len(amounts), sum(amounts, Decimal(0))))
+        by_financing.sort(key=lambda r: r[2], reverse=True)
+        typer.echo("")
+        typer.echo("Financing by instrument")
+        typer.echo("─" * 50)
+        fw = max(len(r[0]) for r in by_financing)
+        financing_w = max(_pl_visible_width(total) for _, _, total in by_financing)
+        for instr, count, total in by_financing:
+            typer.echo(
+                f"  {instr:<{fw}}  {count:>4}  {_color_pl_padded(total, financing_w)}"
+            )
 
 
 def _make_export_record(
