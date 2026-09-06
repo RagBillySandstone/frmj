@@ -189,7 +189,7 @@ Show trade performance statistics from the local journal. Auto-syncs before disp
 frmj stats
 ```
 
-Output includes: win rate, average P/L, total P/L, best/worst trade, and breakdowns by instrument, weekday, hour (UTC), and tag.
+Output includes: win rate, average P/L, total P/L, best/worst trade, breakdowns by instrument, weekday, hour (UTC), and tag, and a total financing paid/earned breakdown by instrument.
 
 ### `frmj journal`
 
