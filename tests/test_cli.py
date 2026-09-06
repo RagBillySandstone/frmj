@@ -33,10 +33,12 @@ from frmj.accounts import (
 from frmj.app import get_db, set_config
 from frmj.cli import (
     VALID_CONFIG_KEYS,
+    _attach_tags,
     _complete_account_group,
     _complete_config_key,
     _complete_direction,
     _complete_instrument,
+    _validate_tag,
     app,
 )
 from frmj.domain.sizing import InstrumentSpec, PriceQuote
@@ -1657,6 +1659,23 @@ class TestTagCommand:
         result = runner.invoke(app, ["tag", "99", "bad@tag"])
         assert "Skipped" in result.output + result.stderr
 
+    def test_validate_tag_rejects_blank(self) -> None:
+        """Whitespace-only input normalises to None (no valid tag)."""
+        assert _validate_tag("   ") is None
+
+    def test_attach_tags_swallows_insert_errors(self, tag_db: Path) -> None:
+        """A DB error on one tag insert is swallowed and skipped, not raised."""
+
+        class ExplodingConn:
+            def execute(self, sql: str, params: tuple[object, ...] = ()) -> object:
+                raise sqlite3.OperationalError("boom")
+
+            def commit(self) -> None:
+                pass
+
+        attached = _attach_tags(ExplodingConn(), transaction_id=1, raw_tags=["breakout"])
+        assert attached == 0
+
     def test_journal_shows_tags(
         self, tag_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1906,6 +1925,29 @@ class TestJournalCommand:
         result = runner.invoke(app, ["journal"])
         assert result.exit_code == 0, result.output
         assert "777" in result.output
+
+    def test_auto_sync_non_runtime_error_shows_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-RuntimeError raised during auto-sync is caught by the
+        generic handler and surfaces as a warning, not a crash."""
+
+        class ExplodingClient:
+            account_id = "acct-1"
+
+            def get_transactions_since(self, from_id: str | None = None) -> list:
+                raise ValueError("unexpected sync failure")
+
+        path = tmp_path / "explode_sync.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        conn.close()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: ExplodingClient())
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        assert "[sync] Warning: sync failed" in result.output + result.stderr
 
     def test_pl_shown_for_closing_order_fill(self, journal_db: Path) -> None:
         """A closing ORDER_FILL (non-zero pl) shows the realised P/L amount."""
@@ -2798,6 +2840,105 @@ class TestStatsCommand:
         # total_pl=0 and avg_pl=0 both pass through _color_pl(Decimal("0")),
         # which returns plain "$0.00" without a + prefix or ANSI color codes.
         assert "$0.00" in result.output
+
+    def test_auto_sync_ingested_count_shown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When auto-sync brings in new rows, the count is printed to stdout."""
+        path = tmp_path / "stats_auto_sync.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        conn.close()
+        new_row = _row("9002")
+        monkeypatch.setattr(
+            "frmj.cli.get_client",
+            lambda conn: FakeClient(account_id="acct-1", responses=[[new_row]]),
+        )
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        assert "[sync] +1 transactions" in result.output
+
+    def test_auto_sync_runtime_error_shows_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A missing token (RuntimeError from get_client) surfaces as a
+        warning; stats still runs against existing local data."""
+        path = tmp_path / "stats_no_token.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        conn.close()
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        assert "[sync] Warning:" in result.output + result.stderr
+
+    def test_auto_sync_non_runtime_error_shows_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-RuntimeError raised during auto-sync is caught by the
+        generic handler and surfaces as a warning, not a crash."""
+
+        class ExplodingClient:
+            account_id = "acct-1"
+
+            def get_transactions_since(self, from_id: str | None = None) -> list:
+                raise ValueError("unexpected sync failure")
+
+        path = tmp_path / "stats_explode_sync.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        conn.close()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: ExplodingClient())
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        assert "[sync] Warning: sync failed" in result.output + result.stderr
+
+    def test_malformed_transaction_row_skipped(self, stats_db: Path) -> None:
+        """A row with a non-numeric ``pl`` field raises when converted to
+        Decimal; it must be skipped rather than crashing the whole command."""
+        conn = sqlite3.connect(str(stats_db))
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+            "VALUES ('1', 'acct-1', 'ORDER_FILL', '2026-04-25T09:00:00Z', "
+            '\'{"instrument":"EUR_USD","units":"-10000","pl":"not-a-number"}\')'
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        assert "No closed trades" in result.output
+
+    def test_malformed_tag_row_skipped(self, stats_db: Path) -> None:
+        """A tagged row with a non-numeric ``pl`` field is skipped when
+        building the by-tag P/L breakdown, rather than crashing stats."""
+        self._seed_fills(
+            stats_db,
+            [("1", "2026-04-25T09:00:00Z", "-10000", "30.00")],
+        )
+        conn = sqlite3.connect(str(stats_db))
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+            "VALUES ('2', 'acct-1', 'ORDER_FILL', '2026-04-26T10:00:00Z', "
+            '\'{"instrument":"EUR_USD","units":"-10000","pl":"not-a-number"}\')'
+        )
+        conn.commit()
+        bad_txn_id = conn.execute(
+            "SELECT id FROM transactions WHERE oanda_id = '2'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO tags (transaction_id, tag) VALUES (?, 'breakout')",
+            (bad_txn_id,),
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        assert "1 closed trades" in result.output
 
 
 # ---------------------------------------------------------------------------
