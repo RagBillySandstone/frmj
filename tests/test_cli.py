@@ -2113,6 +2113,33 @@ class TestJournalCommand:
         # The transaction row must appear; no crash despite the bad amount.
         assert "5099" in result.output
 
+    def test_order_fill_invalid_units_handled_gracefully(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ORDER_FILL rows with a non-numeric ``units`` field are displayed
+        without instrument/direction detail — the ``except Exception: pass``
+        block suppresses the error rather than crashing journal."""
+        path = tmp_path / "fill_bad.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        monkeypatch.setattr(
+            "frmj.cli.get_client",
+            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+        )
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+            "VALUES ('5100', 'acct-1', 'ORDER_FILL', "
+            "'2026-04-25T22:00:00.000000Z', "
+            '\'{"instrument":"EUR_USD","units":"not-a-number"}\')'
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        assert "5100" in result.output
+
 
 # ---------------------------------------------------------------------------
 # trade — confirmed execution path with TP/SL attachment
