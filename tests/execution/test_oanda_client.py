@@ -11,9 +11,11 @@ HTTP call around those helpers (or perform their own response interpretation).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
+from typing import Any
 
+import httpx
 import pytest
 
 from frmj.execution.oanda import OandaClient
@@ -22,42 +24,118 @@ from frmj.execution.oanda import OandaClient
 # ---------------------------------------------------------------------------
 # Minimal HTTP mock
 # ---------------------------------------------------------------------------
+#
+# ``_FakeHttp`` replaces ``OandaClient._http`` (a real ``httpx.Client``) with a
+# stand-in that hands back pre-built responses in call order, one per
+# get/post/put invocation the client makes. Most client methods make exactly
+# one HTTP call, so a single response is enough; methods that page (the
+# transaction-sync helpers) or that make follow-up calls (cross-pair price
+# conversion) are tested by queuing up multiple responses.
 
 
 @dataclass
 class _FakeResponse:
-    """Minimal stand-in for an httpx.Response used by OandaClient methods."""
+    """Stand-in for a successful ``httpx.Response``."""
 
-    _data: dict
+    _data: dict[str, Any]
 
     def raise_for_status(self) -> None:
-        """No-op: test doubles always return 200."""
+        """No-op: this stand-in always represents a 2xx response."""
 
-    def json(self) -> dict:
+    def json(self) -> dict[str, Any]:
         """Return the pre-built response dict."""
         return self._data
 
 
 @dataclass
+class _ErrorResponse:
+    """Stand-in for an ``httpx.Response`` whose status indicates failure.
+
+    ``raise_for_status`` mirrors real httpx behaviour: it raises
+    ``httpx.HTTPStatusError`` rather than returning normally. Building a real
+    ``httpx.Request``/``httpx.Response`` pair keeps the exception faithful to
+    what ``OandaClient`` actually has to handle (e.g. in
+    ``_currency_to_home``'s fallback logic, which catches this exception type).
+    """
+
+    status_code: int
+
+    def raise_for_status(self) -> None:
+        """Raise ``httpx.HTTPStatusError``, as a real error response would."""
+        request = httpx.Request("GET", "https://example.test/")
+        response = httpx.Response(self.status_code, request=request)
+        raise httpx.HTTPStatusError(
+            f"HTTP {self.status_code}", request=request, response=response
+        )
+
+    def json(self) -> dict[str, Any]:
+        """Never reached: callers must check ``raise_for_status`` first."""
+        raise AssertionError("json() called on an error response")
+
+
+@dataclass
+class _RecordedCall:
+    """One get/post/put call captured by ``_FakeHttp``, for assertions."""
+
+    method: str
+    url: str
+    kwargs: dict[str, Any]
+
+
+@dataclass
 class _FakeHttp:
-    """Replaces ``OandaClient._http``; stores the last request for inspection."""
+    """Replaces ``OandaClient._http``.
 
-    response_data: dict
+    Responses are consumed from ``_responses`` in the order the client makes
+    HTTP calls, regardless of method (get/post/put share one queue — that
+    matches how ``OandaClient`` issues calls sequentially, never concurrently).
+    Every call is recorded in ``calls`` so tests can assert on the endpoint
+    and parameters used.
+    """
 
-    def post(self, url: str, **kwargs: object) -> _FakeResponse:
-        """Return the configured response regardless of URL or body."""
-        return _FakeResponse(self.response_data)
+    _responses: list[_FakeResponse | _ErrorResponse]
+    calls: list[_RecordedCall] = field(default_factory=list)
+    closed: bool = False
+
+    def _next(
+        self, method: str, url: str, **kwargs: Any
+    ) -> _FakeResponse | _ErrorResponse:
+        """Record the call and pop the next queued response."""
+        self.calls.append(_RecordedCall(method, url, kwargs))
+        return self._responses.pop(0)
+
+    def get(self, url: str, **kwargs: Any) -> _FakeResponse | _ErrorResponse:
+        return self._next("GET", url, **kwargs)
+
+    def post(self, url: str, **kwargs: Any) -> _FakeResponse | _ErrorResponse:
+        return self._next("POST", url, **kwargs)
+
+    def put(self, url: str, **kwargs: Any) -> _FakeResponse | _ErrorResponse:
+        return self._next("PUT", url, **kwargs)
+
+    def close(self) -> None:
+        """Record that the connection pool was released."""
+        self.closed = True
 
 
-def _make_client(response_data: dict) -> OandaClient:
-    """Construct an OandaClient with a stubbed HTTP layer."""
+def _make_client(
+    *responses: dict[str, Any] | _FakeResponse | _ErrorResponse,
+) -> OandaClient:
+    """Construct an OandaClient with a stubbed HTTP layer.
+
+    Each positional argument is consumed by one HTTP call, in the order the
+    client makes them. A bare ``dict`` is treated as a successful response
+    body (wrapped in ``_FakeResponse``); pass an ``_ErrorResponse`` explicitly
+    to simulate a 4xx/5xx.
+    """
+    wrapped = [_FakeResponse(r) if isinstance(r, dict) else r for r in responses]
     client = OandaClient(
         token="dummy-token",
         account_id="101-001-test-001",
         practice=True,
     )
     # Replace the real httpx.Client with our stub.
-    client._http = _FakeHttp(response_data)  # type: ignore[assignment]
+    client._http = _FakeHttp(wrapped)  # type: ignore[assignment]
     return client
 
 
