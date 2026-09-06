@@ -1166,10 +1166,14 @@ class FakeFullClient:
     sl_attached: str | None = None  # price string passed to attach_stop_loss
     tp_should_fail: bool = False
     sl_should_fail: bool = False
+    sync_rows: list[TransactionRow] = field(default_factory=list)
+    sync_should_fail: bool = False
 
     # --- ClientProtocol (for the auto-sync step) ----------------------------
     def get_transactions_since(self, from_id: str | None = None) -> list:
-        return []
+        if self.sync_should_fail:
+            raise RuntimeError("Oanda unreachable during sync")
+        return self.sync_rows
 
     # --- Trade-flow methods --------------------------------------------------
     def get_account_summary(self) -> AccountSummary:
@@ -2847,6 +2851,20 @@ class TestPositionsCommand:
         assert result.exit_code == 1
         assert "Error" in result.output + result.stderr
 
+    def test_get_client_error_exits_1(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A missing/invalid token surfaces as a RuntimeError from get_client
+        itself (before any Oanda call is attempted)."""
+
+        def _fail(conn: object) -> None:
+            raise RuntimeError("No token configured for this account")
+
+        monkeypatch.setattr("frmj.cli.get_client", _fail)
+        result = runner.invoke(app, ["positions"])
+        assert result.exit_code == 1
+        assert "Error" in result.output + result.stderr
+
 
 # ---------------------------------------------------------------------------
 # close command
@@ -2973,6 +2991,43 @@ class TestCloseCommand:
         result = runner.invoke(app, ["close", "EUR_USD"])
         assert result.exit_code == 1
         assert "Error" in result.output + result.stderr
+
+    def test_get_client_error_exits_1(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _fail(conn: object) -> None:
+            raise RuntimeError("No token configured for this account")
+
+        monkeypatch.setattr("frmj.cli.get_client", _fail)
+        result = runner.invoke(app, ["close", "EUR_USD"])
+        assert result.exit_code == 1
+        assert "Error" in result.output + result.stderr
+
+    def test_post_close_sync_reports_ingested_count(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After closing at least one ticket, the CLI auto-syncs; new rows
+        pulled in during that sync are reported."""
+        fake = FakeFullClient(
+            open_trades=[_open_trade(trade_id="6368")],
+            sync_rows=[_row("9001", account_id="acct-1")],
+        )
+        result = self._invoke(monkeypatch, fake, inputs="y\n")
+        assert result.exit_code == 0, result.output
+        assert "[sync] +1 transactions" in result.output
+
+    def test_post_close_sync_failure_shows_warning(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A sync failure after a successful close must not crash the command
+        — it surfaces as a warning instead."""
+        fake = FakeFullClient(
+            open_trades=[_open_trade(trade_id="6368")],
+            sync_should_fail=True,
+        )
+        result = self._invoke(monkeypatch, fake, inputs="y\n")
+        assert result.exit_code == 0, result.output
+        assert "[sync] Warning: sync failed" in result.output + result.stderr
 
 
 # ---------------------------------------------------------------------------
