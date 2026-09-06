@@ -2930,6 +2930,20 @@ class TestStatsCommand:
         # which returns plain "$0.00" without a + prefix or ANSI color codes.
         assert "$0.00" in result.output
 
+    def test_shows_instrument_and_direction_breakdown(self, stats_db: Path) -> None:
+        """When one instrument has closed trades on both sides, an extra
+        'By instrument & direction' section breaks out each side."""
+        self._seed_fills(
+            stats_db,
+            [
+                ("1", "2026-04-25T09:00:00Z", "-10000", "30.00"),  # LONG close
+                ("2", "2026-04-26T10:00:00Z", "10000", "-15.00"),  # SHORT close
+            ],
+        )
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        assert "By instrument & direction" in result.output
+
     def test_auto_sync_ingested_count_shown(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
