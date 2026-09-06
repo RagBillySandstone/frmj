@@ -55,15 +55,3 @@ Allow bootstrapping the DB from the CSV file Oanda provides in the account hub (
 ### 9. Unify single- and multi-account trade planning
 
 `trade()` and `_trade_multi_account()` in `cli.py` duplicate the risk/sizing/correlation/TP-SL/confirm/execute logic — kept deliberately separate so `--multi` couldn't regress the single-account path's behavior or its large existing test suite. Once the service-layer extraction (item 6) lands, both should become thin CLI wrappers around one shared per-account planning function, removing the duplication.
-
----
-
-## P3 — Test coverage
-
-### 8. OandaClient HTTP method coverage
-
-`oanda.py` is at 62% line coverage. The untested lines are the HTTP client
-methods beyond `place_market_order` (`get_transactions_since`, `get_account_summary`,
-`get_instrument`, `get_price`, `get_open_trades`, `close_trade`, etc.).
-The existing `_FakeHttp` pattern in `tests/execution/test_oanda_client.py` can be
-extended to cover each method's response-parsing logic and error paths.
