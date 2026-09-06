@@ -501,6 +501,45 @@ class TestAttachExitOrders:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# _currency_to_home (exercised directly — its fallback/error paths aren't
+# reachable through get_price without a currency Oanda has neither a direct
+# nor inverted pair for, which get_price's own tests don't need)
+# ---------------------------------------------------------------------------
+
+
+class TestCurrencyToHome:
+    def test_falls_back_to_inverted_pair_when_direct_unavailable(self) -> None:
+        """When ``{currency}_{home}`` isn't a recognised Oanda pair, the client
+        must retry with the inverted pair ``{home}_{currency}`` and invert the
+        resulting mid price."""
+        client = _make_client(
+            _ErrorResponse(400),  # GBP_USD: not recognised on this account
+            _pricing_response("0.7900", "0.7902"),  # USD_GBP succeeds instead
+        )
+        rate = client._currency_to_home("GBP", "USD")
+        assert rate == Decimal("1") / Decimal("0.7901")
+
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        assert [c.kwargs["params"]["instruments"] for c in http.calls] == [
+            "GBP_USD",
+            "USD_GBP",
+        ]
+
+    def test_raises_value_error_when_neither_pair_available(self) -> None:
+        """When neither the direct nor inverted pair is recognised, the client
+        cannot resolve a conversion rate and must raise ``ValueError`` rather
+        than silently returning a wrong rate."""
+        client = _make_client(_ErrorResponse(400), _ErrorResponse(400))
+        with pytest.raises(ValueError, match="Cannot determine"):
+            client._currency_to_home("GBP", "USD")
+
+    def test_same_currency_needs_no_lookup(self) -> None:
+        """currency == home short-circuits to 1 with no HTTP call at all."""
+        client = _make_client()
+        assert client._currency_to_home("USD", "USD") == Decimal("1")
+
+
 class TestLifecycle:
     def test_close_releases_the_connection_pool(self) -> None:
         """close() must delegate to the underlying HTTP client's close()."""
