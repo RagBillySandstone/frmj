@@ -35,6 +35,8 @@ from frmj.cli import (
     VALID_CONFIG_KEYS,
     _complete_account_group,
     _complete_config_key,
+    _complete_direction,
+    _complete_instrument,
     app,
 )
 from frmj.domain.sizing import InstrumentSpec, PriceQuote
@@ -99,6 +101,27 @@ def db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     set_active_account(conn, "practice")
     conn.close()
     return path
+
+
+# ---------------------------------------------------------------------------
+# Shell tab-completion helpers (static lists — no DB access)
+# ---------------------------------------------------------------------------
+
+
+class TestCompletionHelpers:
+    def test_complete_instrument_matches_prefix_case_insensitively(self) -> None:
+        assert "eur_usd" in _complete_instrument("EUR")
+        assert all(p.startswith("eur") for p in _complete_instrument("eur"))
+
+    def test_complete_instrument_no_match_returns_empty(self) -> None:
+        assert _complete_instrument("zzz") == []
+
+    def test_complete_direction_matches_prefix(self) -> None:
+        assert _complete_direction("lo") == ["long"]
+        assert _complete_direction("s") == ["short"]
+
+    def test_complete_direction_no_match_returns_empty(self) -> None:
+        assert _complete_direction("x") == []
 
 
 # ---------------------------------------------------------------------------
