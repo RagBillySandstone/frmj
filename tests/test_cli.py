@@ -539,6 +539,19 @@ class TestConfigCommands:
         assert result.exit_code == 0
         assert "no active account" in result.output.lower()
 
+    def test_config_unset_removes_existing_key(self, db_path: Path) -> None:
+        runner.invoke(app, ["config", "set", "max_open_trades", "5"])
+        result = runner.invoke(app, ["config", "unset", "max_open_trades"])
+        assert result.exit_code == 0, result.output
+        assert "Unset max_open_trades" in result.output
+        get_result = runner.invoke(app, ["config", "get", "max_open_trades"])
+        assert get_result.exit_code == 1
+
+    def test_config_unset_missing_key_exits_1(self, db_path: Path) -> None:
+        result = runner.invoke(app, ["config", "unset", "never_set_key"])
+        assert result.exit_code == 1
+        assert "was not set" in result.output
+
 
 # ---------------------------------------------------------------------------
 # config check
@@ -717,6 +730,55 @@ class TestConfigCheck:
         assert "hard_block (default)" in result.output
         assert "never (default)" in result.output
 
+    def test_token_practice_env_var_shows_ok(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OANDA_API_TOKEN_PRACTICE takes priority over the legacy env var for
+        a practice account, and is reported as its own source."""
+        monkeypatch.setenv("OANDA_API_TOKEN_PRACTICE", "practice-tok")
+        result = runner.invoke(app, ["config", "check"])
+        assert result.exit_code == 0, result.output
+        assert "OANDA_API_TOKEN_PRACTICE" in result.output
+
+    def test_token_from_keychain_shows_ok(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With no token env vars set, a keychain-stored token is reported as
+        an OS keychain source."""
+        monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
+        monkeypatch.delenv("OANDA_API_TOKEN_PRACTICE", raising=False)
+        monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: "kr-tok")
+        result = runner.invoke(app, ["config", "check"])
+        assert result.exit_code == 0, result.output
+        assert "OS keychain" in result.output
+
+    def test_max_open_trades_non_positive_is_invalid(self, db_path: Path) -> None:
+        """max_open_trades <= 0 shows INVALID and exits 1."""
+        runner.invoke(app, ["config", "set", "max_open_trades", "0"])
+        result = runner.invoke(app, ["config", "check"])
+        assert result.exit_code == 1
+        assert "INVALID" in result.output
+        assert "max_open_trades" in result.output
+
+    def test_correlation_blocking_mode_explicit_valid_value_is_ok(
+        self, db_path: Path
+    ) -> None:
+        """An explicitly-set, recognised correlation_blocking_mode shows OK
+        with its own value (not the default label)."""
+        runner.invoke(app, ["config", "set", "correlation_blocking_mode", "hard_block"])
+        result = runner.invoke(app, ["config", "check"])
+        assert "MISSING" not in result.output
+        assert "INVALID" not in result.output
+        assert "correlation_blocking_mode" in result.output
+
+    def test_invalid_correlation_blocking_mode_exits_1(self, db_path: Path) -> None:
+        """An unknown correlation_blocking_mode value shows INVALID and exits 1."""
+        runner.invoke(app, ["config", "set", "correlation_blocking_mode", "not_valid"])
+        result = runner.invoke(app, ["config", "check"])
+        assert result.exit_code == 1
+        assert "INVALID" in result.output
+        assert "correlation_blocking_mode" in result.output
+
 
 # ---------------------------------------------------------------------------
 # config set-token / config unset-token
@@ -745,6 +807,14 @@ class TestConfigTokenCommands:
         result = runner.invoke(app, ["config", "set-token"], input="super-secret\n")
         assert "super-secret" not in result.output
 
+    def test_set_token_no_active_account_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FRMJ_DB_PATH", str(tmp_path / "no-active.db"))
+        result = runner.invoke(app, ["config", "set-token"])
+        assert result.exit_code == 1
+        assert "No active account" in result.output + result.stderr
+
     def test_set_token_exits_1_on_no_keyring(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -770,6 +840,14 @@ class TestConfigTokenCommands:
         assert result.exit_code == 0, result.output
         assert "removed" in result.output.lower()
         assert deleted == [True]
+
+    def test_unset_token_no_active_account_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FRMJ_DB_PATH", str(tmp_path / "no-active.db"))
+        result = runner.invoke(app, ["config", "unset-token"])
+        assert result.exit_code == 1
+        assert "No active account" in result.output + result.stderr
 
     def test_unset_token_exits_1_on_no_keyring(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
