@@ -1963,9 +1963,8 @@ def stats() -> None:
             WHERE tx.type = 'ORDER_FILL'
             """
         ).fetchall()
-        # Financing breakdown: per-instrument DAILY_FINANCING children only —
-        # the parent summary row carries no "instrument" field and is
-        # skipped below.
+        # Financing breakdown: each DAILY_FINANCING row's "positionFinancings"
+        # array is unpacked per-instrument below.
         financing_rows = conn.execute(
             "SELECT raw_json FROM transactions WHERE type = 'DAILY_FINANCING'"
         ).fetchall()
@@ -2011,17 +2010,21 @@ def stats() -> None:
         except Exception:
             continue
 
-    # Build instrument → list[Decimal] map of financing amounts.
+    # Build instrument → list[Decimal] map of financing amounts. Each
+    # DAILY_FINANCING row is a single self-contained transaction: the
+    # top-level "financing" field is the day's account-wide total, and the
+    # "positionFinancings" array carries the per-instrument breakdown.
     financing_by_instrument: dict[str, list[Decimal]] = {}
     for fr in financing_rows:
         try:
             data = json.loads(fr["raw_json"])
-            instrument = data.get("instrument")
-            if not instrument:
-                continue  # parent summary row — no per-instrument detail
-            amount = Decimal(data.get("amount") or data.get("financing") or "0")
-            if amount != 0:
-                financing_by_instrument.setdefault(instrument, []).append(amount)
+            for pf in data.get("positionFinancings", []):
+                instrument = pf.get("instrument")
+                if not instrument:
+                    continue
+                amount = Decimal(pf.get("financing") or "0")
+                if amount != 0:
+                    financing_by_instrument.setdefault(instrument, []).append(amount)
         except Exception:
             continue
 

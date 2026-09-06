@@ -3130,17 +3130,18 @@ class TestStatsCommand:
         conn.close()
 
     def test_financing_by_instrument_section_shown(self, stats_db: Path) -> None:
-        """DAILY_FINANCING children are summed per instrument and shown under
-        a 'Financing by instrument' section."""
+        """Each DAILY_FINANCING row's positionFinancings entries are summed
+        per instrument and shown under a 'Financing by instrument' section."""
         self._seed_fills(
             stats_db,
             [("1", "2026-04-25T09:00:00Z", "-10000", "30.00")],
         )
         self._insert_financing(
-            stats_db, "500", '{"instrument":"EUR_USD","amount":"-1.25"}'
-        )
-        self._insert_financing(
-            stats_db, "501", '{"instrument":"GBP_USD","amount":"0.50"}'
+            stats_db,
+            "500",
+            '{"financing":"-0.75","positionFinancings":['
+            '{"instrument":"EUR_USD","financing":"-1.25"},'
+            '{"instrument":"GBP_USD","financing":"0.50"}]}',
         )
         result = runner.invoke(app, ["stats"])
         assert result.exit_code == 0, result.output
@@ -3151,44 +3152,70 @@ class TestStatsCommand:
         assert "0.50" in result.output
 
     def test_financing_entries_summed_per_instrument(self, stats_db: Path) -> None:
-        """Multiple financing rows for the same instrument are summed."""
+        """Multiple positionFinancings entries for the same instrument,
+        across different days, are summed."""
         self._seed_fills(
             stats_db,
             [("1", "2026-04-25T09:00:00Z", "-10000", "30.00")],
         )
         self._insert_financing(
-            stats_db, "500", '{"instrument":"EUR_USD","amount":"-1.25"}'
+            stats_db,
+            "500",
+            '{"financing":"-1.25","positionFinancings":['
+            '{"instrument":"EUR_USD","financing":"-1.25"}]}',
         )
         self._insert_financing(
-            stats_db, "501", '{"instrument":"EUR_USD","amount":"-0.75"}'
+            stats_db,
+            "501",
+            '{"financing":"-0.75","positionFinancings":['
+            '{"instrument":"EUR_USD","financing":"-0.75"}]}',
         )
         result = runner.invoke(app, ["stats"])
         assert result.exit_code == 0, result.output
         assert "2.00" in result.output
 
-    def test_financing_parent_row_excluded_from_breakdown(
-        self, stats_db: Path
-    ) -> None:
-        """The DAILY_FINANCING parent summary row (no 'instrument' field) is
+    def test_financing_entry_without_instrument_skipped(self, stats_db: Path) -> None:
+        """A positionFinancings entry missing its 'instrument' field is
         skipped rather than producing a spurious breakdown entry."""
         self._seed_fills(
             stats_db,
             [("1", "2026-04-25T09:00:00Z", "-10000", "30.00")],
         )
-        self._insert_financing(stats_db, "500", '{"financing":"-2.00"}')
+        self._insert_financing(
+            stats_db,
+            "500",
+            '{"financing":"-1.25","positionFinancings":[{"financing":"-1.25"}]}',
+        )
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        assert "Financing by instrument" not in result.output
+
+    def test_financing_row_without_position_breakdown_excluded(
+        self, stats_db: Path
+    ) -> None:
+        """A DAILY_FINANCING row with no positionFinancings entries (e.g. no
+        open positions that day) contributes nothing to the breakdown."""
+        self._seed_fills(
+            stats_db,
+            [("1", "2026-04-25T09:00:00Z", "-10000", "30.00")],
+        )
+        self._insert_financing(stats_db, "500", '{"financing":"0.00"}')
         result = runner.invoke(app, ["stats"])
         assert result.exit_code == 0, result.output
         assert "Financing by instrument" not in result.output
 
     def test_malformed_financing_row_skipped(self, stats_db: Path) -> None:
-        """A financing row with a non-numeric amount is skipped rather than
-        crashing stats."""
+        """A positionFinancings entry with a non-numeric amount is skipped
+        rather than crashing stats."""
         self._seed_fills(
             stats_db,
             [("1", "2026-04-25T09:00:00Z", "-10000", "30.00")],
         )
         self._insert_financing(
-            stats_db, "500", '{"instrument":"EUR_USD","amount":"not-a-number"}'
+            stats_db,
+            "500",
+            '{"financing":"0","positionFinancings":['
+            '{"instrument":"EUR_USD","financing":"not-a-number"}]}',
         )
         result = runner.invoke(app, ["stats"])
         assert result.exit_code == 0, result.output
