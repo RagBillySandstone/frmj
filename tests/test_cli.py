@@ -535,6 +535,17 @@ class TestConfigCommands:
         result = runner.invoke(app, ["config", "get"])
         assert "not set" in result.output
 
+    def test_config_get_all_token_from_practice_env(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OANDA_API_TOKEN_PRACTICE is detected and reported as its own
+        source for a practice account, ahead of the legacy env var."""
+        monkeypatch.setenv("OANDA_API_TOKEN_PRACTICE", "practice-tok")
+        result = runner.invoke(app, ["config", "get"])
+        assert result.exit_code == 0, result.output
+        assert "OANDA_API_TOKEN_PRACTICE" in result.output
+        assert "practice-tok" not in result.output  # value must not be printed
+
     def test_config_get_all_token_from_env(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3178,6 +3189,22 @@ class TestExportCommand:
             app, ["export", "--format", "json", "--output", str(out)]
         )
         assert "3 rows" in result.output
+
+    def test_malformed_row_exported_with_blank_fields(
+        self, export_db: Path
+    ) -> None:
+        """A row whose raw_json can't be parsed still appears in the export,
+        with its type-specific fields left at their defaults."""
+        conn = sqlite3.connect(str(export_db))
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json)"
+            " VALUES ('4', 'acct-1', 'ORDER_FILL', '2026-04-26T09:00:00Z', 'not-json')"
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["export"])
+        assert result.exit_code == 0, result.output
+        assert "4" in result.output
 
 
 class TestPositionsCommand:
