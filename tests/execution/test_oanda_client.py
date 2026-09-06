@@ -144,6 +144,173 @@ def _make_client(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# get_account_summary
+# ---------------------------------------------------------------------------
+
+
+class TestGetAccountSummary:
+    def test_returns_parsed_summary(self) -> None:
+        """A summary response is parsed into an ``AccountSummary`` and the
+        request goes to the account's /summary endpoint."""
+        response = {
+            "account": {
+                "NAV": "10500.25",
+                "balance": "10000.00",
+                "unrealizedPL": "500.25",
+                "pl": "1200.00",
+                "positionValue": "20000.00",
+                "marginUsed": "400.00",
+                "marginAvailable": "10100.25",
+                "openTradeCount": 2,
+            }
+        }
+        client = _make_client(response)
+        summary = client.get_account_summary()
+        assert summary.nav == Decimal("10500.25")
+        assert summary.margin_available == Decimal("10100.25")
+        assert summary.open_trade_count == 2
+
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        assert http.calls[0].method == "GET"
+        assert http.calls[0].url.endswith("/accounts/101-001-test-001/summary")
+
+
+# ---------------------------------------------------------------------------
+# get_instrument
+# ---------------------------------------------------------------------------
+
+
+class TestGetInstrument:
+    def test_returns_parsed_spec(self) -> None:
+        """A matching instrument is parsed into an ``InstrumentSpec``, and the
+        request filters to the single requested instrument name."""
+        response = {
+            "instruments": [
+                {
+                    "name": "EUR_USD",
+                    "pipLocation": -4,
+                    "marginRate": "0.02",
+                    "minimumTradeSize": "1",
+                    "displayPrecision": 5,
+                }
+            ]
+        }
+        client = _make_client(response)
+        spec = client.get_instrument("EUR_USD")
+        assert spec.name == "EUR_USD"
+        assert spec.margin_rate == Decimal("0.02")
+
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        assert http.calls[0].kwargs["params"] == {"instruments": "EUR_USD"}
+
+    def test_raises_value_error_when_not_found(self) -> None:
+        """An empty ``instruments`` array means the account doesn't recognise
+        the instrument name; this must raise rather than return garbage."""
+        client = _make_client({"instruments": []})
+        with pytest.raises(ValueError, match="not found for this account"):
+            client.get_instrument("XAU_XAG")
+
+
+# ---------------------------------------------------------------------------
+# get_price
+# ---------------------------------------------------------------------------
+
+
+def _pricing_response(bid: str, ask: str) -> dict[str, Any]:
+    """Build a minimal GET /pricing response for one instrument."""
+    return {"prices": [{"bids": [{"price": bid}], "asks": [{"price": ask}]}]}
+
+
+class TestGetPrice:
+    def test_quote_equals_home_needs_no_conversion(self) -> None:
+        """EUR_USD on a USD account: quote_to_home is 1, base_to_home is mid."""
+        client = _make_client(_pricing_response("1.1000", "1.1002"))
+        quote = client.get_price("EUR_USD", home_currency="USD")
+        assert quote.bid == Decimal("1.1000")
+        assert quote.ask == Decimal("1.1002")
+        assert quote.quote_to_home == Decimal("1")
+        assert quote.base_to_home == Decimal("1.1001")
+
+    def test_base_equals_home_inverts_for_quote(self) -> None:
+        """USD_JPY on a USD account: base_to_home is 1, quote_to_home is 1/mid."""
+        client = _make_client(_pricing_response("150.00", "150.02"))
+        quote = client.get_price("USD_JPY", home_currency="USD")
+        assert quote.base_to_home == Decimal("1")
+        assert quote.quote_to_home == Decimal("1") / Decimal("150.01")
+
+    def test_cross_pair_resolves_both_legs_via_extra_calls(self) -> None:
+        """EUR_GBP on a USD account: neither leg is home currency, so the
+        client fetches EUR_USD and GBP_USD mids to resolve both conversion
+        rates, in addition to the EUR_GBP price itself."""
+        client = _make_client(
+            _pricing_response("0.8550", "0.8552"),  # EUR_GBP
+            _pricing_response("1.1000", "1.1002"),  # EUR_USD (base leg)
+            _pricing_response("1.2700", "1.2702"),  # GBP_USD (quote leg)
+        )
+        quote = client.get_price("EUR_GBP", home_currency="USD")
+        assert quote.base_to_home == Decimal("1.1001")
+        assert quote.quote_to_home == Decimal("1.2701")
+
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        assert [c.kwargs["params"]["instruments"] for c in http.calls] == [
+            "EUR_GBP",
+            "EUR_USD",
+            "GBP_USD",
+        ]
+
+
+# ---------------------------------------------------------------------------
+# get_open_tickets_on_instrument
+# ---------------------------------------------------------------------------
+
+
+class TestGetOpenTicketsOnInstrument:
+    def test_counts_open_trades(self) -> None:
+        """Each element of the ``trades`` array is one open ticket."""
+        client = _make_client({"trades": [{"id": "1"}, {"id": "2"}, {"id": "3"}]})
+        assert client.get_open_tickets_on_instrument("EUR_USD") == 3
+
+    def test_zero_when_no_open_trades(self) -> None:
+        """No open trades on the instrument means zero tickets."""
+        client = _make_client({"trades": []})
+        assert client.get_open_tickets_on_instrument("EUR_USD") == 0
+
+
+# ---------------------------------------------------------------------------
+# get_open_trades
+# ---------------------------------------------------------------------------
+
+
+class TestGetOpenTrades:
+    def test_returns_parsed_list(self) -> None:
+        """Each element of the ``trades`` array is parsed into an ``OpenTrade``."""
+        response = {
+            "trades": [
+                {
+                    "id": "501",
+                    "instrument": "EUR_USD",
+                    "currentUnits": "10000",
+                    "price": "1.10000",
+                    "unrealizedPL": "12.50",
+                    "marginUsed": "220.00",
+                    "openTime": "2026-01-01T00:00:00.000000000Z",
+                }
+            ]
+        }
+        client = _make_client(response)
+        trades = client.get_open_trades()
+        assert len(trades) == 1
+        assert trades[0].trade_id == "501"
+        assert trades[0].direction == "LONG"
+        assert trades[0].units == 10_000
+
+    def test_empty_when_no_trades_key(self) -> None:
+        """A response without a ``trades`` key means no open positions."""
+        client = _make_client({})
+        assert client.get_open_trades() == []
+
+
 class TestPlaceMarketOrder:
     def test_fok_killed_raises_runtime_error(self) -> None:
         """When Oanda returns a response without ``orderFillTransaction``, the FOK
