@@ -2158,6 +2158,18 @@ class TestTradeExecute:
         assert "Take-profit set" not in result.output
         assert "Stop-loss set" not in result.output
 
+    def test_declining_confirm_cancels_order(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Answering 'n' (or Enter) at the final confirm prompt cancels the
+        order without calling place_market_order."""
+        fake = FakeFullClient()
+        # skip TP, skip SL, decline confirm
+        result = self._invoke(monkeypatch, fake, "\n\nn\n")
+        assert result.exit_code == 0, result.output
+        assert "Order cancelled" in result.output
+        assert fake.order_placed is False
+
     def test_sl_failure_warns_unprotected(
         self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2244,6 +2256,59 @@ class TestTradeExecute:
         conn.close()
         assert count == 0
 
+    def test_note_and_tags_saved_when_fill_row_present(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the fill is already in the local DB, a note and tags entered
+        at the post-fill prompts are persisted against it."""
+        conn = get_db(path=trade_db)
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+            "VALUES ('99999', 'acct-1', 'ORDER_FILL', '2026-04-29T12:00:00Z', '{}')"
+        )
+        conn.commit()
+        conn.close()
+
+        fake = FakeFullClient()
+        # skip TP, skip SL, confirm=y, note="Entered on breakout", tags="breakout momentum"
+        result = self._invoke(
+            monkeypatch, fake, "\n\ny\nEntered on breakout\nbreakout momentum\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "Note saved." in result.output
+        assert "2 tags saved." in result.output
+
+        conn = get_db(path=trade_db)
+        txn_id = conn.execute(
+            "SELECT id FROM transactions WHERE oanda_id = '99999'"
+        ).fetchone()[0]
+        note = conn.execute(
+            "SELECT body FROM notes WHERE transaction_id = ?", (txn_id,)
+        ).fetchone()
+        tags = {
+            r[0]
+            for r in conn.execute(
+                "SELECT tag FROM tags WHERE transaction_id = ?", (txn_id,)
+            ).fetchall()
+        }
+        conn.close()
+        assert note is not None
+        assert note[0] == "Entered on breakout"
+        assert tags == {"breakout", "momentum"}
+
+    def test_note_and_tags_not_saved_when_fill_row_missing(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When post-fill sync hasn't brought the fill in yet, note/tags
+        prompts warn instead of silently discarding the input."""
+        fake = FakeFullClient()
+        # skip TP, skip SL, confirm=y, note="lost note", tags="lost-tag"
+        result = self._invoke(monkeypatch, fake, "\n\ny\nlost note\nlost-tag\n")
+        assert result.exit_code == 0, result.output
+        combined = result.output + result.stderr
+        assert "Note not saved" in combined
+        assert "Tags not saved" in combined
+
 
 # ---------------------------------------------------------------------------
 # trade — error and edge-case paths
@@ -2278,6 +2343,30 @@ class TestTradeErrors:
         set_config(conn, "max_open_trades", "5")
         conn.close()
         return path
+
+    def test_resume_with_instrument_exits_1(self, trade_db: Path) -> None:
+        """--resume rejects a positional instrument/direction argument."""
+        result = runner.invoke(app, ["trade", "EUR_USD", "long", "--resume"])
+        assert result.exit_code == 1
+        assert "not used with --resume" in result.output + result.stderr
+
+    def test_resume_with_multi_exits_1(self, trade_db: Path) -> None:
+        """--resume and --multi are mutually exclusive."""
+        result = runner.invoke(app, ["trade", "--resume", "--multi", "some-group"])
+        assert result.exit_code == 1
+        assert "--multi is not supported with --resume" in result.output + result.stderr
+
+    def test_missing_instrument_and_direction_exits_1(self, trade_db: Path) -> None:
+        """Without --resume, instrument and direction are required."""
+        result = runner.invoke(app, ["trade"])
+        assert result.exit_code == 1
+        assert "instrument and direction are required" in result.output + result.stderr
+
+    def test_invalid_direction_exits_1(self, trade_db: Path) -> None:
+        """A direction other than long/short is rejected."""
+        result = runner.invoke(app, ["trade", "EUR_USD", "sideways"])
+        assert result.exit_code == 1
+        assert "must be 'long' or 'short'" in result.output + result.stderr
 
     def test_get_client_failure_exits_1(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
