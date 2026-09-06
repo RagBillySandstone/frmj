@@ -348,3 +348,101 @@ class TestPlaceMarketOrder:
         assert fill.fill_price == Decimal("1.10050")
         assert fill.units_filled == 10_000
         assert fill.trade_id == "88001"
+
+
+# ---------------------------------------------------------------------------
+# close_trade
+# ---------------------------------------------------------------------------
+
+
+class TestCloseTrade:
+    def test_returns_close_fill(self) -> None:
+        """A successful close response is parsed into a ``CloseFill``, and
+        the request PUTs to the trade's /close endpoint."""
+        response = {
+            "orderFillTransaction": {
+                "id": "77002",
+                "price": "1.10500",
+                "pl": "-25.00",
+            }
+        }
+        client = _make_client(response)
+        fill = client.close_trade("501")
+        assert fill.transaction_id == "77002"
+        assert fill.close_price == Decimal("1.10500")
+        assert fill.realised_pl == Decimal("-25.00")
+
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        assert http.calls[0].method == "PUT"
+        assert http.calls[0].url.endswith("/trades/501/close")
+
+    def test_raises_on_http_error(self) -> None:
+        """A 404 (already-closed trade / bad ID) must surface as
+        ``httpx.HTTPStatusError`` rather than being swallowed."""
+        client = _make_client(_ErrorResponse(404))
+        with pytest.raises(httpx.HTTPStatusError):
+            client.close_trade("does-not-exist")
+
+
+# ---------------------------------------------------------------------------
+# attach_take_profit / attach_stop_loss
+# ---------------------------------------------------------------------------
+
+
+class TestAttachExitOrders:
+    def test_attach_take_profit_posts_correct_order_type(self) -> None:
+        """attach_take_profit must send order type TAKE_PROFIT and return the
+        created transaction's ID."""
+        response = {"orderCreateTransaction": {"id": "60001"}}
+        client = _make_client(response)
+        txn_id = client.attach_take_profit("501", Decimal("1.12000"))
+        assert txn_id == "60001"
+
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        order = http.calls[0].kwargs["json"]["order"]
+        assert order["type"] == "TAKE_PROFIT"
+        assert order["tradeID"] == "501"
+        assert order["price"] == "1.12000"
+        assert order["timeInForce"] == "GTC"
+
+    def test_attach_stop_loss_posts_correct_order_type(self) -> None:
+        """attach_stop_loss must send order type STOP_LOSS."""
+        response = {"orderCreateTransaction": {"id": "60002"}}
+        client = _make_client(response)
+        txn_id = client.attach_stop_loss("501", Decimal("1.08000"))
+        assert txn_id == "60002"
+
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        order = http.calls[0].kwargs["json"]["order"]
+        assert order["type"] == "STOP_LOSS"
+
+    def test_raises_runtime_error_when_transaction_missing(self) -> None:
+        """An undocumented response shape (no orderCreateTransaction) must
+        surface loudly rather than returning a bogus ID."""
+        client = _make_client({})
+        with pytest.raises(RuntimeError, match="No orderCreateTransaction"):
+            client.attach_take_profit("501", Decimal("1.12000"))
+
+
+# ---------------------------------------------------------------------------
+# close / __enter__ / __exit__
+# ---------------------------------------------------------------------------
+
+
+class TestLifecycle:
+    def test_close_releases_the_connection_pool(self) -> None:
+        """close() must delegate to the underlying HTTP client's close()."""
+        client = _make_client()
+        client.close()
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        assert http.closed is True
+
+    def test_context_manager_closes_on_exit(self) -> None:
+        """Using the client as a context manager closes it on exit, and
+        __enter__ returns the client itself."""
+        client = _make_client()
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        with client as ctx:
+            assert ctx is client
+            assert http.closed is False
+        assert http.closed is True
