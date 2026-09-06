@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 import pytest
 
+from frmj.execution import oanda
 from frmj.execution.oanda import OandaClient
 
 
@@ -137,11 +138,6 @@ def _make_client(
     # Replace the real httpx.Client with our stub.
     client._http = _FakeHttp(wrapped)  # type: ignore[assignment]
     return client
-
-
-# ---------------------------------------------------------------------------
-# place_market_order
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +305,82 @@ class TestGetOpenTrades:
         """A response without a ``trades`` key means no open positions."""
         client = _make_client({})
         assert client.get_open_trades() == []
+
+
+# ---------------------------------------------------------------------------
+# get_transactions_since — cold path (_fetch_all_cold)
+# ---------------------------------------------------------------------------
+
+
+def _txn(txn_id: str, txn_type: str = "ORDER_FILL") -> dict[str, Any]:
+    """Build a minimal Oanda transaction dict."""
+    return {"id": txn_id, "type": txn_type, "time": "2026-01-01T00:00:00.000000000Z"}
+
+
+class TestFetchAllCold:
+    def test_empty_account_returns_empty_list(self) -> None:
+        """An empty ``pages`` array means no history; no page fetches follow."""
+        client = _make_client({"pages": []})
+        rows = client.get_transactions_since(from_id=None)
+        assert rows == []
+
+    def test_fetches_and_concatenates_all_pages(self) -> None:
+        """Each URL in ``pages`` is fetched in order and its transactions
+        concatenated into the final row list."""
+        client = _make_client(
+            {"pages": ["https://x/page1", "https://x/page2"]},
+            {"transactions": [_txn("1"), _txn("2")]},
+            {"transactions": [_txn("3")]},
+        )
+        rows = client.get_transactions_since(from_id=None)
+        assert [r.oanda_id for r in rows] == ["1", "2", "3"]
+
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        # First call discovers the pages index; the rest fetch each page URL.
+        assert http.calls[1].url == "https://x/page1"
+        assert http.calls[2].url == "https://x/page2"
+
+
+# ---------------------------------------------------------------------------
+# get_transactions_since — incremental path (_fetch_since)
+# ---------------------------------------------------------------------------
+
+
+class TestFetchSince:
+    def test_stops_after_sub_limit_response(self) -> None:
+        """A response with fewer rows than the per-call limit means there is
+        no more data; the loop must not make a second call."""
+        client = _make_client({"transactions": [_txn("10"), _txn("11")]})
+        rows = client.get_transactions_since(from_id="9")
+        assert [r.oanda_id for r in rows] == ["10", "11"]
+
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        assert len(http.calls) == 1
+        assert http.calls[0].kwargs["params"] == {"id": "9"}
+
+    def test_loops_and_advances_cursor_when_at_limit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A full-limit response means there may be more; the client must
+        loop, advancing ``from_id`` to the last received transaction's ID,
+        until a sub-limit response is returned."""
+        # Shrink the page limit so the test doesn't need 500 fake rows.
+        monkeypatch.setattr(oanda, "_SINCEID_PAGE_LIMIT", 2)
+        client = _make_client(
+            {"transactions": [_txn("10"), _txn("11")]},  # at limit -> loop again
+            {"transactions": [_txn("12")]},  # sub-limit -> stop
+        )
+        rows = client.get_transactions_since(from_id="9")
+        assert [r.oanda_id for r in rows] == ["10", "11", "12"]
+
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        assert http.calls[0].kwargs["params"] == {"id": "9"}
+        assert http.calls[1].kwargs["params"] == {"id": "11"}
+
+
+# ---------------------------------------------------------------------------
+# place_market_order
+# ---------------------------------------------------------------------------
 
 
 class TestPlaceMarketOrder:
