@@ -111,6 +111,17 @@ class TestInstrumentSpecValidation:
                 display_precision=5,
             )
 
+    def test_rejects_negative_display_precision(self) -> None:
+        with pytest.raises(ValueError):
+            InstrumentSpec(
+                name="X",
+                pip_location=-4,
+                margin_rate=Decimal("0.02"),
+                min_units=1,
+                units_increment=1,
+                display_precision=-1,
+            )
+
 
 class TestPriceQuoteValidation:
     def test_rejects_crossed_book(self) -> None:
