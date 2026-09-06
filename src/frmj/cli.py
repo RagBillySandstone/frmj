@@ -99,7 +99,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import httpx
 import typer
@@ -2772,11 +2772,14 @@ def _parse_tpsl(raw: str) -> TPSLSpec:
     Raises ``ValueError`` on unrecognised format or non-positive value.
     """
     raw = raw.strip()
-    if raw.endswith("%"):
-        pct = Decimal(raw[:-1])
-        return TPSLSpec(kind=TPSLKind.PERCENT_RETURN, value=pct / Decimal("100"))
-    # Strip optional trailing 'p' for pips.
-    return TPSLSpec(kind=TPSLKind.PIPS, value=Decimal(raw.rstrip("p")))
+    try:
+        if raw.endswith("%"):
+            pct = Decimal(raw[:-1])
+            return TPSLSpec(kind=TPSLKind.PERCENT_RETURN, value=pct / Decimal("100"))
+        # Strip optional trailing 'p' for pips.
+        return TPSLSpec(kind=TPSLKind.PIPS, value=Decimal(raw.rstrip("p")))
+    except InvalidOperation:
+        raise ValueError(f"{raw!r} is not a number") from None
 
 
 def _display_exits(exits: ExitLevels, margin_used: Decimal) -> None:

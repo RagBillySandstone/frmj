@@ -2169,6 +2169,37 @@ class TestTradeExecute:
         assert "Take-profit set" not in result.output
         assert "Stop-loss set" not in result.output
 
+    def test_invalid_tpsl_input_reprompts(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unparseable TP value re-prompts instead of crashing; a valid
+        value on retry proceeds normally."""
+        fake = FakeFullClient()
+        # invalid TP, then valid TP=50 pips; skip SL, confirm=y, note/tags skip
+        result = self._invoke(monkeypatch, fake, "abc\n50\n\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert "Invalid input" in result.output
+        assert fake.tp_attached is not None
+
+    def test_percent_return_tpsl_format_accepted(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A '10%' TP value is parsed as a percent-return-on-margin spec."""
+        fake = FakeFullClient()
+        result = self._invoke(monkeypatch, fake, "10%\n\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert fake.tp_attached is not None
+
+    def test_unrealistic_tp_shows_warning(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A TP set beyond the sanity threshold (500 pips) surfaces a warning
+        from the exit-levels display."""
+        fake = FakeFullClient()
+        result = self._invoke(monkeypatch, fake, "600\n\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert "check the value" in result.output + result.stderr
+
     def test_declining_confirm_cancels_order(
         self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
