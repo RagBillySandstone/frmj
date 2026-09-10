@@ -381,6 +381,9 @@ If you have an existing database using the old flat-config account system (`prac
 ```sh
 uv sync --group dev
 uv run pytest
+uv run mypy
 ```
 
 Tests live in `tests/` and mirror the `src/` layout. The domain tests (`tests/domain/`) use no fixtures or mocks — pure data in, pure data out. The execution tests use lightweight test doubles that satisfy `ClientProtocol` via structural typing (no inheritance required).
+
+`mypy` currently type-checks `src/frmj` only; `tests/` isn't included yet (see TODO.md).

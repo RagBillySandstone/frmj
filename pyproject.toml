@@ -24,6 +24,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "hypothesis>=6.152.2",
+    "mypy>=2.3.1",
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",
 ]
@@ -31,3 +32,16 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+
+[tool.mypy]
+# Incremental adoption: type-checks src/frmj only. tests/ leans on duck-typed
+# test doubles (fakes that satisfy a protocol structurally without inheriting
+# it) and dict-splat fixture builders that don't type-check cleanly under
+# mypy without a larger, separate refactor — see TODO.md.
+files = ["src/frmj"]
+python_version = "3.11"
+disallow_untyped_defs = true
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
