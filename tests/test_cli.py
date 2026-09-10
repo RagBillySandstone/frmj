@@ -17,11 +17,15 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
+import click
 import httpx
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from frmj.accounts import (
@@ -33,17 +37,32 @@ from frmj.accounts import (
 from frmj.app import get_db, set_config
 from frmj.cli import (
     VALID_CONFIG_KEYS,
+    _FINANCING_PAIRS,
     _attach_tags,
     _complete_account_group,
+    _complete_account_name,
     _complete_config_key,
+    _complete_config_value,
     _complete_direction,
+    _complete_env_type,
+    _complete_export_format,
+    _complete_group_member,
     _complete_instrument,
+    _complete_oanda_id,
+    _complete_tag,
+    _complete_txn_type,
+    _fmt_financing_pct,
+    _group_financing_rates,
+    _load_financing_snapshot,
+    _pair_tier,
+    _record_financing_snapshot,
     _validate_tag,
     app,
 )
 from frmj.domain.sizing import InstrumentSpec, PriceQuote
 from frmj.execution.oanda import (
     AccountSummary,
+    FinancingRate,
     CloseFill,
     OpenTrade,
     OrderFill,
@@ -124,6 +143,104 @@ class TestCompletionHelpers:
 
     def test_complete_direction_no_match_returns_empty(self) -> None:
         assert _complete_direction("x") == []
+
+    def test_complete_env_type_matches_prefix(self) -> None:
+        assert _complete_env_type("pr") == ["practice"]
+        assert _complete_env_type("li") == ["live"]
+
+    def test_complete_env_type_no_match_returns_empty(self) -> None:
+        assert _complete_env_type("x") == []
+
+    def test_complete_export_format_matches_prefix(self) -> None:
+        assert _complete_export_format("cs") == ["csv"]
+        assert _complete_export_format("") == ["csv", "json"]
+
+    def test_complete_account_name_filters_by_prefix(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Opens its own DB connection independently of any CLI invocation."""
+        monkeypatch.setattr("frmj.app.keyring.set_password", lambda s, u, p: None)
+        runner.invoke(app, ["account", "add", "funded"], input="live-001\nlive\n")
+        assert _complete_account_name("pra") == ["practice"]
+        assert set(_complete_account_name("")) == {"practice", "funded"}
+
+
+# ---------------------------------------------------------------------------
+# Completion coverage gate
+#
+# Every string/text CLI argument or option that is drawn from a bounded set
+# of values (an instrument, an account name, a config key, ...) should offer
+# shell tab-completion. Rather than relying on someone remembering to wire it
+# up whenever a new command or parameter is added, this test walks the whole
+# Typer command tree and fails on any string parameter that has neither a
+# completion callback nor an explicit, commented exemption below. Adding a
+# new parameter therefore forces a conscious choice: give it a completer, or
+# add it to _COMPLETION_EXEMPT with a reason.
+# ---------------------------------------------------------------------------
+
+#: (command path as space-joined string, parameter name) -> reason no
+#: completion is offered. Only genuinely free-form values (new names being
+#: created, arbitrary text, numbers, file paths, dates) belong here.
+_COMPLETION_EXEMPT: dict[tuple[str, str], str] = {
+    ("sync", "interval"): "numeric, no fixed set of values",
+    ("export", "output"): "arbitrary output file path",
+    ("export", "since"): "free-form date, no fixed set of values",
+    ("financing", "date_str"): "free-form date, no fixed set of values",
+    ("note", "text"): "arbitrary free text",
+    ("journal", "n"): "numeric, no fixed set of values",
+    ("journal", "since"): "free-form date, no fixed set of values",
+    ("account add", "name"): "new account name being created",
+    ("account rename", "new_name"): "new account name being created",
+}
+
+
+def _iter_completable_params() -> list[tuple[str, click.Parameter]]:
+    """Walk the Typer command tree, yielding every non-flag string parameter.
+
+    Boolean flags and counters are excluded since they take no free-form
+    value to complete.
+    """
+    root = typer.main.get_command(app)
+    found: list[tuple[str, click.Parameter]] = []
+
+    def walk(cmd: click.Command, path: list[str]) -> None:
+        if isinstance(cmd, click.Group):
+            for name, sub in cmd.commands.items():
+                walk(sub, path + [name])
+            return
+        for param in cmd.params:
+            is_flag_like = isinstance(param, click.Option) and (
+                param.is_flag or param.count
+            )
+            if isinstance(param, click.Argument) or (
+                isinstance(param, click.Option) and not is_flag_like
+            ):
+                found.append((" ".join(path), param))
+
+    walk(root, [])
+    return found
+
+
+class TestCompletionCoverage:
+    def test_every_bounded_param_offers_completion_or_is_exempt(self) -> None:
+        missing = [
+            f"{path} --{param.name}"
+            if isinstance(param, click.Option)
+            else f"{path} {param.name}"
+            for path, param in _iter_completable_params()
+            if getattr(param, "_custom_shell_complete", None) is None
+            and (path, param.name) not in _COMPLETION_EXEMPT
+        ]
+        assert missing == [], (
+            "These parameters have no tab-completion and no exemption in "
+            "_COMPLETION_EXEMPT: " + ", ".join(missing)
+        )
+
+    def test_exemptions_reference_real_parameters(self) -> None:
+        """Catches stale entries left behind after a command/param is renamed or removed."""
+        real = {(path, param.name) for path, param in _iter_completable_params()}
+        stale = set(_COMPLETION_EXEMPT) - real
+        assert stale == set(), f"Stale entries in _COMPLETION_EXEMPT: {stale}"
 
 
 # ---------------------------------------------------------------------------
@@ -502,6 +619,22 @@ class TestConfigCommands:
     def test_complete_config_key_case_insensitive(self) -> None:
         """Completion matches regardless of the case the user typed."""
         assert _complete_config_key("SCALE") == ["scale_in"]
+
+    def test_complete_config_value_suggests_enum_settings(self) -> None:
+        """Tab completion on VALUE suggests the enum settings for the typed key."""
+        ctx = SimpleNamespace(params={"key": "blocking_mode"})
+        assert _complete_config_value(ctx, "") == ["hard_block", "warning_only"]
+        assert _complete_config_value(ctx, "hard") == ["hard_block"]
+
+    def test_complete_config_value_empty_for_freeform_key(self) -> None:
+        """Keys with no fixed set of settings (e.g. numeric ones) get no suggestions."""
+        ctx = SimpleNamespace(params={"key": "max_open_trades"})
+        assert _complete_config_value(ctx, "") == []
+
+    def test_complete_config_value_empty_before_key_is_typed(self) -> None:
+        """With no key parsed yet, there is nothing to suggest for VALUE."""
+        ctx = SimpleNamespace(params={})
+        assert _complete_config_value(ctx, "") == []
 
     def test_config_get_all_shows_all_keys(self, db_path: Path) -> None:
         """``frmj config get`` with no argument shows every configured key."""
@@ -1282,6 +1415,23 @@ class TestAccountGroupCommands:
         assert _complete_account_group("prop") == ["prop-firms"]
         assert set(_complete_account_group("")) == {"prop-firms", "personal"}
 
+    def test_complete_group_member_scoped_to_group(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only accounts already in the named group are offered for removal."""
+        monkeypatch.setattr("frmj.app.keyring.set_password", lambda s, u, p: None)
+        runner.invoke(app, ["account", "add", "funded"], input="live-001\nlive\n")
+        runner.invoke(app, ["account", "group", "add", "g1", "practice"])
+        ctx = SimpleNamespace(params={"group_name": "g1"})
+        assert _complete_group_member(ctx, "") == ["practice"]
+        assert _complete_group_member(ctx, "fun") == []
+
+    def test_complete_group_member_unknown_group_returns_empty(
+        self, db_path: Path
+    ) -> None:
+        ctx = SimpleNamespace(params={"group_name": "ghost"})
+        assert _complete_group_member(ctx, "") == []
+
     def test_list_empty_shows_message(self, db_path: Path) -> None:
         result = runner.invoke(app, ["account", "group", "list"])
         assert result.exit_code == 0
@@ -1445,9 +1595,16 @@ class FakeFullClient:
     open_trades: list[OpenTrade] = field(default_factory=list)
     close_should_fail: bool = False
     closed_trade_ids: list[str] = field(default_factory=list)
+    financing_rates: list[FinancingRate] = field(default_factory=list)
+    financing_should_fail: bool = False
 
     def get_open_trades(self) -> list[OpenTrade]:
         return self.open_trades
+
+    def get_financing_rates(self, instruments: list[str]) -> list[FinancingRate]:
+        if self.financing_should_fail:
+            raise RuntimeError("Oanda unreachable")
+        return self.financing_rates
 
     def close_trade(self, trade_id: str) -> CloseFill:
         if self.close_should_fail:
@@ -1600,6 +1757,13 @@ class TestNoteCommand:
         assert rows[0][0] == "First note"
         assert rows[1][0] == "Second note"
 
+    def test_complete_oanda_id_filters_by_prefix(self, note_db: Path) -> None:
+        """Opens its own DB connection independently of any CLI invocation."""
+        _seed_transaction(note_db, oanda_id="12399")
+        assert set(_complete_oanda_id("123")) == {"12345", "12399"}
+        assert _complete_oanda_id("1239") == ["12399"]
+        assert _complete_oanda_id("999") == []
+
 
 # ---------------------------------------------------------------------------
 # tag command
@@ -1646,6 +1810,17 @@ class TestTagCommand:
         rows = conn.execute("SELECT tag FROM tags ORDER BY tag").fetchall()
         conn.close()
         assert {r[0] for r in rows} == {"breakout", "momentum"}
+
+    def test_complete_tag_filters_by_prefix(self, tag_db: Path) -> None:
+        """Opens its own DB connection independently of any CLI invocation."""
+        runner.invoke(app, ["tag", "99", "breakout", "momentum"])
+        assert _complete_tag("bre") == ["breakout"]
+        assert set(_complete_tag("")) == {"breakout", "momentum"}
+
+    def test_complete_txn_type_filters_by_prefix(self, tag_db: Path) -> None:
+        assert _complete_txn_type("order") == ["ORDER_FILL"]
+        assert _complete_txn_type("ORDER") == ["ORDER_FILL"]
+        assert _complete_txn_type("zzz") == []
 
     def test_duplicate_tag_silently_ignored(self, tag_db: Path) -> None:
         """Attaching the same tag twice leaves only one row in the DB."""
@@ -1837,6 +2012,51 @@ class TestJournalCommand:
         assert "EUR_USD" in result.output
         assert "LONG" in result.output
 
+    def test_buy_shown_for_long_opening_fill(self, journal_db: Path) -> None:
+        """An opening fill with positive units shows 'BUY' alongside LONG."""
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        line = next(line for line in result.output.splitlines() if "1001" in line)
+        assert "EUR_USD LONG BUY" in line
+
+    def test_sell_shown_for_short_opening_fill(self, journal_db: Path) -> None:
+        """An opening fill with negative units shows 'SELL' alongside SHORT."""
+        conn = sqlite3.connect(str(journal_db))
+        conn.execute(
+            "UPDATE transactions SET raw_json = ? WHERE oanda_id = '1001'",
+            ('{"instrument":"EUR_USD","units":"-1000","reason":"MARKET_ORDER"}',),
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        line = next(line for line in result.output.splitlines() if "1001" in line)
+        assert "EUR_USD SHORT SELL" in line
+
+    def test_fill_price_shown_for_order_fill(self, journal_db: Path) -> None:
+        """An ORDER_FILL with a 'price' field shows it after the units."""
+        conn = sqlite3.connect(str(journal_db))
+        conn.execute(
+            "UPDATE transactions SET raw_json = ? WHERE oanda_id = '1001'",
+            (
+                '{"instrument":"EUR_USD","units":"1000",'
+                '"reason":"MARKET_ORDER","price":"1.08542"}',
+            ),
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        line = next(line for line in result.output.splitlines() if "1001" in line)
+        assert "EUR_USD LONG BUY 1,000 units @ 1.08542" in line
+
+    def test_no_price_suffix_when_price_missing(self, journal_db: Path) -> None:
+        """ORDER_FILL rows without a 'price' field show no ' @ ' suffix."""
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        line = next(line for line in result.output.splitlines() if "1001" in line)
+        assert " @ " not in line
+
     def test_take_profit_fill_shows_tp_label(self, journal_db: Path) -> None:
         """An ORDER_FILL closed by a take-profit order shows 'TP', not LONG/SHORT."""
         conn = sqlite3.connect(str(journal_db))
@@ -1855,6 +2075,7 @@ class TestJournalCommand:
         assert "EUR_USD TP" in line
         assert "LONG" not in line
         assert "SHORT" not in line
+        assert "EUR_USD TP SELL" in line
 
     def test_stop_loss_fill_shows_sl_label(self, journal_db: Path) -> None:
         """An ORDER_FILL closed by a stop-loss order shows 'SL', not LONG/SHORT."""
@@ -1874,6 +2095,7 @@ class TestJournalCommand:
         assert "EUR_USD SL" in line
         assert "LONG" not in line
         assert "SHORT" not in line
+        assert "EUR_USD SL SELL" in line
 
     def test_plan_shown_under_order_fill(self, journal_db: Path) -> None:
         """A trade plan row is shown as '    Plan: TP ...  SL ...' under its fill."""
@@ -3499,6 +3721,397 @@ class TestPositionsCommand:
         result = runner.invoke(app, ["positions"])
         assert result.exit_code == 1
         assert "Error" in result.output + result.stderr
+
+
+# ---------------------------------------------------------------------------
+# financing command
+# ---------------------------------------------------------------------------
+
+
+class TestFinancingHelpers:
+    """Pure-function tests for the major/minor/exotic classifier and formatters."""
+
+    def test_pair_tier_major_is_usd_plus_one_other_major(self) -> None:
+        assert _pair_tier("EUR_USD") == "major"
+        assert _pair_tier("USD_JPY") == "major"
+
+    def test_pair_tier_minor_is_two_majors_without_usd(self) -> None:
+        assert _pair_tier("EUR_GBP") == "minor"
+        assert _pair_tier("AUD_JPY") == "minor"
+
+    def test_pair_tier_exotic_has_a_non_major_currency(self) -> None:
+        assert _pair_tier("USD_TRY") == "exotic"
+        assert _pair_tier("EUR_ZAR") == "exotic"
+        assert _pair_tier("XAU_USD") == "exotic"
+
+    def test_financing_pairs_excludes_metals(self) -> None:
+        assert "XAU_USD" not in _FINANCING_PAIRS
+        assert "XAG_USD" not in _FINANCING_PAIRS
+
+    def test_financing_pairs_are_uppercase_with_no_duplicates(self) -> None:
+        assert all(p == p.upper() for p in _FINANCING_PAIRS)
+        assert len(_FINANCING_PAIRS) == len(set(_FINANCING_PAIRS))
+
+    def test_fmt_financing_pct_shows_signed_four_decimals(self) -> None:
+        assert _fmt_financing_pct(Decimal("-0.0141")) == "-1.4100%"
+        assert _fmt_financing_pct(Decimal("0.0007")) == "+0.0700%"
+
+    def test_group_financing_rates_buckets_and_sorts_alphabetically(self) -> None:
+        rates = [
+            FinancingRate("USD_JPY", Decimal("0"), Decimal("0")),
+            FinancingRate("EUR_USD", Decimal("0"), Decimal("0")),
+            FinancingRate("EUR_GBP", Decimal("0"), Decimal("0")),
+            FinancingRate("USD_TRY", Decimal("0"), Decimal("0")),
+        ]
+        groups = _group_financing_rates(rates)
+        assert [r.instrument for r in groups["major"]] == ["EUR_USD", "USD_JPY"]
+        assert [r.instrument for r in groups["minor"]] == ["EUR_GBP"]
+        assert [r.instrument for r in groups["exotic"]] == ["USD_TRY"]
+
+
+class TestFinancingCommand:
+    @pytest.fixture()
+    def fin_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "fin_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        conn.close()
+        return path
+
+    def _invoke(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        rates: list[FinancingRate],
+    ) -> object:
+        fake = FakeFullClient(financing_rates=rates)
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        return runner.invoke(app, ["financing"])
+
+    def test_no_rates_returned_message(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self._invoke(monkeypatch, [])
+        assert result.exit_code == 0, result.output
+        assert "No financing rates" in result.output
+
+    def test_shows_majors_minors_exotics_sections(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self._invoke(
+            monkeypatch,
+            [
+                FinancingRate("EUR_USD", Decimal("-0.0049"), Decimal("0.0009")),
+                FinancingRate("EUR_GBP", Decimal("-0.0021"), Decimal("0.0005")),
+                FinancingRate("USD_TRY", Decimal("-0.4521"), Decimal("0.4102")),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Majors" in result.output
+        assert "Minors" in result.output
+        assert "Exotics" in result.output
+        assert "EUR_USD" in result.output
+        assert "-0.4900%" in result.output
+        assert "+0.0900%" in result.output
+
+    def test_omits_empty_tier_sections(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only major pairs supplied: no Minors/Exotics headers should print."""
+        result = self._invoke(
+            monkeypatch, [FinancingRate("EUR_USD", Decimal("0"), Decimal("0"))]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Majors" in result.output
+        assert "Minors" not in result.output
+        assert "Exotics" not in result.output
+
+    def test_requests_the_full_financing_pairs_list(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The command asks Oanda for every non-metal instrument in one call."""
+        requested: list[list[str]] = []
+
+        class _RecordingClient(FakeFullClient):
+            def get_financing_rates(self, instruments: list[str]) -> list:
+                requested.append(instruments)
+                return []
+
+        fake = _RecordingClient()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        runner.invoke(app, ["financing"])
+        assert requested == [list(_FINANCING_PAIRS)]
+
+    def test_api_error_exits_1(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(financing_should_fail=True)
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["financing"])
+        assert result.exit_code == 1
+        assert "Error" in result.output + result.stderr
+
+    def test_get_client_error_exits_1(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _fail(conn: object) -> None:
+            raise RuntimeError("No token configured for this account")
+
+        monkeypatch.setattr("frmj.cli.get_client", _fail)
+        result = runner.invoke(app, ["financing"])
+        assert result.exit_code == 1
+        assert "Error" in result.output + result.stderr
+
+
+class TestFinancingSnapshotRecording:
+    """A live ``frmj financing`` fetch should record today's rates for later
+    lookup via ``--date``, since Oanda has no historical-rate endpoint."""
+
+    @pytest.fixture()
+    def fin_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "fin_snapshot_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        conn.close()
+        return path
+
+    def test_live_fetch_records_todays_snapshot(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(
+            financing_rates=[
+                FinancingRate("EUR_USD", Decimal("-0.0049"), Decimal("0.0009"))
+            ]
+        )
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["financing"])
+        assert result.exit_code == 0, result.output
+
+        conn = get_db(path=fin_db)
+        snapshot = _load_financing_snapshot(conn, "acct-1", date.today().isoformat())
+        conn.close()
+        assert snapshot == [
+            FinancingRate("EUR_USD", Decimal("-0.0049"), Decimal("0.0009"))
+        ]
+
+    def test_no_rates_returned_records_nothing(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(financing_rates=[])
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["financing"])
+        assert result.exit_code == 0, result.output
+
+        conn = get_db(path=fin_db)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM financing_rate_snapshots"
+        ).fetchone()[0]
+        conn.close()
+        assert count == 0
+
+    def test_rerunning_same_day_overwrites_rather_than_duplicates(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        first = FakeFullClient(
+            financing_rates=[
+                FinancingRate("EUR_USD", Decimal("-0.0049"), Decimal("0.0009"))
+            ]
+        )
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: first)
+        runner.invoke(app, ["financing"])
+
+        second = FakeFullClient(
+            financing_rates=[
+                FinancingRate("EUR_USD", Decimal("-0.0100"), Decimal("0.0050"))
+            ]
+        )
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: second)
+        runner.invoke(app, ["financing"])
+
+        conn = get_db(path=fin_db)
+        rows = conn.execute("SELECT * FROM financing_rate_snapshots").fetchall()
+        snapshot = _load_financing_snapshot(conn, "acct-1", date.today().isoformat())
+        conn.close()
+        assert len(rows) == 1
+        assert snapshot == [
+            FinancingRate("EUR_USD", Decimal("-0.0100"), Decimal("0.0050"))
+        ]
+
+
+class TestFinancingDateOption:
+    """``frmj financing --date`` looks up a previously recorded snapshot
+    instead of calling Oanda, since there is no historical-rate endpoint."""
+
+    @pytest.fixture()
+    def fin_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "fin_date_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        conn.close()
+        return path
+
+    def test_shows_recorded_snapshot_without_calling_the_api(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = get_db(path=fin_db)
+        _record_financing_snapshot(
+            conn,
+            "acct-1",
+            [FinancingRate("EUR_USD", Decimal("-0.0049"), Decimal("0.0009"))],
+            "2026-01-15",
+        )
+        conn.close()
+
+        def _fail_if_called(instruments: list[str]) -> list[FinancingRate]:
+            raise AssertionError("--date must not call the live financing API")
+
+        fake = FakeFullClient()
+        fake.get_financing_rates = _fail_if_called  # type: ignore[method-assign]
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+
+        result = runner.invoke(app, ["financing", "--date", "2026-01-15"])
+        assert result.exit_code == 0, result.output
+        assert "snapshot from 2026-01-15" in result.output
+        assert "EUR_USD" in result.output
+        assert "-0.4900%" in result.output
+
+    def test_no_snapshot_recorded_for_date_shows_message(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["financing", "--date", "2020-06-01"])
+        assert result.exit_code == 0, result.output
+        assert "No financing snapshot recorded for 2020-06-01." in result.output
+
+    def test_invalid_date_format_exits_1(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["financing", "--date", "not-a-date"])
+        assert result.exit_code == 1
+        assert "not a valid date" in result.output + result.stderr
+
+    def test_get_client_error_exits_1(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _fail(conn: object) -> None:
+            raise RuntimeError("No token configured for this account")
+
+        monkeypatch.setattr("frmj.cli.get_client", _fail)
+        result = runner.invoke(app, ["financing", "--date", "2026-01-15"])
+        assert result.exit_code == 1
+        assert "Error" in result.output + result.stderr
+
+    def test_snapshot_scoped_to_recording_account(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A snapshot recorded under a different account_id is invisible to
+        the currently active account."""
+        conn = get_db(path=fin_db)
+        _record_financing_snapshot(
+            conn,
+            "some-other-account",
+            [FinancingRate("EUR_USD", Decimal("-0.0049"), Decimal("0.0009"))],
+            "2026-01-15",
+        )
+        conn.close()
+
+        fake = FakeFullClient()  # account_id defaults to "acct-1"
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["financing", "--date", "2026-01-15"])
+        assert result.exit_code == 0, result.output
+        assert "No financing snapshot recorded for 2026-01-15." in result.output
+
+
+class TestFinancingQuietOption:
+    """``frmj financing --quiet`` fetches and records live rates with no
+    stdout output on success, for use as a daily cron job."""
+
+    @pytest.fixture()
+    def fin_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "fin_quiet_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        conn.close()
+        return path
+
+    def test_no_output_on_success(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(
+            financing_rates=[
+                FinancingRate("EUR_USD", Decimal("-0.0049"), Decimal("0.0009"))
+            ]
+        )
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["financing", "--quiet"])
+        assert result.exit_code == 0, result.output
+        assert result.output == ""
+
+    def test_still_records_snapshot(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(
+            financing_rates=[
+                FinancingRate("EUR_USD", Decimal("-0.0049"), Decimal("0.0009"))
+            ]
+        )
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        runner.invoke(app, ["financing", "--quiet"])
+
+        conn = get_db(path=fin_db)
+        snapshot = _load_financing_snapshot(conn, "acct-1", date.today().isoformat())
+        conn.close()
+        assert snapshot == [
+            FinancingRate("EUR_USD", Decimal("-0.0049"), Decimal("0.0009"))
+        ]
+
+    def test_no_output_when_no_rates_returned(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(financing_rates=[])
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["financing", "--quiet"])
+        assert result.exit_code == 0, result.output
+        assert result.output == ""
+
+    def test_fetch_error_still_prints_and_exits_1(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(financing_should_fail=True)
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["financing", "--quiet"])
+        assert result.exit_code == 1
+        assert "Error" in result.output + result.stderr
+
+    def test_get_client_error_still_prints_and_exits_1(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _fail(conn: object) -> None:
+            raise RuntimeError("No token configured for this account")
+
+        monkeypatch.setattr("frmj.cli.get_client", _fail)
+        result = runner.invoke(app, ["financing", "--quiet"])
+        assert result.exit_code == 1
+        assert "Error" in result.output + result.stderr
+
+    def test_combined_with_date_exits_1(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["financing", "--quiet", "--date", "2026-01-15"])
+        assert result.exit_code == 1
+        assert "cannot be combined" in result.output + result.stderr
 
 
 # ---------------------------------------------------------------------------

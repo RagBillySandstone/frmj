@@ -132,6 +132,32 @@ Show all open trades with live P/L, margin, and TP/SL levels, plus an account su
 frmj positions
 ```
 
+### `frmj financing`
+
+Show current long/short financing rates for every tradable FX pair (Oanda's own "daily financing rates" — annualized percentages, republished daily). Pairs are grouped Majors / Minors / Exotics, alphabetical within each group; metals (XAU, XAG, ...) are excluded since the major/minor/exotic taxonomy doesn't apply to them.
+
+```sh
+frmj financing
+```
+
+A negative rate means you pay to hold that side overnight; a positive rate means you're paid.
+
+Each live fetch also records that day's rates locally, since Oanda's API only exposes the current rate (no historical endpoint). Use `--date` to look up a previously recorded snapshot instead of fetching live:
+
+```sh
+frmj financing --date 2026-04-01
+```
+
+Only dates `frmj financing` was actually run on have data — there's no way to backfill earlier dates. Use `--quiet` to fetch and record silently (no output on success; errors still print and exit 1) for an unattended daily cron job:
+
+```sh
+frmj financing --quiet
+```
+
+```cron
+0 0 * * * /path/to/frmj financing --quiet
+```
+
 ### `frmj trade`
 
 Interactive trade planning and execution flow.

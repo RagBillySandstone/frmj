@@ -255,6 +255,36 @@ CREATE INDEX IF NOT EXISTS idx_account_groups_group
 
 
 -- -------------------------------------------------------------------------
+-- Financing rate snapshots — daily captures of Oanda's published rates
+-- -------------------------------------------------------------------------
+-- Oanda's API only exposes the *current* long/short financing rate (via
+-- GET /accounts/{id}/instruments); there is no endpoint for historical
+-- rates. So `frmj financing` records a snapshot of what it just fetched
+-- every time it runs, giving `frmj financing --date` something to look up
+-- later. History therefore only covers dates on or after a user's first
+-- `frmj financing` call — there is no way to backfill earlier dates.
+CREATE TABLE IF NOT EXISTS financing_rate_snapshots (
+    account_id  TEXT    NOT NULL,
+    instrument  TEXT    NOT NULL,
+
+    -- Calendar date (YYYY-MM-DD) the snapshot was captured on, in the local
+    -- timezone at capture time. One row per (account, instrument, date);
+    -- re-running `frmj financing` the same day overwrites it with the
+    -- latest fetch rather than accumulating duplicates.
+    rate_date   TEXT    NOT NULL,
+
+    -- Decimal strings (same convention as raw_json field values elsewhere)
+    -- holding the annualized long/short rate fractions, e.g. "-0.0049".
+    long_rate   TEXT    NOT NULL,
+    short_rate  TEXT    NOT NULL,
+
+    recorded_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+
+    PRIMARY KEY (account_id, instrument, rate_date)
+);
+
+
+-- -------------------------------------------------------------------------
 -- Config — flat key/value store for account settings
 -- -------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS config (

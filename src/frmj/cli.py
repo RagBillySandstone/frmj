@@ -49,6 +49,15 @@ Commands
     units, entry price, unrealised P/L, margin, TP/SL levels.  Trades that
     have journal notes in the local DB are flagged with ``[note]``.
 
+``frmj financing [--date YYYY-MM-DD] [--quiet]``
+    Show current long/short financing rates (Oanda's annualized daily
+    financing percentages) for every tradable FX pair, grouped major /
+    minor / exotic, alphabetical within each group. Each live fetch also
+    records a snapshot locally, since Oanda has no historical-rate endpoint;
+    ``--date`` looks up a previously recorded snapshot instead of fetching
+    live. ``--quiet`` fetches and records with no output on success, for a
+    daily cron job.
+
 ``frmj close <INSTRUMENT>``
     Close all open tickets for an instrument.  Shows each ticket's current
     P/L and prompts for confirmation before sending any close requests.
@@ -98,7 +107,7 @@ import os
 import sqlite3
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
 import httpx
@@ -167,7 +176,13 @@ from frmj.domain.risk import (
     evaluate_trade,
 )
 from frmj.domain.sizing import Direction, UnitsCalc, compute_units
-from frmj.execution.oanda import AccountSummary, OandaClient, OpenTrade, OrderFill
+from frmj.execution.oanda import (
+    AccountSummary,
+    FinancingRate,
+    OandaClient,
+    OpenTrade,
+    OrderFill,
+)
 from frmj.execution.sync import sync_cold, sync_incremental
 
 # ---------------------------------------------------------------------------
@@ -251,7 +266,6 @@ _FX_PAIRS: tuple[str, ...] = (
     "nzd_jpy",
     # SGD crosses
     "sgd_chf",
-    "sgd_hkd",
     "sgd_jpy",
     # USD exotics
     "usd_cnh",
@@ -262,7 +276,6 @@ _FX_PAIRS: tuple[str, ...] = (
     "usd_mxn",
     "usd_nok",
     "usd_pln",
-    "usd_sar",
     "usd_sek",
     "usd_sgd",
     "usd_thb",
@@ -285,6 +298,38 @@ _FX_PAIRS: tuple[str, ...] = (
     "xpt_usd",
 )
 
+# The eight currencies conventionally treated as "majors" in FX. Used to
+# classify a currency pair as major/minor/exotic for the ``financing``
+# command — see _pair_tier.
+_MAJOR_CURRENCIES: frozenset[str] = frozenset(
+    {"USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"}
+)
+
+# Metals trade against USD like a currency pair but aren't FX at all, so
+# they're excluded from the major/minor/exotic financing-rate listing.
+_METAL_INSTRUMENTS: frozenset[str] = frozenset(
+    {"XAG_USD", "XAU_USD", "XCU_USD", "XPD_USD", "XPT_USD"}
+)
+
+#: Every FX currency pair from _FX_PAIRS, uppercased and with metals
+#: excluded — the instrument list the ``financing`` command fetches rates for.
+_FINANCING_PAIRS: tuple[str, ...] = tuple(
+    p.upper() for p in _FX_PAIRS if p.upper() not in _METAL_INSTRUMENTS
+)
+
+
+def _pair_tier(instrument: str) -> str:
+    """Classify an FX pair as ``"major"``, ``"minor"``, or ``"exotic"``.
+
+    Major: USD paired with one of the other seven major currencies (the
+    conventional USD majors). Minor (cross): both currencies are majors,
+    neither is USD. Exotic: at least one currency isn't in the major set.
+    """
+    base, quote = instrument.split("_")
+    if base not in _MAJOR_CURRENCIES or quote not in _MAJOR_CURRENCIES:
+        return "exotic"
+    return "major" if "USD" in (base, quote) else "minor"
+
 
 def _complete_instrument(incomplete: str) -> list[str]:
     """Return FX pairs whose names start with *incomplete* (case-insensitive)."""
@@ -293,6 +338,20 @@ def _complete_instrument(incomplete: str) -> list[str]:
 
 def _complete_direction(incomplete: str) -> list[str]:
     return [d for d in ("long", "short") if d.startswith(incomplete.lower())]
+
+
+def _complete_account_name(incomplete: str) -> list[str]:
+    """Return configured account names whose names start with *incomplete*."""
+    conn = get_db()
+    try:
+        names = [a.name for a in list_accounts(conn)]
+    finally:
+        conn.close()
+    return [n for n in names if n.startswith(incomplete)]
+
+
+def _complete_env_type(incomplete: str) -> list[str]:
+    return [e for e in ("practice", "live") if e.startswith(incomplete.lower())]
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +449,245 @@ def positions() -> None:
     _display_account_summary(summary)
 
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# financing command
+# ---------------------------------------------------------------------------
+
+
+def _fmt_financing_pct(rate: Decimal) -> str:
+    """Format an annualized financing-rate fraction as a signed percentage.
+
+    E.g. ``Decimal("-0.0141")`` -> ``"-1.4100%"``. Four decimal places
+    (rather than the app-wide 1dp convention used for trade-level
+    percentages like win rate) because financing-rate differences that
+    matter to a carry trader are often well under 1%.
+    """
+    return f"{rate * 100:+.4f}%"
+
+
+def _color_financing_pct(rate: Decimal) -> str:
+    """Color a formatted financing-rate percentage green (positive) or red (negative)."""
+    text = _fmt_financing_pct(rate)
+    if rate > 0:
+        return typer.style(text, fg=typer.colors.GREEN)
+    if rate < 0:
+        return typer.style(text, fg=typer.colors.RED)
+    return text
+
+
+def _color_financing_pct_padded(rate: Decimal, width: int) -> str:
+    """Return _color_financing_pct(rate) right-justified to *width* visible chars."""
+    return " " * max(0, width - len(_fmt_financing_pct(rate))) + _color_financing_pct(
+        rate
+    )
+
+
+def _group_financing_rates(
+    rates: list[FinancingRate],
+) -> dict[str, list[FinancingRate]]:
+    """Bucket *rates* into major/minor/exotic tiers, alphabetical within each."""
+    groups: dict[str, list[FinancingRate]] = {"major": [], "minor": [], "exotic": []}
+    for rate in sorted(rates, key=lambda r: r.instrument):
+        groups[_pair_tier(rate.instrument)].append(rate)
+    return groups
+
+
+def _record_financing_snapshot(
+    conn: sqlite3.Connection,
+    account_id: str,
+    rates: list[FinancingRate],
+    rate_date: str,
+) -> None:
+    """Upsert today's fetched *rates* into ``financing_rate_snapshots``.
+
+    Oanda's API exposes only the current rate, so this is the only way
+    ``frmj financing --date`` has anything to look up later. Re-running on
+    the same *rate_date* overwrites the existing rows (latest fetch wins)
+    rather than accumulating duplicates.
+    """
+    conn.executemany(
+        """
+        INSERT OR REPLACE INTO financing_rate_snapshots
+            (account_id, instrument, rate_date, long_rate, short_rate)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        [
+            (account_id, r.instrument, rate_date, str(r.long_rate), str(r.short_rate))
+            for r in rates
+        ],
+    )
+    conn.commit()
+
+
+def _load_financing_snapshot(
+    conn: sqlite3.Connection, account_id: str, rate_date: str
+) -> list[FinancingRate]:
+    """Return the recorded financing-rate snapshot for *account_id* on *rate_date*.
+
+    Empty list if no snapshot was ever captured for that date (e.g. it
+    predates the user's first ``frmj financing`` run, or falls on a date
+    that command was never invoked on).
+    """
+    rows = conn.execute(
+        """
+        SELECT instrument, long_rate, short_rate
+        FROM financing_rate_snapshots
+        WHERE account_id = ? AND rate_date = ?
+        """,
+        (account_id, rate_date),
+    ).fetchall()
+    return [
+        FinancingRate(
+            row["instrument"], Decimal(row["long_rate"]), Decimal(row["short_rate"])
+        )
+        for row in rows
+    ]
+
+
+def _display_financing_rates(
+    rates: list[FinancingRate], rate_date: str | None = None
+) -> None:
+    """Render the major/minor/exotic financing-rate table for *rates*.
+
+    *rate_date* customizes the header for a stored snapshot (``--date``);
+    ``None`` renders the header for a live fetch.
+    """
+    groups = _group_financing_rates(rates)
+    long_w = max(len(_fmt_financing_pct(r.long_rate)) for r in rates)
+    short_w = max(len(_fmt_financing_pct(r.short_rate)) for r in rates)
+    instr_w = max(9, max(len(r.instrument) for r in rates))
+
+    typer.echo("─" * 50)
+    if rate_date is None:
+        typer.echo("Annualized financing rates (updated daily)")
+    else:
+        typer.echo(f"Annualized financing rates — snapshot from {rate_date}")
+    typer.echo("")
+
+    first = True
+    for label, tier_rates in (
+        ("Majors", groups["major"]),
+        ("Minors", groups["minor"]),
+        ("Exotics", groups["exotic"]),
+    ):
+        if not tier_rates:
+            continue
+        if not first:
+            typer.echo("")
+        first = False
+        typer.echo(label)
+        typer.echo("─" * 50)
+        typer.echo(f"  {'':<{instr_w}}  {'Long':>{long_w}}  {'Short':>{short_w}}")
+        for rate in tier_rates:
+            typer.echo(
+                f"  {rate.instrument:<{instr_w}}  "
+                f"{_color_financing_pct_padded(rate.long_rate, long_w)}  "
+                f"{_color_financing_pct_padded(rate.short_rate, short_w)}"
+            )
+
+
+@app.command()
+def financing(
+    date_str: str | None = typer.Option(
+        None,
+        "--date",
+        help=(
+            "Show a previously recorded snapshot for this date (YYYY-MM-DD) "
+            "instead of fetching live rates. Only dates `frmj financing` was "
+            "actually run on have data — Oanda has no historical-rate API."
+        ),
+        show_default=False,
+    ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help=(
+            "Fetch and record today's snapshot with no output on success "
+            "(errors still print to stderr and exit 1) — for a daily cron job."
+        ),
+    ),
+) -> None:
+    """Show long/short financing rates for every tradable FX pair.
+
+    Rates are Oanda's annualized long/short financing percentages — what
+    Oanda's own site calls "daily financing rates" (republished daily, but
+    quoted per year, not per day). A negative rate means you pay to hold
+    that side overnight; a positive rate means you're paid. Pairs are
+    grouped major/minor/exotic, alphabetical within each group.
+
+    With no options, fetches live rates from Oanda and also records them as
+    today's snapshot. With ``--date``, skips the API call and instead looks
+    up whatever snapshot was recorded for that date — Oanda's API has no
+    historical-rate endpoint, so only dates this command has previously run
+    on will have data. ``--quiet`` still fetches and records live but prints
+    nothing on success, for unattended use (e.g. a daily cron job that just
+    wants the snapshot recorded); it cannot be combined with ``--date``.
+    """
+    conn = get_db()
+
+    if quiet and date_str is not None:
+        typer.echo("Error: --quiet cannot be combined with --date.", err=True)
+        conn.close()
+        raise typer.Exit(1)
+
+    if date_str is not None:
+        try:
+            date.fromisoformat(date_str)
+        except ValueError:
+            typer.echo(
+                f"Error: '{date_str}' is not a valid date (YYYY-MM-DD).", err=True
+            )
+            conn.close()
+            raise typer.Exit(1)
+
+        try:
+            client = get_client(conn)
+        except RuntimeError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            conn.close()
+            raise typer.Exit(1)
+
+        rates = _load_financing_snapshot(conn, client.account_id, date_str)
+        conn.close()
+
+        if not rates:
+            typer.echo(f"No financing snapshot recorded for {date_str}.")
+            return
+
+        _display_financing_rates(rates, rate_date=date_str)
+        return
+
+    try:
+        client = get_client(conn)
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        conn.close()
+        raise typer.Exit(1)
+
+    try:
+        rates = client.get_financing_rates(list(_FINANCING_PAIRS))
+    except Exception as exc:
+        typer.echo(f"Error fetching financing rates: {exc}", err=True)
+        conn.close()
+        raise typer.Exit(1)
+
+    if rates:
+        _record_financing_snapshot(
+            conn, client.account_id, rates, date.today().isoformat()
+        )
+    conn.close()
+
+    if quiet:
+        return
+
+    if not rates:
+        typer.echo("No financing rates returned.")
+        return
+
+    _display_financing_rates(rates)
 
 
 # ---------------------------------------------------------------------------
@@ -600,7 +898,9 @@ def account_list() -> None:
 
 @account_app.command("use")
 def account_use(
-    name: str = typer.Argument(..., help="Account name to activate"),
+    name: str = typer.Argument(
+        ..., help="Account name to activate", autocompletion=_complete_account_name
+    ),
 ) -> None:
     """Set the active account."""
     conn = get_db()
@@ -638,7 +938,9 @@ def account_current() -> None:
 
 @account_app.command("remove")
 def account_remove(
-    name: str = typer.Argument(..., help="Account name to remove"),
+    name: str = typer.Argument(
+        ..., help="Account name to remove", autocompletion=_complete_account_name
+    ),
 ) -> None:
     """Remove an account profile (does not delete the associated token)."""
     conn = get_db()
@@ -669,6 +971,7 @@ def account_set_token(
     env_type: str | None = typer.Argument(
         None,
         help="Token environment: 'practice' or 'live'. Defaults to the active account's type.",
+        autocompletion=_complete_env_type,
     ),
 ) -> None:
     """Store the Oanda API token for the practice or live environment in the OS keychain."""
@@ -706,7 +1009,9 @@ def account_set_token(
 
 @account_app.command("rename")
 def account_rename(
-    old_name: str = typer.Argument(..., help="Current account name"),
+    old_name: str = typer.Argument(
+        ..., help="Current account name", autocompletion=_complete_account_name
+    ),
     new_name: str = typer.Argument(..., help="New account name"),
 ) -> None:
     """Rename an account profile without changing its Oanda ID or settings."""
@@ -767,12 +1072,30 @@ def _complete_account_group(incomplete: str) -> list[str]:
     return [n for n in names if n.startswith(incomplete)]
 
 
+def _complete_group_member(ctx: typer.Context, incomplete: str) -> list[str]:
+    """Return accounts already in the group named by the preceding argument.
+
+    Falls back to an empty list if the group name hasn't resolved to any
+    members yet (e.g. it doesn't exist), mirroring ``_complete_config_value``.
+    """
+    conn = get_db()
+    try:
+        members = list_group_members(conn, ctx.params.get("group_name", ""))
+    finally:
+        conn.close()
+    return [m.name for m in members if m.name.startswith(incomplete)]
+
+
 @group_app.command("add")
 def account_group_add(
     group_name: str = typer.Argument(
         ..., help="Group name, e.g. prop-firms", autocompletion=_complete_account_group
     ),
-    account_name: str = typer.Argument(..., help="Account name to add to the group"),
+    account_name: str = typer.Argument(
+        ...,
+        help="Account name to add to the group",
+        autocompletion=_complete_account_name,
+    ),
 ) -> None:
     """Add an account to a group, creating the group if it doesn't exist yet."""
     conn = get_db()
@@ -807,7 +1130,9 @@ def account_group_remove(
         ..., help="Group name", autocompletion=_complete_account_group
     ),
     account_name: str = typer.Argument(
-        ..., help="Account name to remove from the group"
+        ...,
+        help="Account name to remove from the group",
+        autocompletion=_complete_group_member,
     ),
 ) -> None:
     """Remove an account from a group."""
@@ -964,12 +1289,31 @@ def _complete_config_key(incomplete: str) -> list[str]:
     return sorted(k for k in VALID_CONFIG_KEYS if k.startswith(incomplete.lower()))
 
 
+#: For config keys backed by an enum, the settings a user is allowed to set.
+#: Keys not listed here (e.g. max_open_trades, percent_of_equity) take a
+#: free-form numeric value and get no value completion.
+_CONFIG_KEY_VALUE_CHOICES: dict[str, list[str]] = {
+    "risk_strategy": [s.value for s in RiskStrategy],
+    "blocking_mode": [m.value for m in BlockingMode],
+    "correlation_blocking_mode": [m.value for m in BlockingMode],
+    "scale_in": [p.value for p in ScaleInPolicy],
+}
+
+
+def _complete_config_value(ctx: typer.Context, incomplete: str) -> list[str]:
+    """Return valid settings for the config key already typed, if any."""
+    choices = _CONFIG_KEY_VALUE_CHOICES.get(ctx.params.get("key") or "", [])
+    return [v for v in choices if v.startswith(incomplete.lower())]
+
+
 @config_app.command("set")
 def config_set(
     key: str = typer.Argument(
         ..., help="Config key, e.g. account_id", autocompletion=_complete_config_key
     ),
-    value: str = typer.Argument(..., help="Config value"),
+    value: str = typer.Argument(
+        ..., help="Config value", autocompletion=_complete_config_value
+    ),
 ) -> None:
     """Set a configuration value."""
     if key not in VALID_CONFIG_KEYS:
@@ -1021,7 +1365,11 @@ def config_get(
 
 @config_app.command("unset")
 def config_unset(
-    key: str = typer.Argument(..., help="Config key to remove, e.g. account_id"),
+    key: str = typer.Argument(
+        ...,
+        help="Config key to remove, e.g. account_id",
+        autocompletion=_complete_config_key,
+    ),
 ) -> None:
     """Remove a configuration key from the database."""
     conn = get_db()
@@ -1811,6 +2159,22 @@ _EXPORT_FIELDS = (
 )
 
 
+def _complete_export_format(incomplete: str) -> list[str]:
+    return [f for f in ("csv", "json") if f.startswith(incomplete.lower())]
+
+
+def _complete_txn_type(incomplete: str) -> list[str]:
+    """Return distinct transaction types already seen in the local DB."""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT type FROM transactions ORDER BY type"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows if r[0].startswith(incomplete.upper())]
+
+
 @app.command()
 def export(
     fmt: str = typer.Option(
@@ -1818,6 +2182,7 @@ def export(
         "--format",
         "-f",
         help="Output format: csv or json.",
+        autocompletion=_complete_export_format,
     ),
     output: str | None = typer.Option(
         None,
@@ -1838,6 +2203,7 @@ def export(
         None,
         "--type",
         "-t",
+        autocompletion=_complete_txn_type,
         help="Filter by transaction type, e.g. ORDER_FILL.",
         show_default=False,
     ),
@@ -2031,6 +2397,35 @@ def stats() -> None:
     _display_stats(trades, tag_pl, financing_by_instrument)
 
 
+def _complete_oanda_id(incomplete: str) -> list[str]:
+    """Return locally-synced Oanda transaction IDs starting with *incomplete*.
+
+    Filtered in SQL (rather than fetched in full like the other DB-backed
+    completers) since the transactions table can grow much larger than the
+    account/tag/group tables the other completers draw from.
+    """
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT oanda_id FROM transactions WHERE oanda_id LIKE ? "
+            "ORDER BY CAST(oanda_id AS INTEGER) DESC LIMIT 50",
+            (f"{incomplete}%",),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows]
+
+
+def _complete_tag(incomplete: str) -> list[str]:
+    """Return distinct tags already attached to some transaction in the local DB."""
+    conn = get_db()
+    try:
+        rows = conn.execute("SELECT DISTINCT tag FROM tags ORDER BY tag").fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows if r[0].startswith(incomplete.lower())]
+
+
 # ---------------------------------------------------------------------------
 # note command
 # ---------------------------------------------------------------------------
@@ -2038,7 +2433,11 @@ def stats() -> None:
 
 @app.command()
 def note(
-    oanda_id: str = typer.Argument(..., help="Oanda transaction ID to annotate"),
+    oanda_id: str = typer.Argument(
+        ...,
+        help="Oanda transaction ID to annotate",
+        autocompletion=_complete_oanda_id,
+    ),
     text: str = typer.Argument(..., help="Note text"),
 ) -> None:
     """Attach a note to a locally-synced transaction."""
@@ -2072,8 +2471,12 @@ def note(
 
 @app.command()
 def tag(
-    oanda_id: str = typer.Argument(..., help="Oanda transaction ID to tag"),
-    tags: list[str] = typer.Argument(..., help="One or more tags to attach"),
+    oanda_id: str = typer.Argument(
+        ..., help="Oanda transaction ID to tag", autocompletion=_complete_oanda_id
+    ),
+    tags: list[str] = typer.Argument(
+        ..., help="One or more tags to attach", autocompletion=_complete_tag
+    ),
 ) -> None:
     """Attach one or more labels to a locally-synced transaction."""
     conn = get_db()
@@ -2119,6 +2522,7 @@ def journal(
         "--type",
         "-t",
         help="Filter by transaction type, e.g. ORDER_FILL.",
+        autocompletion=_complete_txn_type,
         show_default=False,
     ),
     since: str | None = typer.Option(
@@ -2139,6 +2543,7 @@ def journal(
         "--tag",
         "-T",
         help="Filter to transactions tagged with this label.",
+        autocompletion=_complete_tag,
         show_default=False,
     ),
 ) -> None:
@@ -2728,7 +3133,7 @@ def _color_pl_padded(pl: Decimal, width: int) -> str:
 # Fixed widths for the variable-length "extra" (instrument/direction/units)
 # and P/L segments of a journal row, so the trailing time column lands in the
 # same place regardless of how long those segments are for a given row.
-_JOURNAL_EXTRA_W = 36
+_JOURNAL_EXTRA_W = 46
 _JOURNAL_PL_W = 12
 
 
@@ -2746,13 +3151,17 @@ def _display_transaction(txn: sqlite3.Row) -> None:
             instrument = data.get("instrument", "")
             units = int(Decimal(data.get("units", "0")))
             reason = data.get("reason", "")
+            side = "BUY" if units >= 0 else "SELL"
             if reason == "TAKE_PROFIT_ORDER":
                 direction = "TP"
             elif reason == "STOP_LOSS_ORDER":
                 direction = "SL"
             else:
                 direction = "LONG" if units >= 0 else "SHORT"
-            extra = f"  {instrument} {direction} {abs(units):,} units"
+            extra = f"  {instrument} {direction} {side} {abs(units):,} units"
+            price = data.get("price")
+            if price:
+                extra += f" @ {price}"
             # pl is non-zero only on closing fills; opening fills carry "0".
             pl_val = Decimal(data.get("pl", "0") or "0")
             if pl_val != 0:

@@ -6,7 +6,7 @@ Endpoints implemented
   GET  /accounts/{id}/transactions              (cold sync — pages index)
   GET  /accounts/{id}/transactions/sinceid      (incremental sync)
   GET  /accounts/{id}/summary                  (NAV, margin, open trade count)
-  GET  /accounts/{id}/instruments              (InstrumentSpec for one pair)
+  GET  /accounts/{id}/instruments              (InstrumentSpec / financing rates)
   GET  /accounts/{id}/pricing                  (live bid/ask + conversions)
   GET  /accounts/{id}/trades                   (open ticket count per instrument)
   POST /accounts/{id}/orders                   (place market order)
@@ -194,6 +194,24 @@ class AccountSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class FinancingRate:
+    """Long/short financing rate for one instrument, from the ``financing``
+    block of GET /accounts/{id}/instruments.
+
+    Oanda quotes ``long_rate``/``short_rate`` as annualized decimal fractions
+    (``Decimal("-0.03")`` means -3.00%/year) that it republishes daily — this
+    is the same convention Oanda's own site uses for what it calls "daily
+    financing rates" (the *rate* is annualized; it is the *publication* that
+    is daily). A negative rate means you pay to hold that side overnight; a
+    positive rate means you're paid.
+    """
+
+    instrument: str
+    long_rate: Decimal
+    short_rate: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class OrderFill:
     """Result of a successfully filled market order.
 
@@ -337,6 +355,20 @@ def _parse_instrument_spec(instr: dict[str, Any]) -> InstrumentSpec:
         min_units=int(Decimal(instr["minimumTradeSize"])),
         units_increment=1,
         display_precision=int(instr["displayPrecision"]),
+    )
+
+
+def _parse_financing_rate(instr: dict[str, Any]) -> FinancingRate:
+    """Parse one element of the ``instruments`` array into a ``FinancingRate``.
+
+    Pulls only the ``financing`` sub-object; the rest of *instr* (margin
+    rate, pip location, etc.) is handled by ``_parse_instrument_spec``.
+    """
+    financing = instr["financing"]
+    return FinancingRate(
+        instrument=instr["name"],
+        long_rate=Decimal(financing["longRate"]),
+        short_rate=Decimal(financing["shortRate"]),
     )
 
 
@@ -554,6 +586,23 @@ class OandaClient:
         if not instruments:
             raise ValueError(f"Instrument {name!r} not found for this account")
         return _parse_instrument_spec(instruments[0])
+
+    def get_financing_rates(self, instruments: list[str]) -> list[FinancingRate]:
+        """Fetch long/short financing rates for *instruments* in one request.
+
+        Uses GET /accounts/{id}/instruments with a comma-separated
+        ``instruments`` filter, so displaying rates for the whole tradable
+        pairs list costs one HTTP call rather than one per pair. If *any*
+        instrument in the list isn't tradeable for this account, Oanda
+        returns 404 for the whole request rather than filtering it out —
+        every name passed in must be valid.
+        """
+        resp = self._http.get(
+            f"{self._base_url}/accounts/{self.account_id}/instruments",
+            params={"instruments": ",".join(instruments)},
+        )
+        resp.raise_for_status()
+        return [_parse_financing_rate(i) for i in resp.json().get("instruments", [])]
 
     def get_price(
         self,
