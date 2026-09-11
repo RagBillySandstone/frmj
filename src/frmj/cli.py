@@ -46,8 +46,9 @@ Commands
 
 ``frmj positions``
     Show all open trades fetched live from Oanda: instrument, direction,
-    units, entry price, unrealised P/L, margin, TP/SL levels.  Trades that
-    have journal notes in the local DB are flagged with ``[note]``.
+    units, entry price, unrealised P/L, margin, TP/SL levels with the
+    projected dollar P/L if each level is hit.  Trades that have journal
+    notes in the local DB are flagged with ``[note]``.
 
 ``frmj financing [--date YYYY-MM-DD] [--quiet]``
     Show current long/short financing rates (Oanda's annualized daily
@@ -442,8 +443,25 @@ def positions() -> None:
     typer.echo(f"{len(trades)} open {label}")
     typer.echo("─" * 56)
 
+    # Fetch one live quote per instrument that has TP/SL set, so we can show
+    # the projected dollar P/L alongside each exit price. Best-effort: a
+    # failed fetch just means that instrument's trades show prices without
+    # dollar amounts rather than failing the whole command.
+    quote_to_home: dict[str, Decimal] = {}
     for trade in trades:
-        _display_open_trade(conn, trade)
+        if trade.instrument in quote_to_home:
+            continue
+        if trade.take_profit_price is None and trade.stop_loss_price is None:
+            continue
+        try:
+            quote_to_home[trade.instrument] = client.get_price(
+                trade.instrument
+            ).quote_to_home
+        except Exception:
+            pass
+
+    for trade in trades:
+        _display_open_trade(conn, trade, quote_to_home.get(trade.instrument))
 
     typer.echo("─" * 56)
     _display_account_summary(summary)
@@ -3262,8 +3280,29 @@ def _pl_str(amount: Decimal) -> str:
     return typer.style(f"{sign}${amount:,.2f}", fg=color)
 
 
-def _display_open_trade(conn: sqlite3.Connection, trade: OpenTrade) -> None:
-    """Print one open trade in the positions view."""
+def _projected_pl_at_price(
+    trade: OpenTrade, exit_price: Decimal, quote_to_home: Decimal
+) -> Decimal:
+    """Home-currency P/L if *trade* were closed at *exit_price* right now.
+
+    Positive when *exit_price* is favorable for the trade's direction
+    (up for LONG, down for SHORT), matching the sign convention used by
+    ``compute_exit_levels``'s ``projected_profit_home``/``projected_loss_home``.
+    """
+    favor_sign = Decimal(1) if trade.direction == "LONG" else Decimal(-1)
+    return favor_sign * (exit_price - trade.open_price) * trade.units * quote_to_home
+
+
+def _display_open_trade(
+    conn: sqlite3.Connection, trade: OpenTrade, quote_to_home: Decimal | None
+) -> None:
+    """Print one open trade in the positions view.
+
+    ``quote_to_home`` is the live conversion rate for the trade's instrument,
+    used to show the dollar P/L expected if the trade hits TP or SL. ``None``
+    when the live quote couldn't be fetched, in which case only the raw
+    TP/SL prices are shown.
+    """
     note_count = conn.execute(
         """
         SELECT COUNT(*) FROM notes n
@@ -3284,9 +3323,19 @@ def _display_open_trade(conn: sqlite3.Connection, trade: OpenTrade) -> None:
 
     exits_parts: list[str] = []
     if trade.take_profit_price is not None:
-        exits_parts.append(f"TP: {trade.take_profit_price}")
+        tp_str = f"TP: {trade.take_profit_price}"
+        if quote_to_home is not None:
+            tp_pl = _projected_pl_at_price(
+                trade, trade.take_profit_price, quote_to_home
+            )
+            tp_str += f" (+${tp_pl:,.2f})"
+        exits_parts.append(tp_str)
     if trade.stop_loss_price is not None:
-        exits_parts.append(f"SL: {trade.stop_loss_price}")
+        sl_str = f"SL: {trade.stop_loss_price}"
+        if quote_to_home is not None:
+            sl_pl = _projected_pl_at_price(trade, trade.stop_loss_price, quote_to_home)
+            sl_str += f" (${sl_pl:,.2f})"
+        exits_parts.append(sl_str)
     exits_str = "  ".join(exits_parts) if exits_parts else "no TP/SL set"
 
     typer.echo(

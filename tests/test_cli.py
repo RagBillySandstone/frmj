@@ -3656,6 +3656,47 @@ class TestPositionsCommand:
         result = self._invoke(monkeypatch, [_open_trade(tp_price=None, sl_price=None)])
         assert "no TP/SL set" in result.output
 
+    def test_shows_dollar_amount_at_tp_and_sl(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """TP/SL lines include the projected home-currency P/L if hit.
+
+        FakeFullClient.get_price returns quote_to_home=1, so for this LONG
+        10,000-unit EUR_USD trade: TP is 500 pips (+$50.00) above entry,
+        SL is 300 pips ($-30.00) below entry.
+        """
+        result = self._invoke(
+            monkeypatch,
+            [
+                _open_trade(
+                    direction="LONG",
+                    units=10_000,
+                    open_price="1.10050",
+                    tp_price="1.10550",
+                    sl_price="1.09750",
+                )
+            ],
+        )
+        assert "TP: 1.10550 (+$50.00)" in result.output
+        assert "SL: 1.09750 ($-30.00)" in result.output
+
+    def test_dollar_amount_omitted_when_price_fetch_fails(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the live quote can't be fetched, TP/SL prices still show but
+        without a dollar amount, rather than failing the whole command."""
+        fake = FakeFullClient(open_trades=[_open_trade()])
+
+        def _fail(instrument: str, home_currency: str = "USD") -> PriceQuote:
+            raise RuntimeError("pricing endpoint unavailable")
+
+        fake.get_price = _fail  # type: ignore[method-assign]
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["positions"])
+        assert result.exit_code == 0, result.output
+        assert "TP: 1.10550" in result.output
+        assert "$" not in result.output.split("TP: 1.10550")[1].split("\n")[0]
+
     def test_shows_position_count(
         self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
