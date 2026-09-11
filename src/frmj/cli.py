@@ -502,6 +502,28 @@ def _color_financing_pct_padded(rate: Decimal, width: int) -> str:
     )
 
 
+#: Divisor Oanda uses to turn its annualized financing rate into a daily
+#: figure. We don't attempt to model the Wednesday triple-charge (weekend
+#: rollover) — this is a plain daily estimate, not what Oanda will actually
+#: post on any given day.
+_FINANCING_DAYS_PER_YEAR = Decimal("365")
+
+
+def _daily_financing_home(
+    *, units: int, entry_price: Decimal, quote_to_home: Decimal, rate: Decimal
+) -> Decimal:
+    """Estimate one day's financing accrual for a position, in home currency.
+
+    ``rate`` is Oanda's annualized financing fraction for the position's
+    direction (``FinancingRate.long_rate`` or ``.short_rate``); it already
+    carries the sign (positive = position earns financing, negative =
+    position pays it). The notional position value is ``units * entry_price``
+    in quote currency, converted to home currency via ``quote_to_home``.
+    """
+    notional_home = Decimal(units) * entry_price * quote_to_home
+    return notional_home * rate / _FINANCING_DAYS_PER_YEAR
+
+
 def _group_financing_rates(
     rates: list[FinancingRate],
 ) -> dict[str, list[FinancingRate]]:
@@ -1877,6 +1899,16 @@ def trade(
             conn.close()
             raise typer.Exit(1)
 
+        # Financing rate for the trade-plan display below. Best-effort — a
+        # failure here (e.g. Oanda's instruments endpoint hiccups) shouldn't
+        # block the trade, it just means the plan omits the financing line.
+        try:
+            financing_rate: FinancingRate | None = client.get_financing_rates(
+                [instrument]
+            )[0]
+        except Exception:
+            financing_rate = None
+
         # Risk model
         try:
             sizing_decision = evaluate_trade(
@@ -1958,6 +1990,22 @@ def trade(
         typer.echo(f"  Pip:     ${pv:.2f}  ({pip_pct:.2f}% of margin)")
         typer.echo(f"  Entry:   {entry_price} ({direction_str})")
         typer.echo(f"  Unused:  ${units_calc.capital_unused:,.2f}")
+        if financing_rate is not None:
+            rate = (
+                financing_rate.long_rate
+                if direction is Direction.LONG
+                else financing_rate.short_rate
+            )
+            daily_financing = _daily_financing_home(
+                units=units_calc.units,
+                entry_price=entry_price,
+                quote_to_home=quote.quote_to_home,
+                rate=rate,
+            )
+            typer.echo(
+                f"  Financing: {_pl_str(daily_financing)}/day"
+                f"  ({_color_financing_pct(rate)} ann.)"
+            )
         typer.echo("")
 
         # TP/SL prompts
@@ -3258,7 +3306,7 @@ def _display_exits(exits: ExitLevels, margin_used: Decimal) -> None:
         assert exits.return_on_margin_at_tp is not None
         typer.echo(
             f"  TP: {exits.take_profit_price}"
-            f"  →  +${exits.projected_profit_home:,.2f}"
+            f"  →  {_pl_str(exits.projected_profit_home)}"
             f"  ({exits.return_on_margin_at_tp * 100:+.1f}% RoM)"
         )
     if exits.stop_loss_price is not None:
@@ -3266,7 +3314,7 @@ def _display_exits(exits: ExitLevels, margin_used: Decimal) -> None:
         assert exits.return_on_margin_at_sl is not None
         typer.echo(
             f"  SL: {exits.stop_loss_price}"
-            f"  →  ${exits.projected_loss_home:,.2f}"
+            f"  →  {_pl_str(exits.projected_loss_home)}"
             f"  ({exits.return_on_margin_at_sl * 100:+.1f}% RoM)"
         )
     for warn in exits.warnings:
@@ -3486,6 +3534,15 @@ def _trade_multi_account(
         raise typer.Exit(1)
     entry_price = quote.entry_price(direction)
 
+    # Financing rate for the trade-plan display below. Best-effort — a
+    # failure here shouldn't block the trade, it just omits the financing line.
+    try:
+        financing_rate: FinancingRate | None = primary_client.get_financing_rates(
+            [instrument]
+        )[0]
+    except Exception:
+        financing_rate = None
+
     # --- Per-account risk model, sizing, and correlation check ----------------
     plans: list[_AccountPlan] = []
     any_correlation_warnings = False
@@ -3569,17 +3626,32 @@ def _trade_multi_account(
     )
     typer.echo("─" * 60)
     typer.echo(f"  Entry:   {entry_price} ({direction_str})")
+    if financing_rate is not None:
+        financing_ann_rate = (
+            financing_rate.long_rate
+            if direction is Direction.LONG
+            else financing_rate.short_rate
+        )
     typer.echo("")
     for plan in plans:
         acct_type = "practice" if plan.account.is_practice else "live"
         pv = pip_value_home(plan.units_calc.units, spec, quote)
-        typer.echo(
+        line = (
             f"  {plan.account.name}  [{acct_type}]  "
             f"Capital at risk ${plan.sizing_decision.capital_to_deploy:,.2f}  "
             f"Units {plan.units_calc.units:,}  "
             f"Margin ${plan.units_calc.margin_used:,.2f}  "
             f"Pip ${pv:.2f}"
         )
+        if financing_rate is not None:
+            daily_financing = _daily_financing_home(
+                units=plan.units_calc.units,
+                entry_price=entry_price,
+                quote_to_home=quote.quote_to_home,
+                rate=financing_ann_rate,
+            )
+            line += f"  Financing {_pl_str(daily_financing)}/day"
+        typer.echo(line)
     typer.echo("")
 
     # --- TP/SL prompt (once) and per-account exit levels -----------------------

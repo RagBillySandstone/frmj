@@ -1693,6 +1693,35 @@ class TestDryRun:
         assert "TP:" not in result.output
         assert "SL:" not in result.output
 
+    def test_dry_run_shows_daily_financing(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Trade plan shows the estimated daily financing cost/credit."""
+        fake = FakeFullClient(
+            financing_rates=[
+                FinancingRate("EUR_USD", Decimal("-0.0141"), Decimal("0.0021"))
+            ]
+        )
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="50\n30\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "Financing:" in result.output
+        assert "/day" in result.output
+
+    def test_dry_run_omits_financing_line_when_rate_unavailable(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No financing line is shown when the rate fetch fails or is empty."""
+        fake = FakeFullClient(financing_should_fail=True)
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="50\n30\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "Financing:" not in result.output
+
 
 # ---------------------------------------------------------------------------
 # note command
