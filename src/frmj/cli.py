@@ -3376,13 +3376,13 @@ def _display_open_trade(
             tp_pl = _projected_pl_at_price(
                 trade, trade.take_profit_price, quote_to_home
             )
-            tp_str += f" (+${tp_pl:,.2f})"
+            tp_str += f" ({_pl_str(tp_pl)})"
         exits_parts.append(tp_str)
     if trade.stop_loss_price is not None:
         sl_str = f"SL: {trade.stop_loss_price}"
         if quote_to_home is not None:
             sl_pl = _projected_pl_at_price(trade, trade.stop_loss_price, quote_to_home)
-            sl_str += f" (${sl_pl:,.2f})"
+            sl_str += f" ({_pl_str(sl_pl)})"
         exits_parts.append(sl_str)
     exits_str = "  ".join(exits_parts) if exits_parts else "no TP/SL set"
 
