@@ -3325,6 +3325,10 @@ def _pl_str(amount: Decimal) -> str:
     """Return a sign-prefixed, coloured P/L string: green ≥0, red <0."""
     sign = "+" if amount >= 0 else ""
     color = typer.colors.GREEN if amount >= 0 else typer.colors.RED
+    # Decimal preserves a negative zero's sign in formatting (e.g. "-0.00"),
+    # which would double up with the "+" prefix above; normalize it away.
+    if amount == 0:
+        amount = abs(amount)
     return typer.style(f"{sign}${amount:,.2f}", fg=color)
 
 
