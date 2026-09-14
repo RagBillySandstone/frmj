@@ -2858,7 +2858,7 @@ class TestTradeErrors:
         """When compute_units raises, trade exits 1."""
         monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
         monkeypatch.setattr(
-            "frmj.cli.compute_units",
+            "frmj.services.compute_units",
             lambda **kw: (_ for _ in ()).throw(RuntimeError("sizing error")),
         )
         result = runner.invoke(app, ["trade", "EUR_USD", "long"])
@@ -4832,7 +4832,7 @@ class TestTradeMultiAccount:
             "frmj.cli.get_client_for_account", lambda account: fakes[account.name]
         )
         monkeypatch.setattr(
-            "frmj.cli.evaluate_trade",
+            "frmj.services.evaluate_trade",
             lambda **kw: (_ for _ in ()).throw(
                 MaxTradesExceeded("too many open trades")
             ),
@@ -4853,7 +4853,7 @@ class TestTradeMultiAccount:
             "frmj.cli.get_client_for_account", lambda account: fakes[account.name]
         )
         monkeypatch.setattr(
-            "frmj.cli.evaluate_correlation",
+            "frmj.services.evaluate_correlation",
             lambda **kw: ["shares USD exposure with an existing GBP_USD position"],
         )
         result = runner.invoke(
@@ -4944,7 +4944,7 @@ class TestTradeMultiAccount:
             warnings=("near max open trades",),
         )
         fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
-        monkeypatch.setattr("frmj.cli.evaluate_trade", lambda **kw: decision)
+        monkeypatch.setattr("frmj.services.evaluate_trade", lambda **kw: decision)
         result = self._invoke(
             monkeypatch,
             fakes,
@@ -4965,7 +4965,7 @@ class TestTradeMultiAccount:
             "frmj.cli.get_client_for_account", lambda account: fakes[account.name]
         )
         monkeypatch.setattr(
-            "frmj.cli.evaluate_correlation",
+            "frmj.services.evaluate_correlation",
             lambda **kw: (_ for _ in ()).throw(
                 CorrelatedPositionForbidden("blocked: correlated exposure")
             ),
@@ -4983,7 +4983,7 @@ class TestTradeMultiAccount:
             "frmj.cli.get_client_for_account", lambda account: fakes[account.name]
         )
         monkeypatch.setattr(
-            "frmj.cli.compute_units",
+            "frmj.services.compute_units",
             lambda **kw: (_ for _ in ()).throw(ValueError("bad sizing")),
         )
         result = runner.invoke(app, ["trade", "EUR_USD", "long", "--multi", "grp"])

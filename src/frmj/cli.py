@@ -173,10 +173,8 @@ from frmj.domain.risk import (
     ScaleInForbidden,
     ScaleInPolicy,
     SizingDecision,
-    evaluate_correlation,
-    evaluate_trade,
 )
-from frmj.domain.sizing import Direction, UnitsCalc, compute_units
+from frmj.domain.sizing import Direction, UnitsCalc
 from frmj.execution.oanda import (
     AccountSummary,
     FinancingRate,
@@ -1868,22 +1866,23 @@ def trade(
             conn.close()
             raise typer.Exit(1)
 
-        # Fetch live account state, instrument spec/quote, and financing rate.
+        # Fetch instrument spec/quote/financing rate and live account state.
         try:
-            context = services.fetch_market_context(client, instrument)
+            instrument_ctx = services.fetch_instrument_context(client, instrument)
+            account_ctx = services.fetch_account_context(client, instrument)
         except Exception as exc:
             typer.echo(f"Error fetching market data: {exc}", err=True)
             conn.close()
             raise typer.Exit(1)
-        summary = context.summary
-        spec = context.spec
-        quote = context.quote
-        financing_rate = context.financing_rate
+        summary = account_ctx.summary
+        spec = instrument_ctx.spec
+        quote = instrument_ctx.quote
+        financing_rate = instrument_ctx.financing_rate
 
-        # Risk model + correlated-position check.
+        # Risk model, correlated-position check, and unit sizing.
         try:
-            risk_eval = services.evaluate_trade_risk(
-                risk_config, context, instrument, direction
+            account_sizing = services.plan_account_sizing(
+                risk_config, account_ctx, instrument_ctx, instrument, direction
             )
         except MaxTradesExceeded as exc:
             typer.echo(f"Cannot trade: {exc}", err=True)
@@ -1897,8 +1896,13 @@ def trade(
             typer.echo(f"Cannot trade: {exc}", err=True)
             conn.close()
             raise typer.Exit(1)
-        sizing_decision = risk_eval.sizing_decision
-        correlation_warnings = risk_eval.correlation_warnings
+        except Exception as exc:
+            typer.echo(f"Error computing units: {exc}", err=True)
+            conn.close()
+            raise typer.Exit(1)
+        sizing_decision = account_sizing.sizing_decision
+        correlation_warnings = account_sizing.correlation_warnings
+        units_calc = account_sizing.units_calc
 
         for warn in sizing_decision.warnings:
             typer.echo(f"Warning: {warn}", err=True)
@@ -1912,19 +1916,6 @@ def trade(
             typer.echo("Order cancelled.")
             conn.close()
             raise typer.Exit(0)
-
-        # Sizing
-        try:
-            units_calc = compute_units(
-                capital_to_deploy=sizing_decision.capital_to_deploy,
-                spec=spec,
-                quote=quote,
-                direction=direction,
-            )
-        except Exception as exc:
-            typer.echo(f"Error computing units: {exc}", err=True)
-            conn.close()
-            raise typer.Exit(1)
 
         entry_price = quote.entry_price(direction)
 
@@ -3459,22 +3450,15 @@ def _trade_multi_account(
     # own order is placed.
     primary_client = clients[accounts[0].name]
     try:
-        spec = primary_client.get_instrument(instrument)
-        quote = primary_client.get_price(instrument)
+        instrument_ctx = services.fetch_instrument_context(primary_client, instrument)
     except Exception as exc:
         typer.echo(f"Error fetching market data: {exc}", err=True)
         conn.close()
         raise typer.Exit(1)
+    spec = instrument_ctx.spec
+    quote = instrument_ctx.quote
+    financing_rate = instrument_ctx.financing_rate
     entry_price = quote.entry_price(direction)
-
-    # Financing rate for the trade-plan display below. Best-effort — a
-    # failure here shouldn't block the trade, it just omits the financing line.
-    try:
-        financing_rate: FinancingRate | None = primary_client.get_financing_rates(
-            [instrument]
-        )[0]
-    except Exception:
-        financing_rate = None
 
     # --- Per-account risk model, sizing, and correlation check ----------------
     plans: list[_AccountPlan] = []
@@ -3482,65 +3466,44 @@ def _trade_multi_account(
     for acct in accounts:
         client = clients[acct.name]
         try:
-            summary = client.get_account_summary()
-            open_on_instr = client.get_open_tickets_on_instrument(instrument)
-            open_trades = client.get_open_trades()
+            account_ctx = services.fetch_account_context(client, instrument)
         except Exception as exc:
             typer.echo(f"Error fetching account data [{acct.name}]: {exc}", err=True)
             conn.close()
             raise typer.Exit(1)
 
         try:
-            sizing_decision = evaluate_trade(
-                config=risk_config,
-                open_trades=summary.open_trade_count,
-                open_tickets_on_instrument=open_on_instr,
-                available_margin=summary.margin_available,
-                equity=summary.nav,
+            account_sizing = services.plan_account_sizing(
+                risk_config, account_ctx, instrument_ctx, instrument, direction
             )
         except (MaxTradesExceeded, ScaleInForbidden) as exc:
             typer.echo(f"Cannot trade on '{acct.name}': {exc}", err=True)
             conn.close()
             raise typer.Exit(1)
-
-        for warn in sizing_decision.warnings:
-            typer.echo(f"Warning [{acct.name}]: {warn}", err=True)
-
-        try:
-            correlation_warnings = evaluate_correlation(
-                open_positions=[(t.instrument, t.direction) for t in open_trades],
-                new_instrument=instrument,
-                new_direction=direction,
-                blocking_mode=risk_config.correlation_blocking_mode,
-            )
         except CorrelatedPositionForbidden as exc:
             typer.echo(f"Cannot trade on '{acct.name}': {exc}", err=True)
             conn.close()
             raise typer.Exit(1)
-
-        for warn in correlation_warnings:
-            typer.echo(f"Warning [{acct.name}]: {warn}", err=True)
-        if correlation_warnings:
-            any_correlation_warnings = True
-
-        try:
-            units_calc = compute_units(
-                capital_to_deploy=sizing_decision.capital_to_deploy,
-                spec=spec,
-                quote=quote,
-                direction=direction,
-            )
         except Exception as exc:
             typer.echo(f"Error computing units [{acct.name}]: {exc}", err=True)
             conn.close()
             raise typer.Exit(1)
+        sizing_decision = account_sizing.sizing_decision
+        correlation_warnings = account_sizing.correlation_warnings
+
+        for warn in sizing_decision.warnings:
+            typer.echo(f"Warning [{acct.name}]: {warn}", err=True)
+        for warn in correlation_warnings:
+            typer.echo(f"Warning [{acct.name}]: {warn}", err=True)
+        if correlation_warnings:
+            any_correlation_warnings = True
 
         plans.append(
             _AccountPlan(
                 account=acct,
                 client=client,
                 sizing_decision=sizing_decision,
-                units_calc=units_calc,
+                units_calc=account_sizing.units_calc,
             )
         )
 

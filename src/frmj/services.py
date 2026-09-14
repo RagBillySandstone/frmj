@@ -10,13 +10,19 @@ that module calls into the functions here for the parts of a flow that don't
 require user interaction.
 
 This is the split described in TODO item 6 ("Service layer extraction"):
-``fetch_market_context`` + ``evaluate_trade_risk`` cover the market-data and
-risk-check steps of the trade flow, ``execute_post_fill`` covers the
-TP/SL-attach + sync + persist steps after an order is placed, and
-``fetch_positions_view`` / ``execute_close`` cover the ``positions`` and
-``close`` commands respectively. Order placement itself (with its
-retry/save/abort prompt) stays in ``cli.py`` because the retry decision is
-inherently interactive.
+``fetch_instrument_context``/``fetch_account_context`` + ``plan_account_sizing``
+cover the market-data and risk-check steps of the trade flow,
+``execute_post_fill`` covers the TP/SL-attach + sync + persist steps after an
+order is placed, and ``fetch_positions_view`` / ``execute_close`` cover the
+``positions`` and ``close`` commands respectively. Order placement itself
+(with its retry/save/abort prompt) stays in ``cli.py`` because the retry
+decision is inherently interactive.
+
+``plan_account_sizing`` is also the shared per-account planning step
+described in TODO item 9 ("Unify single- and multi-account trade planning"):
+the single-account ``trade()`` command calls it once, and
+``_trade_multi_account()`` calls it once per group member, each with its own
+``AccountContext`` but the same shared ``InstrumentContext``.
 """
 
 from __future__ import annotations
@@ -31,7 +37,13 @@ from frmj.domain.risk import (
     evaluate_correlation,
     evaluate_trade,
 )
-from frmj.domain.sizing import Direction, InstrumentSpec, PriceQuote
+from frmj.domain.sizing import (
+    Direction,
+    InstrumentSpec,
+    PriceQuote,
+    UnitsCalc,
+    compute_units,
+)
 from frmj.execution.oanda import (
     AccountSummary,
     FinancingRate,
@@ -42,90 +54,116 @@ from frmj.execution.oanda import (
 from frmj.execution.sync import sync_incremental
 
 # ---------------------------------------------------------------------------
-# Trade planning: market data + risk/correlation evaluation
+# Trade planning: market data + risk/correlation/sizing evaluation
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
-class MarketContext:
-    """Live account and instrument state needed to plan a trade."""
+class InstrumentContext:
+    """Live instrument spec, quote, and financing rate for a planned trade.
 
-    summary: AccountSummary
-    open_tickets_on_instrument: int
+    Independent of which account is trading — one instance is fetched and
+    shared across every account in a multi-account trade.
+    """
+
     spec: InstrumentSpec
     quote: PriceQuote
-    open_trades: list[OpenTrade]
     financing_rate: FinancingRate | None
 
 
-def fetch_market_context(client: OandaClient, instrument: str) -> MarketContext:
-    """Fetch the account summary, open positions, instrument spec, live
-    quote, and financing rate needed to plan a trade on *instrument*.
+def fetch_instrument_context(client: OandaClient, instrument: str) -> InstrumentContext:
+    """Fetch the instrument spec, live quote, and financing rate for *instrument*.
 
-    The financing-rate fetch is best-effort: Oanda's instruments endpoint can
-    fail independently of the rest, and a missing financing rate only means
-    the trade-plan display omits that one line, so a failure there is
-    swallowed rather than propagated.
+    Any account's client can be used to fetch this — the data doesn't depend
+    on which account is trading. The financing-rate fetch is best-effort:
+    Oanda's instruments endpoint can fail independently of the rest, and a
+    missing financing rate only means the trade-plan display omits that one
+    line, so a failure there is swallowed rather than propagated.
     """
-    summary = client.get_account_summary()
-    open_tickets_on_instrument = client.get_open_tickets_on_instrument(instrument)
     spec = client.get_instrument(instrument)
     quote = client.get_price(instrument)
-    open_trades = client.get_open_trades()
     try:
         financing_rate: FinancingRate | None = client.get_financing_rates([instrument])[
             0
         ]
     except Exception:
         financing_rate = None
-    return MarketContext(
-        summary=summary,
-        open_tickets_on_instrument=open_tickets_on_instrument,
-        spec=spec,
-        quote=quote,
-        open_trades=open_trades,
-        financing_rate=financing_rate,
+    return InstrumentContext(spec=spec, quote=quote, financing_rate=financing_rate)
+
+
+@dataclass(frozen=True, slots=True)
+class AccountContext:
+    """Live account state needed to risk-check and size a trade for one account."""
+
+    summary: AccountSummary
+    open_tickets_on_instrument: int
+    open_trades: list[OpenTrade]
+
+
+def fetch_account_context(client: OandaClient, instrument: str) -> AccountContext:
+    """Fetch one account's summary, open-ticket count on *instrument*, and
+    open trades — the account-specific state needed to risk-check and size a
+    trade on this account.
+    """
+    return AccountContext(
+        summary=client.get_account_summary(),
+        open_tickets_on_instrument=client.get_open_tickets_on_instrument(instrument),
+        open_trades=client.get_open_trades(),
     )
 
 
 @dataclass(frozen=True, slots=True)
-class RiskEvaluation:
-    """Result of running the max-trades/sizing and correlation checks."""
+class AccountSizing:
+    """Per-account outcome of the risk/correlation checks and unit sizing."""
 
     sizing_decision: SizingDecision
     correlation_warnings: tuple[str, ...]
+    units_calc: UnitsCalc
 
 
-def evaluate_trade_risk(
+def plan_account_sizing(
     risk_config: RiskConfig,
-    context: MarketContext,
+    account: AccountContext,
+    instrument_ctx: InstrumentContext,
     instrument: str,
     direction: Direction,
-) -> RiskEvaluation:
-    """Run the max-open-trades/sizing check and the correlated-position check
-    for a trade on *instrument*/*direction* given already-fetched *context*.
+) -> AccountSizing:
+    """Run the max-open-trades/sizing check, the correlated-position check,
+    and unit sizing for one account's leg of a trade on *instrument*.
+
+    This is the one per-account planning step shared by the single- and
+    multi-account trade flows.
 
     Raises ``MaxTradesExceeded`` or ``ScaleInForbidden`` (from
-    ``evaluate_trade``) and ``CorrelatedPositionForbidden`` (from
-    ``evaluate_correlation``) when the configured blocking mode forbids the
-    trade — callers should catch these and surface them as user-facing
-    errors rather than tracebacks.
+    ``evaluate_trade``), ``CorrelatedPositionForbidden`` (from
+    ``evaluate_correlation``), or ``BelowMinimumUnits``/``ValueError`` (from
+    ``compute_units``) when the trade can't proceed on this account —
+    callers should catch these and surface them as user-facing errors rather
+    than tracebacks.
     """
     sizing_decision = evaluate_trade(
         config=risk_config,
-        open_trades=context.summary.open_trade_count,
-        open_tickets_on_instrument=context.open_tickets_on_instrument,
-        available_margin=context.summary.margin_available,
-        equity=context.summary.nav,
+        open_trades=account.summary.open_trade_count,
+        open_tickets_on_instrument=account.open_tickets_on_instrument,
+        available_margin=account.summary.margin_available,
+        equity=account.summary.nav,
     )
     correlation_warnings = evaluate_correlation(
-        open_positions=[(t.instrument, t.direction) for t in context.open_trades],
+        open_positions=[(t.instrument, t.direction) for t in account.open_trades],
         new_instrument=instrument,
         new_direction=direction,
         blocking_mode=risk_config.correlation_blocking_mode,
     )
-    return RiskEvaluation(
-        sizing_decision=sizing_decision, correlation_warnings=correlation_warnings
+    units_calc = compute_units(
+        capital_to_deploy=sizing_decision.capital_to_deploy,
+        spec=instrument_ctx.spec,
+        quote=instrument_ctx.quote,
+        direction=direction,
+    )
+    return AccountSizing(
+        sizing_decision=sizing_decision,
+        correlation_warnings=correlation_warnings,
+        units_calc=units_calc,
     )
 
 
