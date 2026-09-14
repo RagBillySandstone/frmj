@@ -44,17 +44,13 @@ them after fill; the API layer needs a `place_limit_order()` method alongside
 the existing `place_market_order()`. Exact UX and validation rules TBD pending
 architectural discussion.
 
-### 6. Service layer extraction
-
-The CLI commands currently call `app.py` factories directly. Before building a GUI or REST API wrapper, extract a `services.py` layer that encapsulates multi-step operations (the full trade flow, the sync flow) as callable functions with no Typer dependency. The CLI then becomes a thin argument-parsing shell over the service layer. This is the prerequisite for all non-CLI interfaces.
-
 ### 7. CSV import from Oanda Hub download
 
 Allow bootstrapping the DB from the CSV file Oanda provides in the account hub (`History → Download`). Gives a way to back-fill history for accounts that have years of transactions before the first `frmj sync --cold` run, and provides a cross-check against the API sync. Parser should map CSV column names to the `transactions` schema and skip rows already present.
 
 ### 9. Unify single- and multi-account trade planning
 
-`trade()` and `_trade_multi_account()` in `cli.py` duplicate the risk/sizing/correlation/TP-SL/confirm/execute logic — kept deliberately separate so `--multi` couldn't regress the single-account path's behavior or its large existing test suite. Once the service-layer extraction (item 6) lands, both should become thin CLI wrappers around one shared per-account planning function, removing the duplication.
+`trade()` and `_trade_multi_account()` in `cli.py` duplicate the risk/sizing/correlation evaluation and TP-SL/confirm/execute logic — kept deliberately separate so `--multi` couldn't regress the single-account path's behavior or its large existing test suite. `services.py` (added for item 6) now covers market-data fetch, risk/correlation evaluation, and post-fill (attach TP/SL + sync + persist) for both paths, but the per-account planning orchestration (prompt TP/SL, compute exits, confirm/edit loop) is still duplicated between the two functions. Once that's unified into one shared per-account planning function, both `trade()` and `_trade_multi_account()` become thin CLI wrappers over it.
 
 ### 10. Extend mypy coverage to tests/
 
