@@ -185,6 +185,7 @@ from frmj.execution.oanda import (
     OrderFill,
 )
 from frmj.execution.sync import sync_cold, sync_incremental
+from frmj import services
 
 # ---------------------------------------------------------------------------
 # Typer app and sub-app
@@ -427,44 +428,26 @@ def positions() -> None:
         raise typer.Exit(1)
 
     try:
-        trades = client.get_open_trades()
-        summary = client.get_account_summary()
+        view = services.fetch_positions_view(client)
     except Exception as exc:
         typer.echo(f"Error fetching open positions: {exc}", err=True)
         conn.close()
         raise typer.Exit(1)
 
-    if not trades:
+    if not view.trades:
         typer.echo("No open positions.")
         conn.close()
         return
 
-    label = "position" if len(trades) == 1 else "positions"
-    typer.echo(f"{len(trades)} open {label}")
+    label = "position" if len(view.trades) == 1 else "positions"
+    typer.echo(f"{len(view.trades)} open {label}")
     typer.echo("─" * 56)
 
-    # Fetch one live quote per instrument that has TP/SL set, so we can show
-    # the projected dollar P/L alongside each exit price. Best-effort: a
-    # failed fetch just means that instrument's trades show prices without
-    # dollar amounts rather than failing the whole command.
-    quote_to_home: dict[str, Decimal] = {}
-    for trade in trades:
-        if trade.instrument in quote_to_home:
-            continue
-        if trade.take_profit_price is None and trade.stop_loss_price is None:
-            continue
-        try:
-            quote_to_home[trade.instrument] = client.get_price(
-                trade.instrument
-            ).quote_to_home
-        except Exception:
-            pass
-
-    for trade in trades:
-        _display_open_trade(conn, trade, quote_to_home.get(trade.instrument))
+    for trade in view.trades:
+        _display_open_trade(conn, trade, view.quote_to_home.get(trade.instrument))
 
     typer.echo("─" * 56)
-    _display_account_summary(summary)
+    _display_account_summary(view.summary)
 
     conn.close()
 
@@ -786,26 +769,24 @@ def close(
         conn.close()
         return
 
-    closed = 0
-    for t in trades:
-        try:
-            result = client.close_trade(t.trade_id)
+    close_result = services.execute_close(conn, client, trades)
+    for ticket in close_result.ticket_results:
+        if ticket.error is not None:
             typer.echo(
-                f"  #{t.trade_id} closed at {result.close_price}"
-                f"  P/L: {_pl_str(result.realised_pl)}"
-                f"  (txn #{result.transaction_id})"
+                f"  #{ticket.trade_id} failed to close: {ticket.error}", err=True
             )
-            closed += 1
-        except Exception as exc:
-            typer.echo(f"  #{t.trade_id} failed to close: {exc}", err=True)
+        else:
+            assert ticket.realised_pl is not None
+            typer.echo(
+                f"  #{ticket.trade_id} closed at {ticket.close_price}"
+                f"  P/L: {_pl_str(ticket.realised_pl)}"
+                f"  (txn #{ticket.transaction_id})"
+            )
 
-    if closed:
-        try:
-            sync_result = sync_incremental(conn, client)
-            if sync_result.rows_ingested:
-                typer.echo(f"[sync] +{sync_result.rows_ingested} transactions")
-        except Exception as exc:
-            typer.echo(f"[sync] Warning: sync failed — {exc}", err=True)
+    if close_result.sync_error is not None:
+        typer.echo(f"[sync] Warning: sync failed — {close_result.sync_error}", err=True)
+    elif close_result.sync_rows_ingested:
+        typer.echo(f"[sync] +{close_result.sync_rows_ingested} transactions")
 
     conn.close()
 
@@ -1887,36 +1868,22 @@ def trade(
             conn.close()
             raise typer.Exit(1)
 
-        # Fetch live account state
+        # Fetch live account state, instrument spec/quote, and financing rate.
         try:
-            summary = client.get_account_summary()
-            open_on_instr = client.get_open_tickets_on_instrument(instrument)
-            spec = client.get_instrument(instrument)
-            quote = client.get_price(instrument)
-            open_trades = client.get_open_trades()
+            context = services.fetch_market_context(client, instrument)
         except Exception as exc:
             typer.echo(f"Error fetching market data: {exc}", err=True)
             conn.close()
             raise typer.Exit(1)
+        summary = context.summary
+        spec = context.spec
+        quote = context.quote
+        financing_rate = context.financing_rate
 
-        # Financing rate for the trade-plan display below. Best-effort — a
-        # failure here (e.g. Oanda's instruments endpoint hiccups) shouldn't
-        # block the trade, it just means the plan omits the financing line.
+        # Risk model + correlated-position check.
         try:
-            financing_rate: FinancingRate | None = client.get_financing_rates(
-                [instrument]
-            )[0]
-        except Exception:
-            financing_rate = None
-
-        # Risk model
-        try:
-            sizing_decision = evaluate_trade(
-                config=risk_config,
-                open_trades=summary.open_trade_count,
-                open_tickets_on_instrument=open_on_instr,
-                available_margin=summary.margin_available,
-                equity=summary.nav,
+            risk_eval = services.evaluate_trade_risk(
+                risk_config, context, instrument, direction
             )
         except MaxTradesExceeded as exc:
             typer.echo(f"Cannot trade: {exc}", err=True)
@@ -1926,24 +1893,15 @@ def trade(
             typer.echo(f"Cannot trade: {exc}", err=True)
             conn.close()
             raise typer.Exit(1)
-
-        for warn in sizing_decision.warnings:
-            typer.echo(f"Warning: {warn}", err=True)
-
-        # Correlated-position check: does this trade share directional
-        # currency exposure with an already-open position?
-        try:
-            correlation_warnings = evaluate_correlation(
-                open_positions=[(t.instrument, t.direction) for t in open_trades],
-                new_instrument=instrument,
-                new_direction=direction,
-                blocking_mode=risk_config.correlation_blocking_mode,
-            )
         except CorrelatedPositionForbidden as exc:
             typer.echo(f"Cannot trade: {exc}", err=True)
             conn.close()
             raise typer.Exit(1)
+        sizing_decision = risk_eval.sizing_decision
+        correlation_warnings = risk_eval.correlation_warnings
 
+        for warn in sizing_decision.warnings:
+            typer.echo(f"Warning: {warn}", err=True)
         for warn in correlation_warnings:
             typer.echo(f"Warning: {warn}", err=True)
 
@@ -2132,41 +2090,43 @@ def trade(
         f"Order filled at {fill.fill_price} — transaction #{fill.transaction_id}"
     )
 
-    # --- Attach TP/SL to the open trade on Oanda -----------------------------
-    if fill.trade_id is None:
-        if tp_price is not None or sl_price is not None:
+    # --- Attach TP/SL, post-fill sync, and save the trade plan ---------------
+    post_fill = services.execute_post_fill(conn, client, fill, tp_price, sl_price)
+
+    if post_fill.missing_trade_id:
+        typer.echo(
+            "Warning: Oanda did not return a trade ID — cannot attach TP/SL. "
+            "Set them manually in the Oanda interface.",
+            err=True,
+        )
+    if tp_price is not None and not post_fill.missing_trade_id:
+        if post_fill.tp_error is not None:
             typer.echo(
-                "Warning: Oanda did not return a trade ID — cannot attach TP/SL. "
-                "Set them manually in the Oanda interface.",
+                f"Warning: failed to attach take-profit — {post_fill.tp_error}",
                 err=True,
             )
-    else:
-        if tp_price is not None:
-            try:
-                tp_txn = client.attach_take_profit(fill.trade_id, tp_price)
-                typer.echo(f"Take-profit set at {tp_price} — order #{tp_txn}")
-            except Exception as exc:
-                typer.echo(f"Warning: failed to attach take-profit — {exc}", err=True)
+        else:
+            typer.echo(
+                f"Take-profit set at {tp_price} — order #{post_fill.tp_transaction_id}"
+            )
+    if sl_price is not None and not post_fill.missing_trade_id:
+        if post_fill.sl_error is not None:
+            typer.echo(
+                f"Warning: failed to attach stop-loss — {post_fill.sl_error}", err=True
+            )
+            typer.echo(
+                "  Position is unprotected — set SL in Oanda immediately.",
+                err=True,
+            )
+        else:
+            typer.echo(
+                f"Stop-loss set at {sl_price} — order #{post_fill.sl_transaction_id}"
+            )
 
-        if sl_price is not None:
-            try:
-                sl_txn = client.attach_stop_loss(fill.trade_id, sl_price)
-                typer.echo(f"Stop-loss set at {sl_price} — order #{sl_txn}")
-            except Exception as exc:
-                typer.echo(f"Warning: failed to attach stop-loss — {exc}", err=True)
-                typer.echo(
-                    "  Position is unprotected — set SL in Oanda immediately.",
-                    err=True,
-                )
-
-    # --- Post-fill sync -------------------------------------------------------
-    try:
-        sync_incremental(conn, client)
-    except Exception as exc:
-        typer.echo(f"[sync] Warning: post-fill sync failed — {exc}", err=True)
-
-    # --- Save trade plan to DB ------------------------------------------------
-    _save_trade_plan(conn, fill.transaction_id, client.account_id, tp_price, sl_price)
+    if post_fill.sync_error is not None:
+        typer.echo(
+            f"[sync] Warning: post-fill sync failed — {post_fill.sync_error}", err=True
+        )
 
     # --- Optional entry note and tags ----------------------------------------
     # Resolve the fill's synthetic DB id once; used for both note and tags.
@@ -3427,37 +3387,6 @@ def _prompt_retry_save_abort() -> str:
         typer.echo("  Enter R, S, or A.")
 
 
-def _save_trade_plan(
-    conn: sqlite3.Connection,
-    fill_oanda_id: str,
-    account_id: str,
-    tp_price: Decimal | None,
-    sl_price: Decimal | None,
-) -> None:
-    """Persist the intended TP/SL for a fill transaction if either side was set.
-
-    Silent no-op when neither TP nor SL was specified, or when the fill
-    transaction is not yet in the local DB (post-fill sync may have failed).
-    Uses INSERT OR IGNORE so a duplicate call (e.g. from a retry) is harmless.
-    """
-    if tp_price is None and sl_price is None:
-        return
-    row = conn.execute(
-        "SELECT id FROM transactions WHERE oanda_id = ? AND account_id = ?",
-        (fill_oanda_id, account_id),
-    ).fetchone()
-    if not row:
-        return
-    tp_str = str(tp_price) if tp_price is not None else None
-    sl_str = str(sl_price) if sl_price is not None else None
-    conn.execute(
-        "INSERT OR IGNORE INTO trade_plans (transaction_id, tp_price, sl_price) "
-        "VALUES (?, ?, ?)",
-        (row["id"], tp_str, sl_str),
-    )
-    conn.commit()
-
-
 # ---------------------------------------------------------------------------
 # Multi-account trade flow (frmj trade ... --multi GROUP)
 # ---------------------------------------------------------------------------
@@ -3776,65 +3705,52 @@ def _trade_multi_account(
             f"— transaction #{fill.transaction_id}"
         )
 
-        if fill.trade_id is None:
-            if exits.take_profit_price is not None or exits.stop_loss_price is not None:
-                typer.echo(
-                    f"Warning [{plan.account.name}]: Oanda did not return a trade ID "
-                    "— cannot attach TP/SL. Set them manually in the Oanda interface.",
-                    err=True,
-                )
-        else:
-            if exits.take_profit_price is not None:
-                try:
-                    tp_txn = plan.client.attach_take_profit(
-                        fill.trade_id, exits.take_profit_price
-                    )
-                    typer.echo(
-                        f"[{plan.account.name}] Take-profit set at "
-                        f"{exits.take_profit_price} — order #{tp_txn}"
-                    )
-                except Exception as exc:
-                    typer.echo(
-                        f"Warning [{plan.account.name}]: failed to attach "
-                        f"take-profit — {exc}",
-                        err=True,
-                    )
-            if exits.stop_loss_price is not None:
-                try:
-                    sl_txn = plan.client.attach_stop_loss(
-                        fill.trade_id, exits.stop_loss_price
-                    )
-                    typer.echo(
-                        f"[{plan.account.name}] Stop-loss set at "
-                        f"{exits.stop_loss_price} — order #{sl_txn}"
-                    )
-                except Exception as exc:
-                    typer.echo(
-                        f"Warning [{plan.account.name}]: failed to attach "
-                        f"stop-loss — {exc}",
-                        err=True,
-                    )
-                    typer.echo(
-                        f"  [{plan.account.name}] Position is unprotected "
-                        "— set SL in Oanda immediately.",
-                        err=True,
-                    )
+        post_fill = services.execute_post_fill(
+            conn, plan.client, fill, exits.take_profit_price, exits.stop_loss_price
+        )
 
-        try:
-            sync_incremental(conn, plan.client)
-        except Exception as exc:
+        if post_fill.missing_trade_id:
             typer.echo(
-                f"[sync] Warning [{plan.account.name}]: post-fill sync failed — {exc}",
+                f"Warning [{plan.account.name}]: Oanda did not return a trade ID "
+                "— cannot attach TP/SL. Set them manually in the Oanda interface.",
                 err=True,
             )
+        if exits.take_profit_price is not None and not post_fill.missing_trade_id:
+            if post_fill.tp_error is not None:
+                typer.echo(
+                    f"Warning [{plan.account.name}]: failed to attach "
+                    f"take-profit — {post_fill.tp_error}",
+                    err=True,
+                )
+            else:
+                typer.echo(
+                    f"[{plan.account.name}] Take-profit set at "
+                    f"{exits.take_profit_price} — order #{post_fill.tp_transaction_id}"
+                )
+        if exits.stop_loss_price is not None and not post_fill.missing_trade_id:
+            if post_fill.sl_error is not None:
+                typer.echo(
+                    f"Warning [{plan.account.name}]: failed to attach "
+                    f"stop-loss — {post_fill.sl_error}",
+                    err=True,
+                )
+                typer.echo(
+                    f"  [{plan.account.name}] Position is unprotected "
+                    "— set SL in Oanda immediately.",
+                    err=True,
+                )
+            else:
+                typer.echo(
+                    f"[{plan.account.name}] Stop-loss set at "
+                    f"{exits.stop_loss_price} — order #{post_fill.sl_transaction_id}"
+                )
 
-        _save_trade_plan(
-            conn,
-            fill.transaction_id,
-            plan.client.account_id,
-            exits.take_profit_price,
-            exits.stop_loss_price,
-        )
+        if post_fill.sync_error is not None:
+            typer.echo(
+                f"[sync] Warning [{plan.account.name}]: post-fill sync failed — "
+                f"{post_fill.sync_error}",
+                err=True,
+            )
         results.append((plan, fill))
 
     # --- Summary -----------------------------------------------------------

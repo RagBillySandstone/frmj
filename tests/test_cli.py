@@ -2741,7 +2741,7 @@ class TestTradeErrors:
 
         monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
         monkeypatch.setattr(
-            "frmj.cli.evaluate_trade",
+            "frmj.services.evaluate_trade",
             lambda **kw: (_ for _ in ()).throw(
                 MaxTradesExceeded("too many open trades")
             ),
@@ -2758,7 +2758,7 @@ class TestTradeErrors:
 
         monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
         monkeypatch.setattr(
-            "frmj.cli.evaluate_trade",
+            "frmj.services.evaluate_trade",
             lambda **kw: (_ for _ in ()).throw(
                 ScaleInForbidden("scale-in not allowed")
             ),
@@ -2843,7 +2843,7 @@ class TestTradeErrors:
             warnings=("near max open trades",),
         )
         monkeypatch.setattr("frmj.cli.get_client", lambda conn: FakeFullClient())
-        monkeypatch.setattr("frmj.cli.evaluate_trade", lambda **kw: decision)
+        monkeypatch.setattr("frmj.services.evaluate_trade", lambda **kw: decision)
         # Just show the plan (dry-run avoids needing confirmation input).
         result = runner.invoke(
             app, ["trade", "EUR_USD", "long", "--dry-run"], input="\n\n"
@@ -2905,7 +2905,7 @@ class TestTradeErrors:
             """The only sync call is the post-fill sync; always raise."""
             raise RuntimeError("sync exploded after fill")
 
-        monkeypatch.setattr("frmj.cli.sync_incremental", _counting_sync)
+        monkeypatch.setattr("frmj.services.sync_incremental", _counting_sync)
         # TP=50, SL=30, confirm=y, note=skip, tags=skip.
         result = runner.invoke(
             app,
