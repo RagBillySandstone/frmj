@@ -383,6 +383,8 @@ The execution layer (`oanda`, `sync`) handles all network and database I/O. It f
 
 `services.py` holds multi-step operations that combine several Oanda API calls and/or domain calls into one unit — fetching the market data needed to plan a trade, evaluating risk and correlation, attaching TP/SL and syncing after a fill, fetching the data behind `positions`, and closing tickets for `close`. It takes an already-open connection and client as arguments and has no Typer dependency, so it's reusable from any future non-CLI interface. Prompting, confirmation, and terminal output stay in `cli.py`.
 
+`plan_account_sizing()` is the one per-account planning step — risk check, correlation check, and unit sizing — shared by both `trade()` (called once) and the `--multi` group flow (called once per account, against a shared `InstrumentContext` but each account's own `AccountContext`), so the two commands can't drift out of sync on that logic.
+
 ### Database schema
 
 SQLite at `~/.local/share/frmj/frmj.db` (or `$FRMJ_DB_PATH`). WAL mode. Foreign keys enforced.
