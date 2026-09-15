@@ -290,34 +290,44 @@ class PositionsView:
     trades: list[OpenTrade]
     summary: AccountSummary
     quote_to_home: dict[str, Decimal]
+    financing_rates: dict[str, FinancingRate]
 
 
 def fetch_positions_view(client: OandaClient) -> PositionsView:
-    """Fetch open trades, account summary, and one live quote per instrument
-    that has a TP or SL set (so the caller can show projected dollar P/L at
-    each exit level).
+    """Fetch open trades, account summary, and one live quote + financing rate
+    per open instrument (so the caller can show projected dollar P/L at each
+    exit level and the estimated daily financing charge for each position).
 
-    The per-instrument quote fetch is best-effort: a failed fetch just means
-    that instrument's trades display without a projected-P/L figure, rather
-    than failing the whole command.
+    The per-instrument quote and financing-rate fetches are best-effort: a
+    failed fetch just means that instrument's trades display without a
+    projected-P/L or financing figure, rather than failing the whole command.
     """
     trades = client.get_open_trades()
     summary = client.get_account_summary()
 
+    instruments = {trade.instrument for trade in trades}
+
     quote_to_home: dict[str, Decimal] = {}
-    for trade in trades:
-        if trade.instrument in quote_to_home:
-            continue
-        if trade.take_profit_price is None and trade.stop_loss_price is None:
-            continue
+    for instrument in instruments:
         try:
-            quote_to_home[trade.instrument] = client.get_price(
-                trade.instrument
-            ).quote_to_home
+            quote_to_home[instrument] = client.get_price(instrument).quote_to_home
         except Exception:
             pass
 
-    return PositionsView(trades=trades, summary=summary, quote_to_home=quote_to_home)
+    financing_rates: dict[str, FinancingRate] = {}
+    if instruments:
+        try:
+            for rate in client.get_financing_rates(list(instruments)):
+                financing_rates[rate.instrument] = rate
+        except Exception:
+            pass
+
+    return PositionsView(
+        trades=trades,
+        summary=summary,
+        quote_to_home=quote_to_home,
+        financing_rates=financing_rates,
+    )
 
 
 # ---------------------------------------------------------------------------

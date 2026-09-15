@@ -442,7 +442,12 @@ def positions() -> None:
     typer.echo("─" * 56)
 
     for trade in view.trades:
-        _display_open_trade(conn, trade, view.quote_to_home.get(trade.instrument))
+        _display_open_trade(
+            conn,
+            trade,
+            view.quote_to_home.get(trade.instrument),
+            view.financing_rates.get(trade.instrument),
+        )
 
     typer.echo("─" * 56)
     _display_account_summary(view.summary)
@@ -3297,14 +3302,22 @@ def _projected_pl_at_price(
 
 
 def _display_open_trade(
-    conn: sqlite3.Connection, trade: OpenTrade, quote_to_home: Decimal | None
+    conn: sqlite3.Connection,
+    trade: OpenTrade,
+    quote_to_home: Decimal | None,
+    financing_rate: FinancingRate | None,
 ) -> None:
     """Print one open trade in the positions view.
 
     ``quote_to_home`` is the live conversion rate for the trade's instrument,
-    used to show the dollar P/L expected if the trade hits TP or SL. ``None``
+    used to show the dollar P/L expected if the trade hits TP or SL, and to
+    convert the estimated daily financing charge into home currency. ``None``
     when the live quote couldn't be fetched, in which case only the raw
-    TP/SL prices are shown.
+    TP/SL prices are shown and no financing figure is shown.
+
+    ``financing_rate`` is the instrument's current long/short annualized
+    financing rate. ``None`` when it couldn't be fetched, in which case no
+    financing figure is shown.
     """
     note_count = conn.execute(
         """
@@ -3341,10 +3354,26 @@ def _display_open_trade(
         exits_parts.append(sl_str)
     exits_str = "  ".join(exits_parts) if exits_parts else "no TP/SL set"
 
+    financing_str = ""
+    if financing_rate is not None and quote_to_home is not None:
+        rate = (
+            financing_rate.long_rate
+            if trade.direction == "LONG"
+            else financing_rate.short_rate
+        )
+        daily_financing = _daily_financing_home(
+            units=trade.units,
+            entry_price=trade.open_price,
+            quote_to_home=quote_to_home,
+            rate=rate,
+        )
+        financing_str = f"  financing: {_pl_str(daily_financing)}/day"
+
     typer.echo(
         f"         P/L: {_pl_str(trade.unrealised_pl)}"
         f"  margin: ${trade.margin_used:,.2f}"
         f"  {exits_str}"
+        f"{financing_str}"
     )
     typer.echo("")
 

@@ -51,6 +51,7 @@ from frmj.cli import (
     _complete_oanda_id,
     _complete_tag,
     _complete_txn_type,
+    _daily_financing_home,
     _fmt_financing_pct,
     _group_financing_rates,
     _load_financing_snapshot,
@@ -3708,6 +3709,40 @@ class TestPositionsCommand:
         )
         assert "TP: 1.10550 (+$50.00)" in result.output
         assert "SL: 1.09750 ($-30.00)" in result.output
+
+    def test_shows_daily_financing_charge(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Financing shows as a per-day dollar figure, not the raw annualized
+        rate, derived from the instrument's long/short financing rate."""
+        trade = _open_trade(
+            instrument="EUR_USD", direction="LONG", units=10_000, open_price="1.10050"
+        )
+        fake = FakeFullClient(
+            open_trades=[trade],
+            financing_rates=[
+                FinancingRate("EUR_USD", Decimal("-0.0365"), Decimal("0.0135"))
+            ],
+        )
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["positions"])
+        assert result.exit_code == 0, result.output
+
+        expected = _daily_financing_home(
+            units=10_000,
+            entry_price=Decimal("1.10050"),
+            quote_to_home=Decimal("1"),
+            rate=Decimal("-0.0365"),
+        )
+        assert f"financing: ${expected:,.2f}/day" in result.output
+
+    def test_financing_omitted_when_no_rate_available(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FakeFullClient's default empty financing_rates list mimics a
+        fetch that returned nothing for this instrument."""
+        result = self._invoke(monkeypatch, [_open_trade()])
+        assert "financing:" not in result.output
 
     def test_dollar_amount_omitted_when_price_fetch_fails(
         self, pos_db: Path, monkeypatch: pytest.MonkeyPatch

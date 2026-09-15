@@ -126,7 +126,7 @@ frmj sync --watch --interval 30   # poll every 30 seconds (default: 60)
 
 ### `frmj positions`
 
-Show all open trades with live P/L, margin, and TP/SL levels, plus an account summary footer.
+Show all open trades with live P/L, margin, TP/SL levels, and an estimated daily financing charge (in home currency, colored green/red — not the raw annualized rate), plus an account summary footer.
 
 ```sh
 frmj positions
