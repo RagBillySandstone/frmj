@@ -3238,6 +3238,17 @@ class TestStatsCommand:
         assert "Total P/L" in result.output
         assert "30.00" in result.output
 
+    def test_total_financing_zero_when_no_financing_data(self, stats_db: Path) -> None:
+        """No DAILY_FINANCING rows synced yet -> a $0.00 line, not an omitted one."""
+        self._seed_fills(
+            stats_db,
+            [("1", "2026-04-25T09:00:00Z", "-10000", "30.00")],
+        )
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        assert "Financing:" in result.output
+        assert "0.00" in result.output
+
     def test_zero_total_pl_shows_unsigned_amount(self, stats_db: Path) -> None:
         """Two perfectly offsetting trades (total P/L = 0) exercise the
         ``_color_pl(Decimal(0))`` code path that returns plain text without
@@ -3382,6 +3393,27 @@ class TestStatsCommand:
         )
         conn.commit()
         conn.close()
+
+    def test_total_financing_shown_in_trade_summary(self, stats_db: Path) -> None:
+        """The Trade summary block totals financing across all instruments,
+        not just the per-instrument breakdown further down."""
+        self._seed_fills(
+            stats_db,
+            [("1", "2026-04-25T09:00:00Z", "-10000", "30.00")],
+        )
+        self._insert_financing(
+            stats_db,
+            "500",
+            '{"financing":"-0.75","positionFinancings":['
+            '{"instrument":"EUR_USD","financing":"-1.25"},'
+            '{"instrument":"GBP_USD","financing":"0.50"}]}',
+        )
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        summary_block = result.output.split("Financing by instrument")[0]
+        assert "Financing:" in summary_block
+        # -1.25 + 0.50 = -0.75
+        assert "-$0.75" in summary_block
 
     def test_financing_by_instrument_section_shown(self, stats_db: Path) -> None:
         """Each DAILY_FINANCING row's positionFinancings entries are summed

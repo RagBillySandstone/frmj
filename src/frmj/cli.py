@@ -2850,23 +2850,37 @@ def _display_stats(
     summary = compute_summary(trades)
     assert summary is not None  # trades is guaranteed non-empty by caller
 
+    # Total financing paid/earned across all instruments, folded into the
+    # summary block so it reads alongside Total P/L. Decimal(0) when the
+    # account has no DAILY_FINANCING transactions synced yet.
+    total_financing = sum(
+        (
+            amt
+            for amounts in (financing_by_instrument or {}).values()
+            for amt in amounts
+        ),
+        Decimal(0),
+    )
+
     typer.echo(f"Trade summary  ({summary.total} closed trades)")
     typer.echo("─" * 50)
     typer.echo(
         f"  Win rate:   {summary.win_rate * 100:.1f}%"
         f"  ({summary.wins}W / {summary.losses}L)"
     )
-    # Right-align all four dollar values to the widest one in the block.
+    # Right-align all five dollar values to the widest one in the block.
     summary_pl_w = max(
         _pl_visible_width(summary.avg_pl),
         _pl_visible_width(summary.total_pl),
         _pl_visible_width(summary.best_pl),
         _pl_visible_width(summary.worst_pl),
+        _pl_visible_width(total_financing),
     )
     typer.echo(f"  Avg P/L:    {_color_pl_padded(summary.avg_pl, summary_pl_w)}")
     typer.echo(f"  Total P/L:  {_color_pl_padded(summary.total_pl, summary_pl_w)}")
     typer.echo(f"  Best:       {_color_pl_padded(summary.best_pl, summary_pl_w)}")
     typer.echo(f"  Worst:      {_color_pl_padded(summary.worst_pl, summary_pl_w)}")
+    typer.echo(f"  Financing:  {_color_pl_padded(total_financing, summary_pl_w)}")
 
     # "By direction" — overall LONG vs SHORT side-by-side.  Helps spot a
     # systemic bias (e.g. only the long side is profitable).
