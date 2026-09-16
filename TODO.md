@@ -21,12 +21,6 @@ active account. A `--account NAME` flag would allow targeting a specific
 profile without switching the global active account. Tracked as a future
 enhancement to the `get_client()` callsite.
 
-### 3. Additional broker support
-
-The `accounts` table and `AccountRecord` are Oanda-specific. Extending to a
-second broker (e.g. IBKR) would require a `broker` column and a protocol
-abstraction over `OandaClient`. Currently out of scope.
-
 ### 4. `frmj note --edit` — amend an existing note
 
 Currently `frmj note` only appends. For cases where a note has a typo or needs updating, add an `--edit` flag that opens the most recent note on the given transaction in `$EDITOR` (or prompts inline if the env var is unset).
@@ -44,10 +38,10 @@ them after fill; the API layer needs a `place_limit_order()` method alongside
 the existing `place_market_order()`. Exact UX and validation rules TBD pending
 architectural discussion.
 
-### 7. CSV import from Oanda Hub download
-
-Allow bootstrapping the DB from the CSV file Oanda provides in the account hub (`History → Download`). Gives a way to back-fill history for accounts that have years of transactions before the first `frmj sync --cold` run, and provides a cross-check against the API sync. Parser should map CSV column names to the `transactions` schema and skip rows already present.
-
 ### 10. Extend mypy coverage to tests/
 
 `mypy` currently only type-checks `src/frmj` (see pyproject.toml `[tool.mypy]`). Running it over `tests/` today surfaces ~200 errors, mostly from two sources: helper methods like `TestCloseCommand._invoke()` annotated `-> object` instead of `click.testing.Result`, and fake objects (`SimpleNamespace` standing in for `typer.Context`, hand-rolled fakes standing in for `sqlite3.Connection`) that satisfy call sites structurally but not nominally. Fixing the return-type annotations is mechanical; the fakes would need `Protocol` types to type-check cleanly without abandoning the structural-typing test style described in the Development section of README.md.
+
+### 11. CSV-imported closing fills have no open-time link
+
+Unlike the REST API's ORDER_FILL transactions, the Oanda Hub CSV export never states which trade a closing fill closed (no `tradesClosed`/`tradeReduced` equivalent — see `execution/csv_import.py`'s module docstring). `frmj stats`'s open-time lookup already degrades gracefully to a NULL open_time for these rows rather than crashing, but any CSV-imported closed trade will always show a blank open time and can't be bucketed by holding duration. No known fix without a second data source (e.g. cross-referencing the CSV's own MARKET_ORDER open rows by instrument/time proximity), so this is tracked rather than blocking.

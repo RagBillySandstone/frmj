@@ -122,7 +122,10 @@ frmj sync               # incremental (only new transactions since last sync)
 frmj sync --cold        # full history re-fetch (safe to re-run; duplicates are skipped)
 frmj sync --watch       # poll for new transactions continuously (Ctrl+C to stop)
 frmj sync --watch --interval 30   # poll every 30 seconds (default: 60)
+frmj sync --csv history.csv       # import an Oanda Hub CSV export instead of hitting the API
 ```
+
+`--csv` imports a transaction-history export from the Oanda account hub (Reports → Transaction History → Export to csv). Set the export dialog's Timezone to UTC before downloading — any other timezone is rejected. Useful for backfilling history the REST API can no longer return (old accounts truncate `/transactions`) and for cross-checking an API sync against the account's own records; duplicate rows are skipped the same way `--cold` re-runs are. Cannot be combined with `--cold` or `--watch`.
 
 ### `frmj positions`
 
