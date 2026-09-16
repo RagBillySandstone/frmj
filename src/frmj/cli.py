@@ -2878,9 +2878,9 @@ def _display_stats(
     )
     typer.echo(f"  Avg P/L:    {_color_pl_padded(summary.avg_pl, summary_pl_w)}")
     typer.echo(f"  Total P/L:  {_color_pl_padded(summary.total_pl, summary_pl_w)}")
+    typer.echo(f"  Financing:  {_color_pl_padded(total_financing, summary_pl_w)}")
     typer.echo(f"  Best:       {_color_pl_padded(summary.best_pl, summary_pl_w)}")
     typer.echo(f"  Worst:      {_color_pl_padded(summary.worst_pl, summary_pl_w)}")
-    typer.echo(f"  Financing:  {_color_pl_padded(total_financing, summary_pl_w)}")
 
     # "By direction" — overall LONG vs SHORT side-by-side.  Helps spot a
     # systemic bias (e.g. only the long side is profitable).
