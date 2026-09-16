@@ -15,8 +15,8 @@ the persistence schema (``persistence/schema.py``).  It is responsible for:
   * Cursor management — after a successful ingest we write (or advance) the
     ``sync_cursors`` row so the next incremental sync knows where to resume.
 
-Two public entry points
------------------------
+Three public entry points
+--------------------------
 ``sync_cold(conn, client)``
     Fetches the full account history (no cursor required).  Safe to call on a
     database that already has rows — duplicates are silently skipped.
@@ -25,6 +25,11 @@ Two public entry points
     Reads the cursor for ``client.account_id`` and fetches only transactions
     after the last ingested ID.  Delegates to ``sync_cold`` automatically when
     no cursor exists (first run).
+
+``sync_csv(conn, account_id, csv_path)``
+    Imports an Oanda Hub CSV export instead of hitting the API — see
+    ``execution.csv_import`` for the file format and ``sync_csv``'s own
+    docstring for cursor behaviour.
 
 Design notes
 ------------
@@ -43,7 +48,9 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 
+from frmj.execution.csv_import import load_csv_file
 from frmj.execution.oanda import ClientProtocol, TransactionRow
 
 
@@ -245,6 +252,49 @@ def sync_cold(
     last_oanda_id: str | None = rows[-1].oanda_id if rows else None
     if last_oanda_id is not None:
         _write_cursor(conn, client.account_id, last_oanda_id)
+
+    return SyncResult(
+        rows_ingested=ingested,
+        rows_skipped=skipped,
+        last_oanda_id=last_oanda_id,
+    )
+
+
+def sync_csv(
+    conn: sqlite3.Connection,
+    account_id: str,
+    csv_path: Path,
+) -> SyncResult:
+    """
+    Import an Oanda Hub transaction-history CSV export (see
+    ``execution.csv_import``) into ``transactions``.
+
+    Intended as a one-time backfill for history the REST API can no longer
+    return (old accounts truncate ``/transactions``), and as a cross-check
+    against what an API sync already ingested — duplicate rows are skipped
+    via the same ``(account_id, oanda_id)`` unique index ``sync_cold`` and
+    ``sync_incremental`` rely on.
+
+    Cursor behaviour: advances ``sync_cursors`` to the imported batch's
+    highest Oanda ID, but only forward. Importing an older CSV after the
+    account already has a newer cursor leaves the cursor untouched —
+    otherwise the next incremental sync would re-fetch a large
+    already-covered window for no benefit (duplicates would still be
+    skipped, just wastefully).
+
+    Raises whatever ``csv_import.load_csv_file`` raises on a malformed or
+    unrecognised CSV shape.
+    """
+    rows = load_csv_file(csv_path, account_id)
+
+    ingested, skipped = _ingest_rows(conn, rows)
+    conn.commit()
+
+    last_oanda_id: str | None = rows[-1].oanda_id if rows else None
+    if last_oanda_id is not None:
+        current_cursor = _read_cursor(conn, account_id)
+        if current_cursor is None or int(last_oanda_id) > int(current_cursor):
+            _write_cursor(conn, account_id, last_oanda_id)
 
     return SyncResult(
         rows_ingested=ingested,

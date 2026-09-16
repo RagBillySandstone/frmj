@@ -184,6 +184,7 @@ class TestCompletionHelpers:
 #: created, arbitrary text, numbers, file paths, dates) belong here.
 _COMPLETION_EXEMPT: dict[tuple[str, str], str] = {
     ("sync", "interval"): "numeric, no fixed set of values",
+    ("sync", "csv_path"): "arbitrary input file path",
     ("export", "output"): "arbitrary output file path",
     ("export", "since"): "free-form date, no fixed set of values",
     ("financing", "date_str"): "free-form date, no fixed set of values",

@@ -3,11 +3,15 @@ FRoMaJ CLI — typer application.
 
 Commands
 --------
-``frmj sync [--cold] [--watch [--interval N]]``
+``frmj sync [--cold] [--watch [--interval N]] [--csv PATH]``
     Sync transactions from Oanda. Incremental by default; ``--cold`` fetches
     the full account history.  ``--watch`` enters a polling loop that runs
     ``sync_incremental`` every *N* seconds (default 60) and prints new
-    transactions as they arrive.  Exits cleanly on Ctrl+C.
+    transactions as they arrive.  Exits cleanly on Ctrl+C.  ``--csv`` imports
+    an Oanda Hub transaction-history CSV export instead of hitting the API
+    (Reports -> Transaction History -> Export to csv, with Timezone set to
+    UTC) — useful for backfilling history the API can no longer return.
+    Cannot be combined with ``--cold`` or ``--watch``.
 
 ``frmj config set <key> <value>``
     Write a config key/value to the database.
@@ -110,6 +114,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
 import httpx
 import typer
@@ -182,7 +187,7 @@ from frmj.execution.oanda import (
     OpenTrade,
     OrderFill,
 )
-from frmj.execution.sync import sync_cold, sync_incremental
+from frmj.execution.sync import sync_cold, sync_csv, sync_incremental
 from frmj import services
 
 # ---------------------------------------------------------------------------
@@ -379,8 +384,21 @@ def sync(
         "-i",
         help="Polling interval in seconds when --watch is active.",
     ),
+    csv_path: Path | None = typer.Option(
+        None,
+        "--csv",
+        help=(
+            "Import an Oanda Hub transaction-history CSV export instead of "
+            "hitting the API (Reports -> Transaction History -> Export to "
+            "csv, with Timezone set to UTC)."
+        ),
+    ),
 ) -> None:
     """Sync transactions from Oanda."""
+    if csv_path is not None and (cold or watch):
+        typer.echo("Error: --csv cannot be combined with --cold or --watch.", err=True)
+        raise typer.Exit(1)
+
     if watch and cold:
         typer.echo("Error: --watch and --cold cannot be used together.", err=True)
         raise typer.Exit(1)
@@ -391,15 +409,22 @@ def sync(
 
     conn = get_db()
     try:
-        client = get_client(conn)
-        result = sync_cold(conn, client) if cold else sync_incremental(conn, client)
-    except RuntimeError as exc:
+        if csv_path is not None:
+            account = get_active_account(conn)
+            if account is None:
+                typer.echo("Error: no active account configured.", err=True)
+                raise typer.Exit(1)
+            result = sync_csv(conn, account.oanda_id, csv_path)
+        else:
+            client = get_client(conn)
+            result = sync_cold(conn, client) if cold else sync_incremental(conn, client)
+    except (RuntimeError, ValueError, OSError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1)
     finally:
         conn.close()
 
-    mode = "cold" if cold else "incremental"
+    mode = "csv" if csv_path is not None else ("cold" if cold else "incremental")
     typer.echo(
         f"Sync ({mode}): {result.rows_ingested} ingested, {result.rows_skipped} skipped"
     )

@@ -20,17 +20,19 @@ TestFakeClientProtocol   — sanity-check that FakeClient satisfies the Protocol
 TestSyncCold             — full-history ingestion, cursor writing, deduplication
 TestSyncIncremental      — cursor reading, delta ingestion, no-new-rows case
 TestParentChildLinking   — DAILY_FINANCING parent/child FK resolution
+TestSyncCsv              — CSV import: ingestion, dedup, forward-only cursor
 """
 
 from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
 from frmj.execution.oanda import TransactionRow
-from frmj.execution.sync import SyncResult, sync_cold, sync_incremental
+from frmj.execution.sync import SyncResult, sync_cold, sync_csv, sync_incremental
 from frmj.persistence.schema import ensure_schema
 
 
@@ -217,18 +219,24 @@ class TestSyncCold:
         second_batch = [_row("2"), _row("3")]  # row "2" is a duplicate
 
         sync_cold(db, FakeClient(account_id="acct-1", responses=[first_batch]))
-        result = sync_cold(db, FakeClient(account_id="acct-1", responses=[second_batch]))
+        result = sync_cold(
+            db, FakeClient(account_id="acct-1", responses=[second_batch])
+        )
 
         assert result.rows_ingested == 1  # only "3"
-        assert result.rows_skipped == 1   # "2" was already there
+        assert result.rows_skipped == 1  # "2" was already there
         assert _count_transactions(db) == 3
 
     def test_raw_json_stored_verbatim(self, db: sqlite3.Connection) -> None:
         """The raw_json field must be preserved exactly as supplied."""
         payload = '{"type":"ORDER_FILL","instrument":"EUR_USD"}'
-        client = FakeClient(account_id="acct-1", responses=[[_row("1", raw_json=payload)]])
+        client = FakeClient(
+            account_id="acct-1", responses=[[_row("1", raw_json=payload)]]
+        )
         sync_cold(db, client)
-        row = db.execute("SELECT raw_json FROM transactions WHERE oanda_id = '1'").fetchone()
+        row = db.execute(
+            "SELECT raw_json FROM transactions WHERE oanda_id = '1'"
+        ).fetchone()
         assert row["raw_json"] == payload
 
 
@@ -344,7 +352,9 @@ class TestParentChildLinking:
     def test_cross_batch_parent_child(self, db: sqlite3.Connection) -> None:
         """A child whose parent was ingested in a prior sync run is linked correctly."""
         # First sync: parent only.
-        client_1 = FakeClient(account_id="acct-1", responses=[[_row("200", type_="DAILY_FINANCING")]])
+        client_1 = FakeClient(
+            account_id="acct-1", responses=[[_row("200", type_="DAILY_FINANCING")]]
+        )
         sync_cold(db, client_1)
 
         # Second sync: child references the parent from the first run.
@@ -399,3 +409,85 @@ class TestParentChildLinking:
             (parent_synthetic_id,),
         ).fetchone()[0]
         assert linked == 3
+
+
+# ---------------------------------------------------------------------------
+# sync_csv
+# ---------------------------------------------------------------------------
+
+_CSV_HEADER = (
+    "TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,"
+    "UNITS,DIRECTION,ESTIMATED SPREAD COST,STOP LOSS,TAKE PROFIT,"
+    "TRAILING STOP,FINANCING,FUNDING RATE,COMMISSION,CONVERSION RATE,"
+    "CONVERSION FEE,PL,AMOUNT,BALANCE"
+)
+
+
+def _csv_row(oanda_id: str, time: str = "2026-02-03 00:00:00 UTC") -> str:
+    """A minimal, valid MARGIN_CALL_ENTER-style CSV data line for *oanda_id*."""
+    return (
+        f'"{oanda_id}-0","{time}","MARGIN_CALL_ENTER","",'
+        '"","","","","","","","","","","","","","","",""'
+    )
+
+
+def _write_csv(path: Path, *rows: str) -> Path:
+    path.write_text("\n".join((_CSV_HEADER, *rows)), encoding="utf-8")
+    return path
+
+
+class TestSyncCsv:
+    """CSV import: ingestion, deduplication, forward-only cursor advance."""
+
+    def test_ingests_rows_and_writes_cursor(
+        self, db: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        csv_path = _write_csv(tmp_path / "history.csv", _csv_row("10"), _csv_row("20"))
+        result = sync_csv(db, "acct-1", csv_path)
+        assert result == SyncResult(rows_ingested=2, rows_skipped=0, last_oanda_id="20")
+        assert _count_transactions(db) == 2
+        assert _read_cursor(db, "acct-1") == "20"
+
+    def test_empty_csv_returns_zero_result_no_cursor(
+        self, db: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        csv_path = _write_csv(tmp_path / "history.csv")
+        result = sync_csv(db, "acct-1", csv_path)
+        assert result == SyncResult(rows_ingested=0, rows_skipped=0, last_oanda_id=None)
+        assert _read_cursor(db, "acct-1") is None
+
+    def test_reimporting_same_csv_skips_all_rows(
+        self, db: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        csv_path = _write_csv(tmp_path / "history.csv", _csv_row("10"), _csv_row("20"))
+        sync_csv(db, "acct-1", csv_path)
+        result = sync_csv(db, "acct-1", csv_path)
+        assert result.rows_ingested == 0
+        assert result.rows_skipped == 2
+        assert _count_transactions(db) == 2
+
+    def test_cursor_does_not_regress_on_older_csv(
+        self, db: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """Importing an older CSV after a newer cursor already exists must
+        leave the cursor at the newer value, even though the older rows are
+        still ingested.
+        """
+        newer = _write_csv(tmp_path / "newer.csv", _csv_row("500"))
+        sync_csv(db, "acct-1", newer)
+        assert _read_cursor(db, "acct-1") == "500"
+
+        older = _write_csv(tmp_path / "older.csv", _csv_row("100"))
+        result = sync_csv(db, "acct-1", older)
+        assert result.rows_ingested == 1
+        assert _read_cursor(db, "acct-1") == "500"
+
+    def test_separate_accounts_do_not_share_a_cursor(
+        self, db: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        csv_path = _write_csv(tmp_path / "history.csv", _csv_row("10"))
+        sync_csv(db, "acct-1", csv_path)
+        sync_csv(db, "acct-2", csv_path)
+        assert _read_cursor(db, "acct-1") == "10"
+        assert _read_cursor(db, "acct-2") == "10"
+        assert _count_transactions(db) == 2
