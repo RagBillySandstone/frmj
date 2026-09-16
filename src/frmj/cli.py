@@ -341,6 +341,26 @@ def _complete_instrument(incomplete: str) -> list[str]:
     return [p for p in _FX_PAIRS if p.startswith(incomplete.lower())]
 
 
+def _complete_open_instrument(incomplete: str) -> list[str]:
+    """Return instruments with an open position, for ``frmj close``.
+
+    Unlike ``_complete_instrument`` (the static FX pair list used for
+    ``trade``), this queries the broker for actual open trades so shell
+    completion only ever offers something ``close`` can act on. Any failure
+    (no active account configured, network/auth error) is swallowed and
+    yields no completions rather than breaking the user's shell.
+    """
+    conn = get_db()
+    try:
+        client = get_client(conn)
+        instruments = {t.instrument for t in client.get_open_trades()}
+    except Exception:
+        return []
+    finally:
+        conn.close()
+    return sorted(i for i in instruments if i.upper().startswith(incomplete.upper()))
+
+
 def _complete_direction(incomplete: str) -> list[str]:
     return [d for d in ("long", "short") if d.startswith(incomplete.lower())]
 
@@ -751,7 +771,7 @@ def close(
     instrument: str = typer.Argument(
         ...,
         help="Instrument to close, e.g. EUR_USD",
-        autocompletion=_complete_instrument,
+        autocompletion=_complete_open_instrument,
     ),
 ) -> None:
     """Close all open tickets for an instrument."""

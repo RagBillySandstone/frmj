@@ -49,6 +49,7 @@ from frmj.cli import (
     _complete_group_member,
     _complete_instrument,
     _complete_oanda_id,
+    _complete_open_instrument,
     _complete_tag,
     _complete_txn_type,
     _daily_financing_home,
@@ -4302,6 +4303,42 @@ class TestCloseCommand:
         )
         result = self._invoke(monkeypatch, fake, inputs="n\n")
         assert "Total P/L" in result.output
+
+    def test_completion_only_offers_open_instruments(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Tab completion for ``close`` must be scoped to live open trades,
+        not the full static FX pair list used by ``trade``."""
+        fake = FakeFullClient(
+            open_trades=[
+                _open_trade(trade_id="200", instrument="EUR_USD"),
+                _open_trade(trade_id="201", instrument="USD_JPY"),
+            ]
+        )
+        monkeypatch.setattr("frmj.cli.get_client", lambda conn: fake)
+        assert _complete_open_instrument("") == ["EUR_USD", "USD_JPY"]
+        assert _complete_open_instrument("eur") == ["EUR_USD"]
+        assert _complete_open_instrument("gbp") == []
+
+    def test_completion_empty_when_no_open_trades(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "frmj.cli.get_client", lambda conn: FakeFullClient(open_trades=[])
+        )
+        assert _complete_open_instrument("") == []
+
+    def test_completion_swallows_client_errors(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No active account, auth failure, network error, etc. should yield
+        no completions rather than raising inside the user's shell."""
+
+        def _fail(conn: object) -> object:
+            raise RuntimeError("no active account")
+
+        monkeypatch.setattr("frmj.cli.get_client", _fail)
+        assert _complete_open_instrument("") == []
 
     def test_only_closes_matching_instrument(
         self, close_db: Path, monkeypatch: pytest.MonkeyPatch
