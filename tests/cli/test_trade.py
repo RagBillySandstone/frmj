@@ -979,7 +979,8 @@ class TestTradeMultiAccount:
         args: list[str] | None = None,
     ) -> object:
         monkeypatch.setattr(
-            "frmj.cli.trade.get_client_for_account", lambda account: fakes[account.name]
+            "frmj.cli._trade_multi.get_client_for_account",
+            lambda account: fakes[account.name],
         )
         return runner.invoke(
             app, args or ["trade", "EUR_USD", "long", "--multi", "grp"], input=inputs
@@ -1122,7 +1123,8 @@ class TestTradeMultiAccount:
 
         fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
         monkeypatch.setattr(
-            "frmj.cli.trade.get_client_for_account", lambda account: fakes[account.name]
+            "frmj.cli._trade_multi.get_client_for_account",
+            lambda account: fakes[account.name],
         )
         monkeypatch.setattr(
             "frmj.services.evaluate_trade",
@@ -1143,7 +1145,8 @@ class TestTradeMultiAccount:
         declining it cancels the order on every account."""
         fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
         monkeypatch.setattr(
-            "frmj.cli.trade.get_client_for_account", lambda account: fakes[account.name]
+            "frmj.cli._trade_multi.get_client_for_account",
+            lambda account: fakes[account.name],
         )
         monkeypatch.setattr(
             "frmj.services.evaluate_correlation",
@@ -1168,7 +1171,7 @@ class TestTradeMultiAccount:
                 raise RuntimeError("No API token found for the practice environment.")
             return self._fake(account.oanda_id)
 
-        monkeypatch.setattr("frmj.cli.trade.get_client_for_account", _get_client)
+        monkeypatch.setattr("frmj.cli._trade_multi.get_client_for_account", _get_client)
         result = runner.invoke(app, ["trade", "EUR_USD", "long", "--multi", "grp"])
         assert result.exit_code == 1
         assert "Error [beta]" in result.output + result.stderr
@@ -1255,7 +1258,8 @@ class TestTradeMultiAccount:
 
         fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
         monkeypatch.setattr(
-            "frmj.cli.trade.get_client_for_account", lambda account: fakes[account.name]
+            "frmj.cli._trade_multi.get_client_for_account",
+            lambda account: fakes[account.name],
         )
         monkeypatch.setattr(
             "frmj.services.evaluate_correlation",
@@ -1273,7 +1277,8 @@ class TestTradeMultiAccount:
         """An exception from compute_units for any account aborts the group."""
         fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
         monkeypatch.setattr(
-            "frmj.cli.trade.get_client_for_account", lambda account: fakes[account.name]
+            "frmj.cli._trade_multi.get_client_for_account",
+            lambda account: fakes[account.name],
         )
         monkeypatch.setattr(
             "frmj.services.compute_units",

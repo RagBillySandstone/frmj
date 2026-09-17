@@ -2,7 +2,7 @@
 
 Helpers used by only a single command live next to that command instead
 (e.g. ``_display_stats`` in ``stats.py``, ``_display_financing_rates`` in
-``financing.py``, ``_display_exits`` in ``trade.py``).
+``financing.py``, ``_display_exits`` in ``_trade_helpers.py``).
 """
 
 from __future__ import annotations
