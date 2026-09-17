@@ -18,8 +18,8 @@ from typing import Any
 import httpx
 import pytest
 
-from frmj.execution import oanda
 from frmj.execution.oanda import OandaClient
+from frmj.execution.oanda import client as oanda_client
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +365,7 @@ class TestFetchSince:
         loop, advancing ``from_id`` to the last received transaction's ID,
         until a sub-limit response is returned."""
         # Shrink the page limit so the test doesn't need 500 fake rows.
-        monkeypatch.setattr(oanda, "_SINCEID_PAGE_LIMIT", 2)
+        monkeypatch.setattr(oanda_client, "_SINCEID_PAGE_LIMIT", 2)
         client = _make_client(
             {"transactions": [_txn("10"), _txn("11")]},  # at limit -> loop again
             {"transactions": [_txn("12")]},  # sub-limit -> stop

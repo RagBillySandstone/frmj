@@ -1,5 +1,4 @@
-"""
-Thin httpx wrapper for the Oanda v20 REST API.
+"""Thin httpx wrapper for the Oanda v20 REST API.
 
 Endpoints implemented
 ---------------------
@@ -16,19 +15,6 @@ We deliberately avoid the official v20 Python SDK so that:
   * We stay in full control of timeout and retry policy (no hidden waits).
   * The dependency surface stays tiny (httpx only).
   * We can add new fields to the parsed output without waiting on SDK updates.
-
-Supported Oanda endpoints
---------------------------
-Cold sync (full history):
-    GET /v3/accounts/{accountID}/transactions
-    Returns a ``pages`` array; each element is a URL that yields one page
-    of transaction objects. We fetch pages in order and concatenate.
-
-Incremental sync (since a known transaction ID):
-    GET /v3/accounts/{accountID}/transactions/sinceid?id={transactionID}
-    Returns all transactions after ``id``, up to ``_SINCEID_PAGE_LIMIT``
-    per call (500 at time of writing). We loop until a response smaller
-    than the limit signals no more data.
 
 Timeout configuration
 ---------------------
@@ -54,31 +40,37 @@ None — deliberately. If a request fails we let the exception propagate to
 the CLI, which can offer "retry / save plan / abort" options. Silent
 automatic retries inside the client would obscure network problems and make
 the "abort" path unreachable.
-
-Parent / child transaction IDs
--------------------------------
-Oanda models DAILY_FINANCING as a single parent transaction that lists its
-per-instrument children via ``relatedTransactionIDs``.  Children have no
-back-reference to their parent.
-
-``get_transactions_since`` applies ``_resolve_financing_parents`` to the
-collected batch before returning it, stamping ``parent_oanda_id`` on every
-child row.  The sync layer then resolves those IDs to the synthetic SQLite
-FK.  Rows from a prior sync run are handled by the sync layer's
-``_resolve_parent_id`` DB lookup — cross-batch links work correctly because
-the parent is already in the database when the children arrive.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, Protocol
 
 import httpx
 
 from frmj.domain.sizing import InstrumentSpec, PriceQuote
+
+from .models import (
+    AccountSummary,
+    CloseFill,
+    FinancingRate,
+    OpenTrade,
+    OrderFill,
+    TransactionRow,
+)
+from .parsing import (
+    _compute_conversion_rate,
+    _extract_bid_ask,
+    _parse_account_summary,
+    _parse_close_fill,
+    _parse_financing_rate,
+    _parse_instrument_spec,
+    _parse_open_trade,
+    _parse_order_create_txn_id,
+    _resolve_financing_parents,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -95,368 +87,6 @@ _CONNECT_TIMEOUT: float = 5.0  # seconds — fail fast on broken network
 _READ_TIMEOUT: float = 15.0  # seconds — cold pages can be large
 _WRITE_TIMEOUT: float = 5.0  # seconds — tiny uploads
 _POOL_TIMEOUT: float = 5.0  # seconds — connection pool wait
-
-
-# ---------------------------------------------------------------------------
-# Data types
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class TransactionRow:
-    """
-    One Oanda transaction, parsed and ready for insertion into ``transactions``.
-
-    This is the currency in which ``ClientProtocol`` deals — it is equally
-    produced by the real ``OandaClient`` and by test doubles, so changing its
-    fields is a breaking change to both.
-
-    Fields
-    ------
-    oanda_id:
-        Oanda's own transaction ID (a numeric string). Stored as TEXT so we
-        never do arithmetic on it; the sync layer uses it only for
-        deduplication and cursor tracking.
-    account_id:
-        The Oanda account this transaction belongs to.
-    type:
-        Oanda's transaction type string, e.g. ``"ORDER_FILL"``,
-        ``"DAILY_FINANCING"``. Stored verbatim — we do not map to an Enum
-        so that new types from Oanda don't require a code change.
-    time:
-        ISO-8601 timestamp from Oanda's ``time`` field, verbatim.
-    parent_oanda_id:
-        For DAILY_FINANCING children: the Oanda ID of the parent
-        transaction in the same financing batch. ``None`` for everything
-        else. The sync layer resolves this to a SQLite synthetic FK.
-    raw_json:
-        Compact JSON string of the full Oanda transaction object. Stored
-        verbatim so we can add new parsed columns later without re-syncing.
-    """
-
-    oanda_id: str
-    account_id: str
-    type: str
-    time: str
-    parent_oanda_id: str | None
-    raw_json: str
-
-
-@dataclass(frozen=True, slots=True)
-class OpenTrade:
-    """One open trade as returned by GET /accounts/{id}/openTrades.
-
-    ``direction`` is ``"LONG"`` or ``"SHORT"``.  ``units`` is always positive —
-    direction is carried separately so callers never have to check sign.
-
-    ``take_profit_price`` and ``stop_loss_price`` are ``None`` when no
-    corresponding order is attached to the trade.
-
-    ``open_time`` is the ISO-8601 timestamp from Oanda verbatim; the display
-    layer trims it to seconds.
-    """
-
-    trade_id: str
-    instrument: str
-    direction: str
-    units: int
-    open_price: Decimal
-    unrealised_pl: Decimal
-    margin_used: Decimal
-    take_profit_price: Decimal | None
-    stop_loss_price: Decimal | None
-    open_time: str
-
-
-@dataclass(frozen=True, slots=True)
-class AccountSummary:
-    """Account-level snapshot returned by GET /accounts/{id}/summary.
-
-    ``nav`` (net asset value) is what the risk model calls *equity* — the
-    total account value including unrealised P/L on open positions.
-
-    ``margin_available`` is the margin currently available to open new
-    positions. This is what the sizing model's safety-reserve calculation
-    works from, not the raw NAV.
-
-    ``open_trade_count`` is the total number of open tickets across all
-    instruments, per Oanda's own count. We use it as the risk model's N.
-    """
-
-    nav: Decimal
-    balance: Decimal
-    unrealized_pl: Decimal
-    realized_pl: Decimal
-    position_value: Decimal
-    margin_used: Decimal
-    margin_available: Decimal
-    open_trade_count: int
-
-
-@dataclass(frozen=True, slots=True)
-class FinancingRate:
-    """Long/short financing rate for one instrument, from the ``financing``
-    block of GET /accounts/{id}/instruments.
-
-    Oanda quotes ``long_rate``/``short_rate`` as annualized decimal fractions
-    (``Decimal("-0.03")`` means -3.00%/year) that it republishes daily — this
-    is the same convention Oanda's own site uses for what it calls "daily
-    financing rates" (the *rate* is annualized; it is the *publication* that
-    is daily). A negative rate means you pay to hold that side overnight; a
-    positive rate means you're paid.
-    """
-
-    instrument: str
-    long_rate: Decimal
-    short_rate: Decimal
-
-
-@dataclass(frozen=True, slots=True)
-class OrderFill:
-    """Result of a successfully filled market order.
-
-    ``transaction_id`` is Oanda's fill-transaction ID.  We attach the user's
-    optional note to this ID via the ``notes`` table.
-
-    ``fill_price`` is the actual execution price reported by Oanda.
-
-    ``units_filled`` is signed: positive for long fills, negative for short.
-
-    ``trade_id`` is the Oanda trade ID from ``tradeOpened.tradeID`` in the fill
-    response.  Used to attach TP/SL orders to the newly-opened position.
-    ``None`` in the rare case where the fill did not open a new trade (e.g.
-    a partial close that is modelled as a fill — not currently reachable via the
-    CLI, but defended against so callers don't have to guess).
-    """
-
-    transaction_id: str
-    fill_price: Decimal
-    units_filled: int
-    trade_id: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class CloseFill:
-    """Result of closing an open trade via PUT /trades/{id}/close.
-
-    ``transaction_id`` is Oanda's closing fill-transaction ID.
-
-    ``close_price`` is the execution price at which the trade was closed.
-
-    ``realised_pl`` is the net profit or loss on the trade in home currency,
-    as reported by Oanda's ``pl`` field.  Negative for a losing trade.
-    """
-
-    transaction_id: str
-    close_price: Decimal
-    realised_pl: Decimal
-
-
-# ---------------------------------------------------------------------------
-# Module-level parsing helpers  (pure functions — tested directly)
-# ---------------------------------------------------------------------------
-# Separating parsing from HTTP means tests can feed sample dicts without
-# spinning up an HTTP server, while the OandaClient methods stay thin.
-
-
-def _parse_close_fill(payload: dict[str, Any]) -> CloseFill:
-    """Parse PUT /trades/{id}/close response into a CloseFill.
-
-    Oanda returns the closing fill under ``orderFillTransaction``.  The ``pl``
-    field is the net realised P/L for this trade in the account's home currency.
-    """
-    fill = payload["orderFillTransaction"]
-    return CloseFill(
-        transaction_id=str(fill["id"]),
-        close_price=Decimal(fill["price"]),
-        realised_pl=Decimal(fill["pl"]),
-    )
-
-
-def _parse_open_trade(trade: dict[str, Any]) -> OpenTrade:
-    """Parse one element of the ``trades`` array from GET /openTrades.
-
-    ``currentUnits`` is signed (positive=long, negative=short); we normalise to
-    a direction string + positive unit count so callers never have to check sign.
-
-    ``takeProfitOrder`` and ``stopLossOrder`` are optional keys — absent when no
-    exit order is attached.
-    """
-    units_raw = int(Decimal(trade["currentUnits"]))
-    tp_order = trade.get("takeProfitOrder")
-    sl_order = trade.get("stopLossOrder")
-    return OpenTrade(
-        trade_id=str(trade["id"]),
-        instrument=trade["instrument"],
-        direction="LONG" if units_raw >= 0 else "SHORT",
-        units=abs(units_raw),
-        open_price=Decimal(trade["price"]),
-        unrealised_pl=Decimal(trade["unrealizedPL"]),
-        margin_used=Decimal(trade["marginUsed"]),
-        take_profit_price=Decimal(tp_order["price"]) if tp_order else None,
-        stop_loss_price=Decimal(sl_order["price"]) if sl_order else None,
-        open_time=trade["openTime"],
-    )
-
-
-def _parse_account_summary(payload: dict[str, Any]) -> AccountSummary:
-    """Parse GET /accounts/{id}/summary response."""
-    acct = payload["account"]
-    return AccountSummary(
-        nav=Decimal(acct["NAV"]),
-        balance=Decimal(acct["balance"]),
-        unrealized_pl=Decimal(acct.get("unrealizedPL", "0")),
-        realized_pl=Decimal(acct.get("pl", "0")),
-        position_value=Decimal(acct.get("positionValue", "0")),
-        margin_used=Decimal(acct.get("marginUsed", "0")),
-        margin_available=Decimal(acct["marginAvailable"]),
-        open_trade_count=int(acct["openTradeCount"]),
-    )
-
-
-def _parse_order_create_txn_id(payload: dict[str, Any]) -> str:
-    """Extract the transaction ID from a POST /orders success response.
-
-    Oanda wraps the created-order transaction under ``orderCreateTransaction``.
-    Returns its ``id`` as a string.  Raises ``RuntimeError`` when the key is
-    absent — that would mean an undocumented response shape and should surface
-    loudly rather than silently swallowing.
-    """
-    txn = payload.get("orderCreateTransaction")
-    if txn is None:
-        raise RuntimeError(
-            f"No orderCreateTransaction in Oanda response: {json.dumps(payload)}"
-        )
-    return str(txn["id"])
-
-
-def _parse_instrument_spec(instr: dict[str, Any]) -> InstrumentSpec:
-    """Parse one element of the ``instruments`` array from GET /instruments.
-
-    ``units_increment`` defaults to 1 because Oanda FX pairs accept any
-    integer unit count.  The API does not expose a dedicated increment field
-    for FX; ``tradeUnitsPrecision == 0`` means whole units only, which maps
-    to increment = 1. Instruments with non-standard increments (some metals /
-    CFDs) will need explicit overrides — add them when we encounter them.
-
-    ``min_units`` comes from Oanda's ``minimumTradeSize`` (a string like
-    ``"1"``).  We convert via Decimal to handle any decimal-valued minimums
-    safely before truncating to int.
-
-    ``display_precision`` comes from Oanda's ``displayPrecision`` — the
-    number of decimal places the API accepts for prices on this instrument.
-    We need it to quantize TP/SL prices before submitting them; sending a
-    price with more decimals than Oanda expects is rejected with a 400.
-    """
-    return InstrumentSpec(
-        name=instr["name"],
-        pip_location=int(instr["pipLocation"]),
-        margin_rate=Decimal(instr["marginRate"]),
-        min_units=int(Decimal(instr["minimumTradeSize"])),
-        units_increment=1,
-        display_precision=int(instr["displayPrecision"]),
-    )
-
-
-def _parse_financing_rate(instr: dict[str, Any]) -> FinancingRate:
-    """Parse one element of the ``instruments`` array into a ``FinancingRate``.
-
-    Pulls only the ``financing`` sub-object; the rest of *instr* (margin
-    rate, pip location, etc.) is handled by ``_parse_instrument_spec``.
-    """
-    financing = instr["financing"]
-    return FinancingRate(
-        instrument=instr["name"],
-        long_rate=Decimal(financing["longRate"]),
-        short_rate=Decimal(financing["shortRate"]),
-    )
-
-
-def _extract_bid_ask(payload: dict[str, Any]) -> tuple[Decimal, Decimal]:
-    """Pull the best bid and ask from a GET /pricing response.
-
-    Oanda returns ``bids`` and ``asks`` as arrays (multiple liquidity bands).
-    Index 0 is always the best (tightest) price — the one we would receive
-    for a market order of typical size.
-    """
-    price_data = payload["prices"][0]
-    bid = Decimal(price_data["bids"][0]["price"])
-    ask = Decimal(price_data["asks"][0]["price"])
-    return bid, ask
-
-
-# ---------------------------------------------------------------------------
-# Parent/child resolution (pure — tested directly)
-# ---------------------------------------------------------------------------
-
-
-def _compute_conversion_rate(
-    currency: str,
-    home: str,
-    mids: dict[str, Decimal],
-) -> Decimal:
-    """Pure: convert one unit of *currency* into *home* currency.
-
-    Consults *mids* (a ``{instrument_name: mid_price}`` dict) to find the
-    rate.  Tries the direct quote ``{currency}_{home}`` first; falls back to
-    the inverted quote ``{home}_{currency}``.  Returns ``Decimal("1")`` when
-    ``currency == home`` — no lookup required.
-
-    Raises ``ValueError`` when neither pair is present in *mids*.  The HTTP
-    layer (``_currency_to_home``) is responsible for populating the dict
-    before calling this function.
-    """
-    if currency == home:
-        return Decimal("1")
-    direct = f"{currency}_{home}"
-    if direct in mids:
-        return mids[direct]
-    inverted = f"{home}_{currency}"
-    if inverted in mids:
-        return Decimal("1") / mids[inverted]
-    raise ValueError(
-        f"Cannot convert {currency} to {home}: "
-        f"neither {direct} nor {inverted} in provided mid prices"
-    )
-
-
-def _resolve_financing_parents(rows: list[TransactionRow]) -> list[TransactionRow]:
-    """Stamp ``parent_oanda_id`` on DAILY_FINANCING child rows.
-
-    Oanda emits each DAILY_FINANCING batch as one summary parent (which
-    carries ``relatedTransactionIDs`` listing its per-instrument children)
-    followed by the children themselves.  The children have no back-reference.
-
-    We build a ``{child_oanda_id: parent_oanda_id}`` map from every parent in
-    *rows*, then return a new list where each child row has its
-    ``parent_oanda_id`` set.  All other rows are returned unchanged.
-
-    The fast path (no DAILY_FINANCING parents in the batch) returns *rows*
-    unmodified so callers bear zero overhead on typical batches that contain
-    only trade transactions.
-
-    Cross-batch case: if a parent arrived in a prior sync run it will not be
-    in *rows*, so its children's ``parent_oanda_id`` will remain ``None`` here.
-    The sync layer's ``_resolve_parent_id`` DB lookup handles that case — it
-    finds the parent's synthetic id from the transactions table.
-    """
-    child_to_parent: dict[str, str] = {}
-    for row in rows:
-        if row.type != "DAILY_FINANCING":
-            continue
-        raw: dict[str, Any] = json.loads(row.raw_json)
-        for child_id in raw.get("relatedTransactionIDs", []):
-            child_to_parent[str(child_id)] = row.oanda_id
-
-    if not child_to_parent:
-        return rows
-
-    return [
-        replace(row, parent_oanda_id=child_to_parent[row.oanda_id])
-        if row.oanda_id in child_to_parent
-        else row
-        for row in rows
-    ]
 
 
 # ---------------------------------------------------------------------------

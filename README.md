@@ -368,7 +368,10 @@ src/frmj/
 │   ├── sizing.py       # Pure unit sizing: capital → units respecting margin formula
 │   └── pricing.py      # Pure exit pricing: TP/SL pips or %RoM → prices, P/L, R:R
 ├── execution/
-│   ├── oanda.py        # httpx wrapper for Oanda v3 REST API
+│   ├── oanda/
+│   │   ├── client.py   # OandaClient — httpx wrapper for Oanda v3 REST API
+│   │   ├── parsing.py  # Pure functions: Oanda API dicts → dataclasses
+│   │   └── models.py   # Dataclasses shared by client.py and parsing.py
 │   └── sync.py         # Ingestion: Oanda rows → SQLite, cursor management
 └── persistence/
     └── schema.py       # SQLite DDL and ensure_schema()
