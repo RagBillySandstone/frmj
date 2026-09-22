@@ -8,7 +8,7 @@ import httpx
 import typer
 
 from frmj import services
-from frmj.accounts import get_active_account, is_live_mode, list_group_members
+from frmj.accounts import is_live_mode, list_group_members, resolve_account
 from frmj.app import (
     clear_draft_plan,
     get_client,
@@ -20,6 +20,7 @@ from frmj.app import (
 from frmj.cli import app
 from frmj.cli._completion import (
     _complete_account_group,
+    _complete_account_name,
     _complete_direction,
     _complete_instrument,
 )
@@ -103,6 +104,13 @@ def trade(
         "accounts.",
         autocompletion=_complete_multi_opposite,
     ),
+    account: str | None = typer.Option(
+        None,
+        "--account",
+        "-a",
+        help="Use this account instead of the active one (see 'frmj account list').",
+        autocompletion=_complete_account_name,
+    ),
 ) -> None:
     """Plan and (optionally) execute a trade."""
     # --- Validate argument combinations --------------------------------------
@@ -114,6 +122,13 @@ def trade(
             raise typer.Exit(1)
         if multi is not None:
             typer.echo("Error: --multi is not supported with --resume.", err=True)
+            raise typer.Exit(1)
+        if account is not None:
+            typer.echo(
+                "Error: --account is not used with --resume "
+                "(the saved plan records its account).",
+                err=True,
+            )
             raise typer.Exit(1)
     else:
         if instrument is None or direction_str is None:
@@ -132,6 +147,9 @@ def trade(
     # has its own NAV and open positions), which changes enough of the
     # planning logic that sharing it here would risk the single-account path's
     # behavior for a feature most trades never touch.
+    if multi is not None and account is not None:
+        typer.echo("Error: --account cannot be combined with --multi.", err=True)
+        raise typer.Exit(1)
     if multi is not None:
         conn = get_db()
         accounts = list_group_members(conn, multi)
@@ -168,21 +186,12 @@ def trade(
         typer.echo("Error: --opposite requires --multi.", err=True)
         raise typer.Exit(1)
 
-    conn = get_db()
-    try:
-        client = get_client(conn)
-    except RuntimeError as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        conn.close()
-        raise typer.Exit(1)
-
-    # These are set by either the normal or resume path before the shared section.
-    units_signed: int
-    tp_price: Decimal | None
-    sl_price: Decimal | None
-
+    # A resumed plan is placed on the account it was planned for, which may
+    # not be the active account any more (or ever, with --account). Plans
+    # saved before the draft recorded an account have no "account" key and
+    # fall back to the active account, as they always did.
+    plan: dict | None = None
     if resume:
-        # --- Resume path: skip planning; load the saved draft and confirm ----
         plan = load_draft_plan()
         if plan is None:
             typer.echo(
@@ -190,8 +199,28 @@ def trade(
                 "Run 'frmj trade <INSTRUMENT> <DIRECTION>' to create one.",
                 err=True,
             )
-            conn.close()
             raise typer.Exit(1)
+        account = plan.get("account")
+
+    conn = get_db()
+    try:
+        client = get_client(conn, account)
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        conn.close()
+        raise typer.Exit(1)
+    # The profile the order goes to — drives the live-mode gate and is recorded
+    # in a saved draft. None only when get_client is stubbed in tests.
+    target_account = resolve_account(conn, account)
+
+    # These are set by either the normal or resume path before the shared section.
+    units_signed: int
+    tp_price: Decimal | None
+    sl_price: Decimal | None
+
+    if resume:
+        # --- Resume path: skip planning; confirm the draft loaded above ------
+        assert plan is not None
 
         instrument = plan["instrument"]
         direction_str = plan["direction"]
@@ -201,6 +230,8 @@ def trade(
 
         typer.echo(f"Resuming saved plan: {instrument} {direction_str.upper()}")
         typer.echo("─" * 40)
+        if account is not None:
+            typer.echo(f"  Account:   {account}")
         direction_label = "LONG" if units_signed > 0 else "SHORT"
         typer.echo(f"  Units:     {abs(units_signed):,} ({direction_label})")
         if tp_price is not None:
@@ -282,6 +313,8 @@ def trade(
         typer.echo("")
         typer.echo(f"Trade plan: {instrument} {direction_str.upper()}")
         typer.echo("─" * 40)
+        if account is not None:
+            typer.echo(f"  Account:         {account}")
         typer.echo(f"  Account NAV:     ${summary.nav:,.2f}")
         typer.echo(
             f"  Open trades:     {summary.open_trade_count} / {risk_config.max_open_trades}"
@@ -386,11 +419,12 @@ def trade(
     assert instrument is not None
 
     # --- Live mode gate: block live orders when mode is practice -------------
-    active_account = get_active_account(conn)
-    if active_account is not None and not active_account.is_practice:
+    # Checks the account the order actually goes to, so --account can't be
+    # used to slip a live order past practice mode.
+    if target_account is not None and not target_account.is_practice:
         if not is_live_mode(conn):
             typer.echo(
-                "Error: Active account is a live account, "
+                f"Error: Account '{target_account.name}' is a live account, "
                 "but live trading mode is not enabled.\n"
                 "Run: frmj mode live",
                 err=True,
@@ -425,6 +459,9 @@ def trade(
                     "units_signed": units_signed,
                     "tp_price": str(tp_price) if tp_price is not None else None,
                     "sl_price": str(sl_price) if sl_price is not None else None,
+                    "account": (
+                        target_account.name if target_account is not None else None
+                    ),
                 }
             )
             typer.echo(f"Plan saved to {plan_path}.")

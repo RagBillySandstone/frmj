@@ -46,7 +46,9 @@ class TestDryRun:
     ) -> None:
         """``frmj trade EUR_USD long --dry-run`` must exit 0."""
         fake = FakeFullClient()
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         # Provide TP and SL input (50 pips, 30 pips), then dry-run exits.
         result = runner.invoke(
             app, ["trade", "EUR_USD", "long", "--dry-run"], input="50\n30\n"
@@ -57,7 +59,10 @@ class TestDryRun:
         self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Output must contain the [DRY RUN] marker."""
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: FakeFullClient())
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client",
+            lambda conn, account_name=None: FakeFullClient(),
+        )
         result = runner.invoke(
             app, ["trade", "EUR_USD", "long", "--dry-run"], input="50\n30\n"
         )
@@ -68,7 +73,9 @@ class TestDryRun:
     ) -> None:
         """``place_market_order`` must NOT be called in dry-run mode."""
         fake = FakeFullClient()
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         runner.invoke(app, ["trade", "EUR_USD", "long", "--dry-run"], input="50\n30\n")
         assert not fake.order_placed
 
@@ -76,7 +83,10 @@ class TestDryRun:
         self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Exit levels table (TP and SL) appears in dry-run output."""
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: FakeFullClient())
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client",
+            lambda conn, account_name=None: FakeFullClient(),
+        )
         result = runner.invoke(
             app, ["trade", "EUR_USD", "long", "--dry-run"], input="50\n30\n"
         )
@@ -87,7 +97,10 @@ class TestDryRun:
         self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Pressing Enter for both TP and SL yields no exit levels line."""
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: FakeFullClient())
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client",
+            lambda conn, account_name=None: FakeFullClient(),
+        )
         # Empty input for both TP and SL prompts.
         result = runner.invoke(
             app, ["trade", "EUR_USD", "long", "--dry-run"], input="\n\n"
@@ -106,7 +119,9 @@ class TestDryRun:
                 FinancingRate("EUR_USD", Decimal("-0.0141"), Decimal("0.0021"))
             ]
         )
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         result = runner.invoke(
             app, ["trade", "EUR_USD", "long", "--dry-run"], input="50\n30\n"
         )
@@ -119,7 +134,9 @@ class TestDryRun:
     ) -> None:
         """No financing line is shown when the rate fetch fails or is empty."""
         fake = FakeFullClient(financing_should_fail=True)
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         result = runner.invoke(
             app, ["trade", "EUR_USD", "long", "--dry-run"], input="50\n30\n"
         )
@@ -147,7 +164,9 @@ class TestTradeExecute:
         fake: FakeFullClient,
         inputs: str,
     ) -> object:
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         return runner.invoke(app, ["trade", "EUR_USD", "long"], input=inputs)
 
     def test_tpsl_both_attached_after_fill(
@@ -435,7 +454,10 @@ class TestTradeErrors:
         add_account(conn, "practice", "acct-1", is_practice=True)
         set_active_account(conn, "practice")
         conn.close()
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: FakeFullClient())
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client",
+            lambda conn, account_name=None: FakeFullClient(),
+        )
         result = runner.invoke(app, ["trade", "EUR_USD", "long"])
         assert result.exit_code == 1
         assert "Error" in result.output + result.stderr
@@ -451,7 +473,9 @@ class TestTradeErrors:
             def get_account_summary(self) -> None:  # type: ignore[override]
                 raise RuntimeError("network down")
 
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: FailingClient())
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: FailingClient()
+        )
         result = runner.invoke(app, ["trade", "EUR_USD", "long"])
         assert result.exit_code == 1
         assert "Error fetching market data" in result.output + result.stderr
@@ -462,7 +486,10 @@ class TestTradeErrors:
         """MaxTradesExceeded from evaluate_trade exits 1."""
         from frmj.domain.risk import MaxTradesExceeded
 
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: FakeFullClient())
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client",
+            lambda conn, account_name=None: FakeFullClient(),
+        )
         monkeypatch.setattr(
             "frmj.services.evaluate_trade",
             lambda **kw: (_ for _ in ()).throw(
@@ -479,7 +506,10 @@ class TestTradeErrors:
         """ScaleInForbidden from evaluate_trade exits 1."""
         from frmj.domain.risk import ScaleInForbidden
 
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: FakeFullClient())
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client",
+            lambda conn, account_name=None: FakeFullClient(),
+        )
         monkeypatch.setattr(
             "frmj.services.evaluate_trade",
             lambda **kw: (_ for _ in ()).throw(
@@ -499,7 +529,9 @@ class TestTradeErrors:
         fake = FakeFullClient(
             open_trades=[_open_trade(instrument="GBP_USD", direction="LONG")]
         )
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         # "y" acknowledges the "Proceed anyway?" prompt; then TP/SL are skipped.
         result = runner.invoke(
             app, ["trade", "EUR_USD", "long", "--dry-run"], input="y\n\n\n"
@@ -516,7 +548,9 @@ class TestTradeErrors:
         fake = FakeFullClient(
             open_trades=[_open_trade(instrument="GBP_USD", direction="LONG")]
         )
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         result = runner.invoke(app, ["trade", "EUR_USD", "long"], input="n\n")
         assert result.exit_code == 0, result.output
         assert "Order cancelled" in result.output + result.stderr
@@ -532,7 +566,9 @@ class TestTradeErrors:
         fake = FakeFullClient(
             open_trades=[_open_trade(instrument="GBP_USD", direction="LONG")]
         )
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         result = runner.invoke(app, ["trade", "EUR_USD", "long"])
         assert result.exit_code == 1
         assert "Cannot trade" in result.output + result.stderr
@@ -544,7 +580,9 @@ class TestTradeErrors:
         fake = FakeFullClient(
             open_trades=[_open_trade(instrument="USD_JPY", direction="LONG")]
         )
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         # EUR_USD long is net-short USD; USD_JPY long is net-long USD — opposite
         # bets on USD, so no conflict is flagged.
         result = runner.invoke(
@@ -565,7 +603,10 @@ class TestTradeErrors:
             size_fraction=None,
             warnings=("near max open trades",),
         )
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: FakeFullClient())
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client",
+            lambda conn, account_name=None: FakeFullClient(),
+        )
         monkeypatch.setattr("frmj.services.evaluate_trade", lambda **kw: decision)
         # Just show the plan (dry-run avoids needing confirmation input).
         result = runner.invoke(
@@ -579,7 +620,10 @@ class TestTradeErrors:
         self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """When compute_units raises, trade exits 1."""
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: FakeFullClient())
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client",
+            lambda conn, account_name=None: FakeFullClient(),
+        )
         monkeypatch.setattr(
             "frmj.services.compute_units",
             lambda **kw: (_ for _ in ()).throw(RuntimeError("sizing error")),
@@ -593,7 +637,10 @@ class TestTradeErrors:
     ) -> None:
         """Pressing 'e' at the confirm prompt re-prompts for TP/SL and
         re-displays exit levels before asking for confirmation again."""
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: FakeFullClient())
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client",
+            lambda conn, account_name=None: FakeFullClient(),
+        )
         # Sequence: TP=50, SL=30, answer=e (edit), new TP=20, new SL=15,
         # answer=y (confirm order), note=skip, tags=skip.
         result = runner.invoke(
@@ -608,7 +655,10 @@ class TestTradeErrors:
         self, live_trade_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A live account without live mode enabled is blocked after confirming."""
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: FakeFullClient())
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client",
+            lambda conn, account_name=None: FakeFullClient(),
+        )
         # TP=50, SL=30, confirm=y → live mode gate fires before place_market_order.
         result = runner.invoke(
             app,
@@ -622,7 +672,10 @@ class TestTradeErrors:
         self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A sync error after a successful fill emits a warning but exits 0."""
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: FakeFullClient())
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client",
+            lambda conn, account_name=None: FakeFullClient(),
+        )
 
         def _counting_sync(conn: object, client: object) -> object:
             """The only sync call is the post-fill sync; always raise."""
@@ -644,7 +697,10 @@ class TestTradeErrors:
         """When the fill transaction is absent from the local DB and the user
         types a note, a 'not yet in local DB' warning is shown instead of
         inserting the note."""
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: FakeFullClient())
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client",
+            lambda conn, account_name=None: FakeFullClient(),
+        )
         # TP=skip, SL=skip, confirm=y, note="my note" (non-empty), tags=skip.
         # FakeFullClient returns transaction_id="99999" which is never pre-inserted.
         result = runner.invoke(
@@ -707,7 +763,9 @@ class TestTradeFailureAndRetry:
             )
 
         fake.place_market_order = _flaky_order  # type: ignore[method-assign]
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
 
         # TP=50p, SL=30p, confirm=y, retry prompt=action_input, note=skip, tags=skip
         inputs = f"50\n30\ny\n{action_input}\n\n\n"
@@ -734,7 +792,9 @@ class TestTradeFailureAndRetry:
         fake.place_market_order = lambda i, u: (_ for _ in ()).throw(  # type: ignore[method-assign]
             RuntimeError("fail")
         )
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         runner.invoke(app, ["trade", "EUR_USD", "long"], input="50\n30\ny\na\n")
         assert not fake.order_placed
 
@@ -842,7 +902,9 @@ class TestTradeResume:
         self, resume_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         fake = FakeFullClient()
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         result = runner.invoke(app, ["trade", "--resume"], input="")
         assert result.exit_code == 1
         assert "No saved plan" in result.output + result.stderr
@@ -852,7 +914,9 @@ class TestTradeResume:
     ) -> None:
         self._seed_plan(plan_file, instrument="GBP_USD", tp_price="1.25500")
         fake = FakeFullClient()
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         result = runner.invoke(app, ["trade", "--resume"], input="n\n")
         assert "GBP_USD" in result.output
         assert "1.25500" in result.output
@@ -862,7 +926,9 @@ class TestTradeResume:
     ) -> None:
         self._seed_plan(plan_file)
         fake = FakeFullClient()
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         runner.invoke(app, ["trade", "--resume"], input="n\n")
         assert not fake.order_placed
 
@@ -871,7 +937,9 @@ class TestTradeResume:
     ) -> None:
         self._seed_plan(plan_file)
         fake = FakeFullClient()
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         result = runner.invoke(app, ["trade", "--resume"], input="y\n\n\n")
         assert result.exit_code == 0, result.output
         assert fake.order_placed
@@ -881,7 +949,9 @@ class TestTradeResume:
     ) -> None:
         self._seed_plan(plan_file, tp_price="1.10550", sl_price="1.09750")
         fake = FakeFullClient()
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         runner.invoke(app, ["trade", "--resume"], input="y\n\n")
         assert fake.tp_attached is not None
         assert fake.sl_attached is not None
@@ -892,7 +962,9 @@ class TestTradeResume:
         """--resume with no positional args must not raise a validation error."""
         self._seed_plan(plan_file)
         fake = FakeFullClient()
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         result = runner.invoke(app, ["trade", "--resume"], input="n\n")
         assert result.exit_code == 0, result.output
 
@@ -902,7 +974,9 @@ class TestTradeResume:
         """After a successful fill via --resume, the plan file must be removed."""
         self._seed_plan(plan_file)
         fake = FakeFullClient()
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         runner.invoke(app, ["trade", "--resume"], input="y\n\n")
         assert not plan_file.exists()
 
@@ -913,7 +987,9 @@ class TestTradeResume:
         self._seed_plan(plan_file)
         # resume_db fixture deliberately omits max_open_trades config.
         fake = FakeFullClient()
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         result = runner.invoke(app, ["trade", "--resume"], input="y\n\n\n")
         assert result.exit_code == 0, result.output
 
@@ -923,10 +999,173 @@ class TestTradeResume:
         """Passing instrument alongside --resume must exit 1 with a clear message."""
         self._seed_plan(plan_file)
         fake = FakeFullClient()
-        monkeypatch.setattr("frmj.cli.trade.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
         result = runner.invoke(app, ["trade", "EUR_USD", "--resume"])
         assert result.exit_code == 1
         assert "not used with --resume" in result.output + result.stderr
+
+
+class TestTradeAccountOption:
+    """Tests for ``frmj trade ... --account NAME``."""
+
+    @pytest.fixture()
+    def account_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Active practice account 'practice', plus 'other' (practice) and
+        'my-live' (live); live mode NOT enabled."""
+        path = tmp_path / "account_option.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        add_account(conn, "practice", "acct-1", is_practice=True)
+        add_account(conn, "other", "acct-2", is_practice=True)
+        add_account(conn, "my-live", "101-001-live-001", is_practice=False)
+        set_active_account(conn, "practice")
+        set_config(conn, "max_open_trades", "5")
+        conn.close()
+        return path
+
+    @pytest.fixture()
+    def plan_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "saved_plan.json"
+        monkeypatch.setattr("frmj.app._DRAFT_PLAN_PATH", path)
+        return path
+
+    @staticmethod
+    def _patch_client(
+        monkeypatch: pytest.MonkeyPatch, fake: FakeFullClient
+    ) -> list[str | None]:
+        """Stub get_client with *fake*; return the list of requested names."""
+        requested: list[str | None] = []
+
+        def _get_client(conn: object, account_name: str | None = None) -> object:
+            requested.append(account_name)
+            return fake
+
+        monkeypatch.setattr("frmj.cli.trade.get_client", _get_client)
+        return requested
+
+    def test_account_with_multi_exits_1(self, account_db: Path) -> None:
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--multi", "grp", "--account", "other"]
+        )
+        assert result.exit_code == 1
+        assert "cannot be combined with --multi" in result.output + result.stderr
+
+    def test_account_with_resume_exits_1(self, account_db: Path) -> None:
+        result = runner.invoke(app, ["trade", "--resume", "--account", "other"])
+        assert result.exit_code == 1
+        assert "not used with --resume" in result.output + result.stderr
+
+    def test_unknown_account_exits_1(self, account_db: Path) -> None:
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run", "--account", "ghost"]
+        )
+        assert result.exit_code == 1
+        assert "No account named 'ghost'" in result.output + result.stderr
+
+    def test_dry_run_uses_and_names_account(
+        self, account_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        requested = self._patch_client(monkeypatch, FakeFullClient())
+        result = runner.invoke(
+            app,
+            ["trade", "EUR_USD", "long", "--dry-run", "--account", "other"],
+            input="\n\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert requested == ["other"]
+        assert "Account:         other" in result.output
+
+    def test_live_gate_checks_target_account(
+        self, account_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The active account is practice, but the order goes to a live one:
+        practice mode must still block it."""
+        fake = FakeFullClient()
+        self._patch_client(monkeypatch, fake)
+        result = runner.invoke(
+            app,
+            ["trade", "EUR_USD", "long", "--account", "my-live"],
+            input="50\n30\ny\n",
+        )
+        assert result.exit_code == 1
+        assert "Account 'my-live' is a live account" in result.output + result.stderr
+        assert not fake.order_placed
+
+    def test_saved_draft_records_account(
+        self, account_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        fake.place_market_order = lambda i, u: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            RuntimeError("fail")
+        )
+        self._patch_client(monkeypatch, fake)
+        # TP=50, SL=30, confirm=y, then Save at the retry prompt.
+        runner.invoke(
+            app,
+            ["trade", "EUR_USD", "long", "--account", "other"],
+            input="50\n30\ny\ns\n",
+        )
+        assert json.loads(plan_file.read_text())["account"] == "other"
+
+    def test_saved_draft_records_active_account_by_default(
+        self, account_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without --account the resolved active account is recorded, so a
+        later 'frmj account use' doesn't redirect the resumed order."""
+        fake = FakeFullClient()
+        fake.place_market_order = lambda i, u: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            RuntimeError("fail")
+        )
+        self._patch_client(monkeypatch, fake)
+        runner.invoke(app, ["trade", "EUR_USD", "long"], input="50\n30\ny\ns\n")
+        assert json.loads(plan_file.read_text())["account"] == "practice"
+
+    def test_resume_targets_saved_account(
+        self, account_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plan_file.write_text(
+            json.dumps(
+                {
+                    "instrument": "EUR_USD",
+                    "direction": "long",
+                    "units_signed": 10000,
+                    "tp_price": None,
+                    "sl_price": None,
+                    "account": "other",
+                }
+            )
+        )
+        fake = FakeFullClient()
+        requested = self._patch_client(monkeypatch, fake)
+        result = runner.invoke(app, ["trade", "--resume"], input="y\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert requested == ["other"]
+        assert "Account:   other" in result.output
+        assert fake.order_placed
+
+    def test_resume_legacy_plan_uses_active_account(
+        self, account_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A draft saved before plans recorded an account has no 'account'
+        key and resumes on the active account, as it always did."""
+        plan_file.write_text(
+            json.dumps(
+                {
+                    "instrument": "EUR_USD",
+                    "direction": "long",
+                    "units_signed": 10000,
+                    "tp_price": None,
+                    "sl_price": None,
+                }
+            )
+        )
+        requested = self._patch_client(monkeypatch, FakeFullClient())
+        result = runner.invoke(app, ["trade", "--resume"], input="y\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert requested == [None]
 
 
 class TestTradeMultiAccount:
