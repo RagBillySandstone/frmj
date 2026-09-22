@@ -1441,3 +1441,125 @@ class TestTradeMultiAccount:
         assert result.exit_code == 0, result.output
         combined = result.output + result.stderr
         assert "Note/tags not saved" in combined
+
+
+class TestTradeMultiOpposite:
+    """Tests for ``frmj trade ... --multi GROUP --opposite ACCOUNT``."""
+
+    @pytest.fixture()
+    def multi_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """DB with two practice accounts ('alpha', 'beta') in group 'grp'."""
+        path = tmp_path / "multi_opposite_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        add_account(conn, "alpha", "alpha-acct", is_practice=True)
+        add_account(conn, "beta", "beta-acct", is_practice=True)
+        add_group_member(conn, "grp", "alpha")
+        add_group_member(conn, "grp", "beta")
+        set_config(conn, "max_open_trades", "5")
+        conn.close()
+        return path
+
+    @staticmethod
+    def _fake(account_id: str) -> FakeFullClient:
+        return FakeFullClient(account_id=account_id)
+
+    def _invoke(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fakes: dict[str, FakeFullClient],
+        inputs: str,
+        args: list[str],
+    ) -> object:
+        monkeypatch.setattr(
+            "frmj.cli._trade_multi.get_client_for_account",
+            lambda account: fakes[account.name],
+        )
+        return runner.invoke(app, args, input=inputs)
+
+    def test_opposite_requires_multi(self, multi_db: Path) -> None:
+        result = runner.invoke(app, ["trade", "EUR_USD", "long", "--opposite", "alpha"])
+        assert result.exit_code == 1
+        assert "--opposite requires --multi" in result.output + result.stderr
+
+    def test_unknown_opposite_account_exits_1(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
+        result = self._invoke(
+            monkeypatch,
+            fakes,
+            "",
+            ["trade", "EUR_USD", "long", "--multi", "grp", "--opposite", "ghost"],
+        )
+        assert result.exit_code == 1
+        combined = result.output + result.stderr
+        assert "not in group" in combined
+        assert "ghost" in combined
+
+    def test_dry_run_shows_flipped_direction_and_entry(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
+        result = self._invoke(
+            monkeypatch,
+            fakes,
+            "\n\n",
+            [
+                "trade",
+                "EUR_USD",
+                "long",
+                "--multi",
+                "grp",
+                "--opposite",
+                "beta",
+                "--dry-run",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "LONG" in result.output
+        assert "SHORT" in result.output
+        # Long fills at ask (1.10010), short at bid (1.09990) — the
+        # FakeFullClient's fixed quote — so the flipped account shows a
+        # different entry price in the plan table.
+        assert "1.10010" in result.output
+        assert "1.09990" in result.output
+
+    def test_execute_places_opposite_direction_and_mirrors_tpsl(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        alpha = self._fake("alpha-acct")
+        beta = self._fake("beta-acct")
+        alpha_units: list[int] = []
+        beta_units: list[int] = []
+        base_alpha_order = alpha.place_market_order
+        base_beta_order = beta.place_market_order
+
+        def _alpha_order(instrument: str, units_signed: int) -> OrderFill:
+            alpha_units.append(units_signed)
+            return base_alpha_order(instrument, units_signed)
+
+        def _beta_order(instrument: str, units_signed: int) -> OrderFill:
+            beta_units.append(units_signed)
+            return base_beta_order(instrument, units_signed)
+
+        alpha.place_market_order = _alpha_order  # type: ignore[method-assign]
+        beta.place_market_order = _beta_order  # type: ignore[method-assign]
+        fakes = {"alpha": alpha, "beta": beta}
+        # TP=50, SL=30, confirm=y, note/tags skip.
+        result = self._invoke(
+            monkeypatch,
+            fakes,
+            "50\n30\ny\n\n\n",
+            ["trade", "EUR_USD", "long", "--multi", "grp", "--opposite", "beta"],
+        )
+        assert result.exit_code == 0, result.output
+        assert alpha_units and alpha_units[0] > 0  # alpha stayed long
+        assert beta_units and beta_units[0] < 0  # beta flipped short
+        assert alpha.tp_attached is not None
+        assert beta.tp_attached is not None
+        # alpha (long) TP sits above its entry; beta (short) TP sits below
+        # its entry — mirrored around each account's own entry price.
+        assert Decimal(alpha.tp_attached) > Decimal("1.10010")
+        assert Decimal(beta.tp_attached) < Decimal("1.09990")

@@ -198,7 +198,9 @@ If the active account is a live account and live mode is not enabled, the `trade
 
 If the order placement request times out or fails, the plan can be saved (`s`) and resumed later with `frmj trade --resume`.
 
-**`--multi GROUP`** places the same trade on every account in a saved group (see `frmj account group` below) instead of just the active account. Risk, sizing, and correlation are evaluated independently per account (each has its own NAV and open positions); the instrument, direction, and TP/SL choice are shared, and a single confirmation covers the whole group. Not supported together with `--resume`.
+**`--multi GROUP`** places the same trade on every account in a saved group (see `frmj account group` below) instead of just the active account. Risk, sizing, and correlation are evaluated independently per account (each has its own NAV and open positions); the instrument and TP/SL choice are shared, and a single confirmation covers the whole group. Not supported together with `--resume`.
+
+**`--opposite ACCOUNT`** (repeatable), only with `--multi`, names accounts within the group that take the *other* side of the trade — short when the dialog's direction is long, long when short. TP/SL are mirrored automatically (the same pips/%RoM target applied to the opposite direction naturally lands on the mirrored price). Every named account must already be a member of the group.
 
 ### `frmj close`
 

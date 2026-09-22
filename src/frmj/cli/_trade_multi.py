@@ -3,7 +3,9 @@
 Split out of ``trade.py`` because it mirrors, but does not share code with,
 the single-account flow: risk, sizing, and correlation must run
 independently per account (each has its own NAV and open positions), while
-the instrument, direction, TP/SL choice, and final confirmation are shared.
+the instrument, TP/SL choice, and final confirmation are shared. Direction
+is shared too, except for accounts named with ``--opposite``, which take the
+other side of the same trade with mirrored TP/SL — see ``_AccountPlan``.
 """
 
 from __future__ import annotations
@@ -49,10 +51,19 @@ def _prompt_retry_or_skip() -> str:
 
 @dataclass(slots=True)
 class _AccountPlan:
-    """Per-account risk/sizing result within a multi-account trade."""
+    """Per-account risk/sizing result within a multi-account trade.
+
+    ``direction`` is the account's own effective direction — the dialog's
+    direction for most accounts, or its opposite for accounts named in
+    ``--opposite``. Kept per-plan (rather than reading the shared dialog
+    direction) so every downstream step — entry price, sizing, correlation,
+    TP/SL, and order placement — naturally does the right thing for a mixed
+    long/short group.
+    """
 
     account: AccountRecord
     client: OandaClient
+    direction: Direction
     sizing_decision: SizingDecision
     units_calc: UnitsCalc
 
@@ -64,15 +75,23 @@ def _trade_multi_account(
     direction: Direction,
     direction_str: str,
     dry_run: bool,
+    opposite: frozenset[str] = frozenset(),
 ) -> None:
     """Plan and execute the same trade across every account in *accounts*.
 
     Mirrors the single-account flow in ``trade()`` — risk model, sizing,
     TP/SL prompt, confirm, execute, attach TP/SL, sync, note/tags — but risk,
     sizing, and correlation are evaluated independently per account (each has
-    its own NAV, margin, and open positions), while the instrument,
-    direction, TP/SL choice, and final confirmation are shared, since it's
-    the same intended trade replicated across accounts.
+    its own NAV, margin, and open positions), while the instrument, TP/SL
+    choice, and final confirmation are shared, since it's the same intended
+    trade replicated across accounts.
+
+    Accounts named in *opposite* (a subset of ``accounts``, validated by the
+    caller) take the other side of the trade: short when *direction* is
+    long, long when short. Because ``compute_exit_levels`` already derives
+    favorable/adverse price movement from direction, applying the same TP/SL
+    spec with the flipped direction mirrors the exit prices automatically —
+    no separate mirroring math is needed.
     """
     try:
         risk_config = get_risk_config(conn)
@@ -113,6 +132,7 @@ def _trade_multi_account(
     any_correlation_warnings = False
     for acct in accounts:
         client = clients[acct.name]
+        acct_direction = direction.opposite if acct.name in opposite else direction
         try:
             account_ctx = services.fetch_account_context(client, instrument)
         except Exception as exc:
@@ -122,7 +142,7 @@ def _trade_multi_account(
 
         try:
             account_sizing = services.plan_account_sizing(
-                risk_config, account_ctx, instrument_ctx, instrument, direction
+                risk_config, account_ctx, instrument_ctx, instrument, acct_direction
             )
         except (MaxTradesExceeded, ScaleInForbidden) as exc:
             typer.echo(f"Cannot trade on '{acct.name}': {exc}", err=True)
@@ -150,6 +170,7 @@ def _trade_multi_account(
             _AccountPlan(
                 account=acct,
                 client=client,
+                direction=acct_direction,
                 sizing_decision=sizing_decision,
                 units_calc=account_sizing.units_calc,
             )
@@ -170,29 +191,35 @@ def _trade_multi_account(
     )
     typer.echo("─" * 60)
     typer.echo(f"  Entry:   {entry_price} ({direction_str})")
-    if financing_rate is not None:
-        financing_ann_rate = (
-            financing_rate.long_rate
-            if direction is Direction.LONG
-            else financing_rate.short_rate
-        )
+    if opposite:
+        typer.echo(f"  Opposite ({len(opposite)} accounts): {direction.opposite.value}")
     typer.echo("")
+    # Each account's own direction picks its own entry price (bid for a
+    # short, ask for a long) and financing rate — both flip for the
+    # --opposite accounts, not just the display label.
     for plan in plans:
         acct_type = "practice" if plan.account.is_practice else "live"
+        plan_entry_price = quote.entry_price(plan.direction)
         pv = pip_value_home(plan.units_calc.units, spec, quote)
         line = (
-            f"  {plan.account.name}  [{acct_type}]  "
+            f"  {plan.account.name}  [{acct_type}]  {plan.direction.value.upper():<5}  "
+            f"Entry {plan_entry_price}  "
             f"Capital at risk ${plan.sizing_decision.capital_to_deploy:,.2f}  "
             f"Units {plan.units_calc.units:,}  "
             f"Margin ${plan.units_calc.margin_used:,.2f}  "
             f"Pip ${pv:.2f}"
         )
         if financing_rate is not None:
+            plan_ann_rate = (
+                financing_rate.long_rate
+                if plan.direction is Direction.LONG
+                else financing_rate.short_rate
+            )
             daily_financing = _daily_financing_home(
                 units=plan.units_calc.units,
-                entry_price=entry_price,
+                entry_price=plan_entry_price,
                 quote_to_home=quote.quote_to_home,
-                rate=financing_ann_rate,
+                rate=plan_ann_rate,
             )
             line += f"  Financing {_pl_str(daily_financing)}/day"
         typer.echo(line)
@@ -202,17 +229,19 @@ def _trade_multi_account(
     # A %RoM target translates to a different absolute price per account
     # (each has its own margin_used from independent sizing) — that's
     # expected: it holds the risk/reward ratio constant per account rather
-    # than the raw price. A pip target is identical across accounts since
-    # entry_price is shared.
+    # than the raw price. A pip target is identical across same-direction
+    # accounts since entry_price is shared, but for --opposite accounts
+    # compute_exit_levels flips favorable/adverse for the flipped direction,
+    # so the same tp_spec/sl_spec naturally produces mirrored exit prices.
     tp_spec = _prompt_tpsl("Take-profit")
     sl_spec = _prompt_tpsl("Stop-loss  ")
 
     def _compute_all_exits() -> list[ExitLevels]:
         return [
             compute_exit_levels(
-                entry_price=entry_price,
+                entry_price=quote.entry_price(plan.direction),
                 units=plan.units_calc.units,
-                direction=direction,
+                direction=plan.direction,
                 spec=spec,
                 quote=quote,
                 margin_used=plan.units_calc.margin_used,
@@ -281,7 +310,7 @@ def _trade_multi_account(
     for plan, exits in zip(plans, exits_list):
         units_signed = (
             plan.units_calc.units
-            if direction is Direction.LONG
+            if plan.direction is Direction.LONG
             else -plan.units_calc.units
         )
         fill: OrderFill | None = None

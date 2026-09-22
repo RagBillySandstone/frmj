@@ -166,6 +166,11 @@ class Direction(Enum):
     LONG = "long"
     SHORT = "short"
 
+    @property
+    def opposite(self) -> "Direction":
+        """The other direction — used to mirror a trade for opposite-side accounts."""
+        return Direction.SHORT if self is Direction.LONG else Direction.LONG
+
 
 # ---------------------------------------------------------------------------
 # Output and exception types

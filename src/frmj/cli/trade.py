@@ -44,6 +44,22 @@ from frmj.domain.sizing import Direction
 # ---------------------------------------------------------------------------
 
 
+def _complete_multi_opposite(ctx: typer.Context, incomplete: str) -> list[str]:
+    """Return accounts in the group named by ``--multi``, for ``--opposite``.
+
+    Single-use completer (only ``trade`` has an ``--opposite`` option), so it
+    lives here rather than in ``_completion.py``. Falls back to an empty list
+    when ``--multi`` hasn't resolved to a group yet, mirroring
+    ``_complete_group_member``.
+    """
+    conn = get_db()
+    try:
+        members = list_group_members(conn, ctx.params.get("multi", ""))
+    finally:
+        conn.close()
+    return [m.name for m in members if m.name.startswith(incomplete)]
+
+
 @app.command()
 def trade(
     instrument: str | None = typer.Argument(
@@ -76,6 +92,16 @@ def trade(
         help="Fan this trade out to every account in the named group "
         "(see 'frmj account group').",
         autocompletion=_complete_account_group,
+    ),
+    opposite: list[str] | None = typer.Option(
+        None,
+        "--opposite",
+        "-o",
+        help="Accounts in the --multi group that take the opposite side of this "
+        "trade (short if the dialog's direction is long, long if short). "
+        "Take-profit/stop-loss are mirrored automatically. Repeat for multiple "
+        "accounts.",
+        autocompletion=_complete_multi_opposite,
     ),
 ) -> None:
     """Plan and (optionally) execute a trade."""
@@ -117,11 +143,30 @@ def trade(
             )
             conn.close()
             raise typer.Exit(1)
+        opposite_names = frozenset(opposite) if opposite else frozenset()
+        unknown = opposite_names - {acct.name for acct in accounts}
+        if unknown:
+            typer.echo(
+                "Error: --opposite account(s) not in group "
+                f"'{multi}': {', '.join(sorted(unknown))}",
+                err=True,
+            )
+            conn.close()
+            raise typer.Exit(1)
         assert instrument is not None and direction_str is not None
         _trade_multi_account(
-            conn, accounts, instrument, direction, direction_str, dry_run
+            conn,
+            accounts,
+            instrument,
+            direction,
+            direction_str,
+            dry_run,
+            opposite_names,
         )
         return
+    elif opposite:
+        typer.echo("Error: --opposite requires --multi.", err=True)
+        raise typer.Exit(1)
 
     conn = get_db()
     try:
