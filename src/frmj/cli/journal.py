@@ -6,7 +6,7 @@ import sqlite3
 
 import typer
 
-from frmj.accounts import get_active_account
+from frmj.accounts import get_active_account, list_accounts
 from frmj.app import get_client, get_db
 from frmj.cli import app
 from frmj.cli._completion import _complete_instrument, _complete_txn_type
@@ -278,16 +278,38 @@ def journal(
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
         params.append(n)
 
+        # Oanda transaction IDs are only sequential within one account, so
+        # a multi-account listing is ordered by time instead (ID breaks ties
+        # between events stamped in the same instant).
+        order_sql = (
+            "CAST(oanda_id AS INTEGER) DESC"
+            if account is not None
+            else "time DESC, CAST(oanda_id AS INTEGER) DESC"
+        )
         txns = conn.execute(
             f"""
-            SELECT id, oanda_id, type, time, raw_json
+            SELECT id, oanda_id, account_id, type, time, raw_json
             FROM transactions
             {where_sql}
-            ORDER BY CAST(oanda_id AS INTEGER) DESC
+            ORDER BY {order_sql}
             LIMIT ?
             """,
             params,
         ).fetchall()
+
+        # When several accounts are shown, label each row with its profile
+        # name.  IDs with no profile (e.g. a removed account) fall back to
+        # the raw Oanda ID.  If two profiles share an Oanda ID, the first
+        # alphabetically wins — list_accounts is ordered by name.
+        labels: dict[str, str] = {}
+        label_w = 0
+        if account is None:
+            for rec in list_accounts(conn):
+                labels.setdefault(rec.oanda_id, rec.name)
+            label_w = max(
+                (len(labels.get(t["account_id"], t["account_id"])) for t in txns),
+                default=0,
+            )
 
         active_filters = [
             f
@@ -309,7 +331,12 @@ def journal(
             return
 
         for txn in txns:
-            _display_transaction(txn)
+            label = (
+                None
+                if account is not None
+                else labels.get(txn["account_id"], txn["account_id"]).ljust(label_w)
+            )
+            _display_transaction(txn, label)
             if txn["type"] == "ORDER_FILL":
                 plan = conn.execute(
                     "SELECT tp_price, sl_price FROM trade_plans WHERE transaction_id = ?",

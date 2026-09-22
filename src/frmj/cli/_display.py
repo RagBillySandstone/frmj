@@ -129,8 +129,14 @@ _JOURNAL_EXTRA_W = 46
 _JOURNAL_PL_W = 12
 
 
-def _display_transaction(txn: sqlite3.Row) -> None:
-    """Format one transaction row for journal display."""
+def _display_transaction(txn: sqlite3.Row, account_label: str | None = None) -> None:
+    """Format one transaction row for journal display.
+
+    *account_label*, when given, is printed as a column after the transaction
+    number so rows from different accounts can be told apart (used by
+    ``frmj journal --all-accounts``).  Callers pass it pre-padded to a common
+    width so the remaining columns stay aligned.
+    """
     # Trim the ISO-8601 timestamp to seconds for readability.
     time_short = _to_local_str(txn["time"])
 
@@ -181,8 +187,10 @@ def _display_transaction(txn: sqlite3.Row) -> None:
         if pl is not None
         else " " * (_JOURNAL_PL_W + 2)
     )
+    account_col = f"{account_label}  " if account_label is not None else ""
     typer.echo(
-        f"#{txn['oanda_id']:<12}  {txn['type']:<24}{extra}{pl_str}  {time_short}"
+        f"#{txn['oanda_id']:<12}  {account_col}{txn['type']:<24}"
+        f"{extra}{pl_str}  {time_short}"
     )
 
 

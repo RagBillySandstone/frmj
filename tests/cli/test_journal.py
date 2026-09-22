@@ -880,3 +880,38 @@ class TestJournalAccountScope:
         assert result.exit_code == 0, result.output
         assert "111" in result.output
         assert "222" in result.output
+
+    def test_all_accounts_labels_rows_with_account_name(self, scope_db: Path) -> None:
+        result = runner.invoke(app, ["journal", "--all-accounts"])
+        assert result.exit_code == 0, result.output
+        lines = result.output.splitlines()
+        assert any("#111" in ln and "main" in ln for ln in lines)
+        assert any("#222" in ln and "other" in ln for ln in lines)
+
+    def test_scoped_view_has_no_account_column(self, scope_db: Path) -> None:
+        result = runner.invoke(app, ["journal"])
+        row = next(ln for ln in result.output.splitlines() if "#111" in ln)
+        assert "main" not in row
+
+    def test_all_accounts_orders_by_time_across_accounts(self, scope_db: Path) -> None:
+        """Per-account IDs overlap, so the merged list must sort by time."""
+        # #999 has the largest ID but the oldest timestamp, so ID ordering
+        # would put it first and time ordering puts it last.
+        conn = sqlite3.connect(str(scope_db))
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json)"
+            " VALUES ('999', 'acct-2', 'ORDER_FILL', '2026-01-01T00:00:00Z', '{}')"
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["journal", "--all-accounts"])
+        ids = [ln.split()[0] for ln in result.output.splitlines() if ln.startswith("#")]
+        assert ids[-1] == "#999"
+
+    def test_all_accounts_unknown_account_falls_back_to_raw_id(
+        self, scope_db: Path
+    ) -> None:
+        _seed_transaction(scope_db, oanda_id="333", account_id="acct-gone")
+        result = runner.invoke(app, ["journal", "--all-accounts"])
+        row = next(ln for ln in result.output.splitlines() if "#333" in ln)
+        assert "acct-gone" in row
