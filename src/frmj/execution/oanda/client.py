@@ -69,6 +69,7 @@ from .parsing import (
     _parse_instrument_spec,
     _parse_open_trade,
     _parse_order_create_txn_id,
+    _parse_order_fill,
     _resolve_financing_parents,
 )
 
@@ -367,14 +368,7 @@ class OandaClient:
                 f"Oanda response: {json.dumps(payload)}"
             )
 
-        fill = payload["orderFillTransaction"]
-        trade_opened = fill.get("tradeOpened")
-        return OrderFill(
-            transaction_id=str(fill["id"]),
-            fill_price=Decimal(fill["price"]),
-            units_filled=int(Decimal(fill["units"])),
-            trade_id=str(trade_opened["tradeID"]) if trade_opened else None,
-        )
+        return _parse_order_fill(payload["orderFillTransaction"])
 
     def attach_take_profit(self, trade_id: str, price: Decimal) -> str:
         """Attach a GTC take-profit order to an existing open trade.

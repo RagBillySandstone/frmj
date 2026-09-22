@@ -14,7 +14,14 @@ from typing import Any
 
 from frmj.domain.sizing import InstrumentSpec
 
-from .models import AccountSummary, CloseFill, FinancingRate, OpenTrade, TransactionRow
+from .models import (
+    AccountSummary,
+    CloseFill,
+    FinancingRate,
+    OpenTrade,
+    OrderFill,
+    TransactionRow,
+)
 
 # ---------------------------------------------------------------------------
 # Response parsing
@@ -32,6 +39,21 @@ def _parse_close_fill(payload: dict[str, Any]) -> CloseFill:
         transaction_id=str(fill["id"]),
         close_price=Decimal(fill["price"]),
         realised_pl=Decimal(fill["pl"]),
+    )
+
+
+def _parse_order_fill(fill: dict[str, Any]) -> OrderFill:
+    """Parse an ``orderFillTransaction`` for an order that opened a trade.
+
+    ``tradeOpened`` is absent when the fill only reduced or closed existing
+    trades, in which case ``trade_id`` is ``None`` (see ``OrderFill``).
+    """
+    trade_opened = fill.get("tradeOpened")
+    return OrderFill(
+        transaction_id=str(fill["id"]),
+        fill_price=Decimal(fill["price"]),
+        units_filled=int(Decimal(fill["units"])),
+        trade_id=str(trade_opened["tradeID"]) if trade_opened else None,
     )
 
 
