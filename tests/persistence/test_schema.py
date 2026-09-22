@@ -95,7 +95,13 @@ class TestEnsureSchema:
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         ).fetchall()
         found = {r["name"] for r in rows}
-        assert {"transactions", "notes", "sync_cursors", "config", "trade_plans"} <= found
+        assert {
+            "transactions",
+            "notes",
+            "sync_cursors",
+            "config",
+            "trade_plans",
+        } <= found
 
     def test_creates_all_indexes(self, db: sqlite3.Connection) -> None:
         """All named indexes must be present."""
@@ -135,9 +141,7 @@ class TestTransactions:
         rowid = _insert_transaction(
             db, oanda_id="42", raw_json='{"type": "ORDER_FILL"}'
         )
-        row = db.execute(
-            "SELECT * FROM transactions WHERE id = ?", (rowid,)
-        ).fetchone()
+        row = db.execute("SELECT * FROM transactions WHERE id = ?", (rowid,)).fetchone()
         assert row["oanda_id"] == "42"
         assert row["account_id"] == "acct-1"
         assert row["type"] == "ORDER_FILL"
@@ -201,9 +205,7 @@ class TestTransactions:
         ).fetchone()
         assert row["parent_id"] is None
 
-    def test_multiple_children_share_same_parent(
-        self, db: sqlite3.Connection
-    ) -> None:
+    def test_multiple_children_share_same_parent(self, db: sqlite3.Connection) -> None:
         """A single DAILY_FINANCING parent can have multiple child rows."""
         parent_id = _insert_transaction(
             db, oanda_id="fin-parent", type_="DAILY_FINANCING"
@@ -346,9 +348,7 @@ class TestSyncCursors:
         ).fetchone()
         assert row["last_oanda_id"] == "6000"
 
-    def test_primary_key_blocks_duplicate_account(
-        self, db: sqlite3.Connection
-    ) -> None:
+    def test_primary_key_blocks_duplicate_account(self, db: sqlite3.Connection) -> None:
         """Plain INSERT of the same account_id twice must raise — use REPLACE."""
         db.execute(
             "INSERT INTO sync_cursors (account_id, last_oanda_id, synced_at) "
@@ -411,9 +411,7 @@ class TestConfig:
         db.execute("INSERT INTO config (key, value) VALUES (?, ?)", ("k", "v1"))
         db.commit()
         with pytest.raises(sqlite3.IntegrityError):
-            db.execute(
-                "INSERT INTO config (key, value) VALUES (?, ?)", ("k", "v2")
-            )
+            db.execute("INSERT INTO config (key, value) VALUES (?, ?)", ("k", "v2"))
             db.commit()
 
     def test_multiple_keys_independent(self, db: sqlite3.Connection) -> None:
@@ -424,9 +422,7 @@ class TestConfig:
             ("default_risk_fraction", "0.02"),
         ]
         for key, value in entries:
-            db.execute(
-                "INSERT INTO config (key, value) VALUES (?, ?)", (key, value)
-            )
+            db.execute("INSERT INTO config (key, value) VALUES (?, ?)", (key, value))
         db.commit()
         count = db.execute("SELECT COUNT(*) FROM config").fetchone()[0]
         assert count == 3

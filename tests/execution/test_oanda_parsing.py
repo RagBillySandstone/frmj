@@ -337,7 +337,9 @@ class TestParseOpenTrade:
 
 class TestParseOrderCreateTxnId:
     def test_extracts_id_from_order_create_transaction(self) -> None:
-        payload = {"orderCreateTransaction": {"id": "12345", "type": "TAKE_PROFIT_ORDER"}}
+        payload = {
+            "orderCreateTransaction": {"id": "12345", "type": "TAKE_PROFIT_ORDER"}
+        }
         assert _parse_order_create_txn_id(payload) == "12345"
 
     def test_id_coerced_to_string(self) -> None:
@@ -373,6 +375,7 @@ def _financing_row(
     if related is not None:
         raw["relatedTransactionIDs"] = related
     import json as _json
+
     return TransactionRow(
         oanda_id=oanda_id,
         account_id="acct-1",
@@ -386,6 +389,7 @@ def _financing_row(
 def _fill_row(oanda_id: str) -> TransactionRow:
     """Build a non-financing TransactionRow."""
     import json as _json
+
     return TransactionRow(
         oanda_id=oanda_id,
         account_id="acct-1",
