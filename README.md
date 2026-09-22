@@ -113,6 +113,8 @@ Shows the active account name, type (practice / live), Oanda account ID, and cur
 
 ## Usage
 
+`frmj sync`, `positions`, `trade`, and `close` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command without switching the active account; the output then begins by naming it.
+
 ### `frmj sync`
 
 Pull transactions from Oanda into the local database.
@@ -123,9 +125,10 @@ frmj sync --cold        # full history re-fetch (safe to re-run; duplicates are 
 frmj sync --watch       # poll for new transactions continuously (Ctrl+C to stop)
 frmj sync --watch --interval 30   # poll every 30 seconds (default: 60)
 frmj sync --csv history.csv       # import an Oanda Hub CSV export instead of hitting the API
+frmj sync --account funded        # sync a non-active account
 ```
 
-`--csv` imports a transaction-history export from the Oanda account hub (Reports → Transaction History → Export to csv). Set the export dialog's Timezone to UTC before downloading — any other timezone is rejected. Useful for backfilling history the REST API can no longer return (old accounts truncate `/transactions`) and for cross-checking an API sync against the account's own records; duplicate rows are skipped the same way `--cold` re-runs are. Cannot be combined with `--cold` or `--watch`.
+`--csv` imports a transaction-history export from the Oanda account hub (Reports → Transaction History → Export to csv). Set the export dialog's Timezone to UTC before downloading — any other timezone is rejected. Useful for backfilling history the REST API can no longer return (old accounts truncate `/transactions`) and for cross-checking an API sync against the account's own records; duplicate rows are skipped the same way `--cold` re-runs are. Cannot be combined with `--cold` or `--watch`. The CSV itself carries no account ID, so rows are filed under the active account, or under `--account NAME` when given.
 
 ### `frmj positions`
 
@@ -171,6 +174,7 @@ frmj trade USD_JPY short
 frmj trade AUD_USD long --dry-run    # show plan only; no order placed
 frmj trade --resume                  # execute a previously saved draft plan
 frmj trade EUR_USD long --multi my-props   # fan the same trade out to a saved account group
+frmj trade EUR_USD long --account funded   # trade a non-active account
 ```
 
 The flow:
@@ -194,9 +198,9 @@ The flow:
 | `50` or `50p` | 50 pips |
 | `5%` | 5% return on margin used |
 
-If the active account is a live account and live mode is not enabled, the `trade` command exits with a clear error before placing any order.
+If the account being traded (the active account, or `--account NAME`) is a live account and live mode is not enabled, the `trade` command exits with a clear error before placing any order.
 
-If the order placement request times out or fails, the plan can be saved (`s`) and resumed later with `frmj trade --resume`.
+If the order placement request times out or fails, the plan can be saved (`s`) and resumed later with `frmj trade --resume`. The saved plan records the account it was planned for, and `--resume` places the order on that account even if the active account has since changed. `--account` cannot be combined with `--resume` or `--multi`.
 
 **`--multi GROUP`** places the same trade on every account in a saved group (see `frmj account group` below) instead of just the active account. Risk, sizing, and correlation are evaluated independently per account (each has its own NAV and open positions); the instrument and TP/SL choice are shared, and a single confirmation covers the whole group. Not supported together with `--resume`.
 

@@ -14,13 +14,6 @@ Items are grouped by priority. Within each group, order reflects logical build s
 
 ## P2 — UX and extensibility
 
-### 2. Per-command account override
-
-The `frmj trade`, `sync`, `positions`, and `close` commands always use the
-active account. A `--account NAME` flag would allow targeting a specific
-profile without switching the global active account. Tracked as a future
-enhancement to the `get_client()` callsite.
-
 ### 4. `frmj note --edit` — amend an existing note
 
 Currently `frmj note` only appends. For cases where a note has a typo or needs updating, add an `--edit` flag that opens the most recent note on the given transaction in `$EDITOR` (or prompts inline if the env var is unset).
