@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -14,6 +15,9 @@ from frmj.cli._completion import _complete_open_instrument
 from .conftest import FakeFullClient, _open_trade, _row
 
 runner = CliRunner()
+
+# Completion context with no --account on the command line.
+_CTX = SimpleNamespace(params={})
 
 
 class TestCloseCommand:
@@ -33,7 +37,9 @@ class TestCloseCommand:
         fake: FakeFullClient,
         inputs: str = "",
     ) -> object:
-        monkeypatch.setattr("frmj.cli.close.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.close.get_client", lambda conn, account_name=None: fake
+        )
         return runner.invoke(app, ["close", "EUR_USD"], input=inputs)
 
     def test_no_open_positions_message(
@@ -105,19 +111,21 @@ class TestCloseCommand:
                 _open_trade(trade_id="201", instrument="USD_JPY"),
             ]
         )
-        monkeypatch.setattr("frmj.cli._completion.get_client", lambda conn: fake)
-        assert _complete_open_instrument("") == ["EUR_USD", "USD_JPY"]
-        assert _complete_open_instrument("eur") == ["EUR_USD"]
-        assert _complete_open_instrument("gbp") == []
+        monkeypatch.setattr(
+            "frmj.cli._completion.get_client", lambda conn, account_name=None: fake
+        )
+        assert _complete_open_instrument(_CTX, "") == ["EUR_USD", "USD_JPY"]
+        assert _complete_open_instrument(_CTX, "eur") == ["EUR_USD"]
+        assert _complete_open_instrument(_CTX, "gbp") == []
 
     def test_completion_empty_when_no_open_trades(
         self, close_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
             "frmj.cli._completion.get_client",
-            lambda conn: FakeFullClient(open_trades=[]),
+            lambda conn, account_name=None: FakeFullClient(open_trades=[]),
         )
-        assert _complete_open_instrument("") == []
+        assert _complete_open_instrument(_CTX, "") == []
 
     def test_completion_swallows_client_errors(
         self, close_db: Path, monkeypatch: pytest.MonkeyPatch
@@ -125,11 +133,11 @@ class TestCloseCommand:
         """No active account, auth failure, network error, etc. should yield
         no completions rather than raising inside the user's shell."""
 
-        def _fail(conn: object) -> object:
+        def _fail(conn: object, account_name: str | None = None) -> object:
             raise RuntimeError("no active account")
 
         monkeypatch.setattr("frmj.cli._completion.get_client", _fail)
-        assert _complete_open_instrument("") == []
+        assert _complete_open_instrument(_CTX, "") == []
 
     def test_only_closes_matching_instrument(
         self, close_db: Path, monkeypatch: pytest.MonkeyPatch
@@ -169,7 +177,9 @@ class TestCloseCommand:
             raise RuntimeError("Oanda unreachable")
 
         fake.get_open_trades = _fail  # type: ignore[method-assign]
-        monkeypatch.setattr("frmj.cli.close.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.close.get_client", lambda conn, account_name=None: fake
+        )
         result = runner.invoke(app, ["close", "EUR_USD"])
         assert result.exit_code == 1
         assert "Error" in result.output + result.stderr
@@ -177,7 +187,7 @@ class TestCloseCommand:
     def test_get_client_error_exits_1(
         self, close_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def _fail(conn: object) -> None:
+        def _fail(conn: object, account_name: str | None = None) -> None:
             raise RuntimeError("No token configured for this account")
 
         monkeypatch.setattr("frmj.cli.close.get_client", _fail)
@@ -210,6 +220,41 @@ class TestCloseCommand:
         result = self._invoke(monkeypatch, fake, inputs="y\n")
         assert result.exit_code == 0, result.output
         assert "[sync] Warning: sync failed" in result.output + result.stderr
+
+    def test_account_option_targets_named_account(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--account is handed to get_client and named before the confirm."""
+        requested: list[str | None] = []
+        fake = FakeFullClient(open_trades=[_open_trade(trade_id="6368")])
+
+        def _get_client(conn: object, account_name: str | None = None) -> object:
+            requested.append(account_name)
+            return fake
+
+        monkeypatch.setattr("frmj.cli.close.get_client", _get_client)
+        result = runner.invoke(
+            app, ["close", "EUR_USD", "--account", "other"], input="n\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert requested == ["other"]
+        assert result.output.index("Account: other") < result.output.index("Close 1")
+
+    def test_completion_uses_account_option(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Completion lists the --account's open trades, not the active one's."""
+        requested: list[str | None] = []
+        fake = FakeFullClient(open_trades=[_open_trade(instrument="EUR_USD")])
+
+        def _get_client(conn: object, account_name: str | None = None) -> object:
+            requested.append(account_name)
+            return fake
+
+        monkeypatch.setattr("frmj.cli._completion.get_client", _get_client)
+        ctx = SimpleNamespace(params={"account": "other"})
+        assert _complete_open_instrument(ctx, "") == ["EUR_USD"]
+        assert requested == ["other"]
 
 
 # ---------------------------------------------------------------------------

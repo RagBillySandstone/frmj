@@ -37,7 +37,9 @@ class TestPositionsCommand:
         trades: list[OpenTrade],
     ) -> object:
         fake = FakeFullClient(open_trades=trades)
-        monkeypatch.setattr("frmj.cli.positions.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.positions.get_client", lambda conn, account_name=None: fake
+        )
         return runner.invoke(app, ["positions"])
 
     def test_no_open_positions_message(
@@ -120,7 +122,9 @@ class TestPositionsCommand:
                 FinancingRate("EUR_USD", Decimal("-0.0365"), Decimal("0.0135"))
             ],
         )
-        monkeypatch.setattr("frmj.cli.positions.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.positions.get_client", lambda conn, account_name=None: fake
+        )
         result = runner.invoke(app, ["positions"])
         assert result.exit_code == 0, result.output
 
@@ -151,7 +155,9 @@ class TestPositionsCommand:
             raise RuntimeError("pricing endpoint unavailable")
 
         fake.get_price = _fail  # type: ignore[method-assign]
-        monkeypatch.setattr("frmj.cli.positions.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.positions.get_client", lambda conn, account_name=None: fake
+        )
         result = runner.invoke(app, ["positions"])
         assert result.exit_code == 0, result.output
         assert "TP: 1.10550" in result.output
@@ -204,7 +210,9 @@ class TestPositionsCommand:
             raise RuntimeError("Oanda API unavailable")
 
         fake.get_open_trades = _fail  # type: ignore[method-assign]
-        monkeypatch.setattr("frmj.cli.positions.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.positions.get_client", lambda conn, account_name=None: fake
+        )
         result = runner.invoke(app, ["positions"])
         assert result.exit_code == 1
         assert "Error" in result.output + result.stderr
@@ -215,13 +223,36 @@ class TestPositionsCommand:
         """A missing/invalid token surfaces as a RuntimeError from get_client
         itself (before any Oanda call is attempted)."""
 
-        def _fail(conn: object) -> None:
+        def _fail(conn: object, account_name: str | None = None) -> None:
             raise RuntimeError("No token configured for this account")
 
         monkeypatch.setattr("frmj.cli.positions.get_client", _fail)
         result = runner.invoke(app, ["positions"])
         assert result.exit_code == 1
         assert "Error" in result.output + result.stderr
+
+    def test_account_option_targets_named_account(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--account is handed to get_client and named in the output."""
+        requested: list[str | None] = []
+        fake = FakeFullClient(open_trades=[_open_trade()])
+
+        def _get_client(conn: object, account_name: str | None = None) -> object:
+            requested.append(account_name)
+            return fake
+
+        monkeypatch.setattr("frmj.cli.positions.get_client", _get_client)
+        result = runner.invoke(app, ["positions", "--account", "other"])
+        assert result.exit_code == 0, result.output
+        assert requested == ["other"]
+        assert "Account: other" in result.output
+
+    def test_unknown_account_exits_1(self, pos_db: Path) -> None:
+        """A typo in --account fails before any Oanda call, with a clear hint."""
+        result = runner.invoke(app, ["positions", "--account", "ghost"])
+        assert result.exit_code == 1
+        assert "No account named 'ghost'" in result.output + result.stderr
 
 
 # ---------------------------------------------------------------------------

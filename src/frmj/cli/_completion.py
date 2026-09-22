@@ -125,18 +125,20 @@ def _complete_instrument(incomplete: str) -> list[str]:
     return [p for p in _FX_PAIRS if p.startswith(incomplete.lower())]
 
 
-def _complete_open_instrument(incomplete: str) -> list[str]:
+def _complete_open_instrument(ctx: typer.Context, incomplete: str) -> list[str]:
     """Return instruments with an open position, for ``frmj close``.
 
     Unlike ``_complete_instrument`` (the static FX pair list used for
     ``trade``), this queries the broker for actual open trades so shell
-    completion only ever offers something ``close`` can act on. Any failure
-    (no active account configured, network/auth error) is swallowed and
-    yields no completions rather than breaking the user's shell.
+    completion only ever offers something ``close`` can act on. Queries the
+    account named by ``--account`` when it precedes the instrument on the
+    command line, otherwise the active account. Any failure (no active
+    account configured, network/auth error) is swallowed and yields no
+    completions rather than breaking the user's shell.
     """
     conn = get_db()
     try:
-        client = get_client(conn)
+        client = get_client(conn, ctx.params.get("account"))
         instruments = {t.instrument for t in client.get_open_trades()}
     except Exception:
         return []
