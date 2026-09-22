@@ -222,7 +222,7 @@ Output includes: win rate, average P/L, total P/L, best/worst trade, breakdowns 
 
 ### `frmj journal`
 
-Display recent transactions with any attached notes and tags. Auto-syncs before displaying.
+Display recent transactions with any attached notes and tags. Auto-syncs before displaying. Only the active account's transactions are shown unless `--all-accounts` is given.
 
 ```sh
 frmj journal                          # last 20 transactions
@@ -232,6 +232,7 @@ frmj journal --type ORDER_FILL        # filter by transaction type
 frmj journal --since 2026-04-01       # on or after a date
 frmj journal --with-notes             # only transactions with notes
 frmj journal --tag breakout           # only transactions tagged 'breakout'
+frmj journal --all-accounts           # include every account, not just the active one
 ```
 
 ### `frmj export`

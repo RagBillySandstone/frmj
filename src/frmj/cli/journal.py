@@ -6,6 +6,7 @@ import sqlite3
 
 import typer
 
+from frmj.accounts import get_active_account
 from frmj.app import get_client, get_db
 from frmj.cli import app
 from frmj.cli._completion import _complete_instrument, _complete_txn_type
@@ -216,8 +217,20 @@ def journal(
         autocompletion=_complete_tag,
         show_default=False,
     ),
+    all_accounts: bool = typer.Option(
+        False,
+        "--all-accounts",
+        "-a",
+        help="Show transactions from every account, not just the active one.",
+    ),
 ) -> None:
-    """Show recent transactions with their notes and tags."""
+    """Show recent transactions with their notes and tags.
+
+    By default only the active account's transactions are shown; pass
+    ``--all-accounts`` to include every account in the local database.  When
+    no active account is configured there is nothing to scope to, so all
+    accounts are shown.
+    """
     conn = get_db()
 
     # Auto-sync: best-effort; journal display proceeds even if sync fails.
@@ -235,6 +248,13 @@ def journal(
         where: list[str] = []
         params: list[object] = []
 
+        # Scope to the active account unless the user asked for everything.
+        # Looked up locally (no token needed) so this works even when the
+        # auto-sync above failed.
+        account = None if all_accounts else get_active_account(conn)
+        if account is not None:
+            where.append("account_id = ?")
+            params.append(account.oanda_id)
         if txn_type:
             where.append("type = ?")
             params.append(txn_type)
@@ -272,6 +292,7 @@ def journal(
         active_filters = [
             f
             for f in [
+                f"account={account.name}" if account else "",
                 f"instrument={instrument}" if instrument else "",
                 f"type={txn_type}" if txn_type else "",
                 f"since={since}" if since else "",

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from frmj.accounts import add_account, set_active_account
 from frmj.app import get_db, set_config
 from frmj.cli import app
 from frmj.cli._completion import _complete_txn_type
@@ -816,3 +817,66 @@ class TestJournalFiltering:
         assert result.exit_code == 0, result.output
         assert "103" in result.output  # most recent EUR_USD
         assert "101" not in result.output
+
+
+class TestJournalAccountScope:
+    """Journal defaults to the active account; ``--all-accounts`` widens it."""
+
+    @pytest.fixture()
+    def scope_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Two accounts with one fill each; ``main`` (acct-1) is active."""
+        path = tmp_path / "scope_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        # Auto-sync is a no-op so only the seeded rows are shown.
+        monkeypatch.setattr(
+            "frmj.cli.journal.get_client",
+            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+        )
+        conn = get_db(path=path)
+        add_account(conn, "main", "acct-1", is_practice=True)
+        add_account(conn, "other", "acct-2", is_practice=True)
+        set_active_account(conn, "main")
+        conn.close()
+        _seed_transaction(path, oanda_id="111", account_id="acct-1")
+        _seed_transaction(path, oanda_id="222", account_id="acct-2")
+        return path
+
+    def test_default_shows_only_active_account(self, scope_db: Path) -> None:
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        assert "111" in result.output
+        assert "222" not in result.output
+
+    def test_default_shows_account_filter_label(self, scope_db: Path) -> None:
+        result = runner.invoke(app, ["journal"])
+        assert "account=main" in result.output
+
+    def test_follows_active_account_switch(self, scope_db: Path) -> None:
+        conn = get_db(path=scope_db)
+        set_active_account(conn, "other")
+        conn.close()
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        assert "222" in result.output
+        assert "111" not in result.output
+
+    @pytest.mark.parametrize("flag", ["--all-accounts", "-a"])
+    def test_all_accounts_flag_shows_every_account(
+        self, scope_db: Path, flag: str
+    ) -> None:
+        result = runner.invoke(app, ["journal", flag])
+        assert result.exit_code == 0, result.output
+        assert "111" in result.output
+        assert "222" in result.output
+        assert "account=" not in result.output
+
+    def test_no_active_account_shows_everything(self, scope_db: Path) -> None:
+        conn = get_db(path=scope_db)
+        conn.execute("DELETE FROM config WHERE key = 'active_account'")
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        assert "111" in result.output
+        assert "222" in result.output
