@@ -915,3 +915,87 @@ class TestJournalAccountScope:
         result = runner.invoke(app, ["journal", "--all-accounts"])
         row = next(ln for ln in result.output.splitlines() if "#333" in ln)
         assert "acct-gone" in row
+
+
+class TestNoteTagAccountScope:
+    """``note``/``tag`` resolve Oanda IDs within the active account."""
+
+    @pytest.fixture()
+    def shared_id_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Two accounts that both have a transaction #5; ``main`` is active."""
+        path = tmp_path / "shared_id.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        conn = get_db(path=path)
+        add_account(conn, "main", "acct-1", is_practice=True)
+        add_account(conn, "other", "acct-2", is_practice=True)
+        set_active_account(conn, "main")
+        conn.close()
+        _seed_transaction(path, oanda_id="5", account_id="acct-1")
+        _seed_transaction(path, oanda_id="5", account_id="acct-2")
+        _seed_transaction(path, oanda_id="77", account_id="acct-2")
+        return path
+
+    @staticmethod
+    def _owner(path: Path, table: str) -> list[str]:
+        """Return the account_id of every transaction referenced by *table*."""
+        conn = sqlite3.connect(str(path))
+        rows = conn.execute(
+            f"SELECT t.account_id FROM {table} x "
+            "JOIN transactions t ON t.id = x.transaction_id"
+        ).fetchall()
+        conn.close()
+        return [r[0] for r in rows]
+
+    def test_note_attaches_to_active_accounts_transaction(
+        self, shared_id_db: Path
+    ) -> None:
+        result = runner.invoke(app, ["note", "5", "scoped"])
+        assert result.exit_code == 0, result.output
+        assert self._owner(shared_id_db, "notes") == ["acct-1"]
+
+    def test_tag_attaches_to_active_accounts_transaction(
+        self, shared_id_db: Path
+    ) -> None:
+        result = runner.invoke(app, ["tag", "5", "breakout"])
+        assert result.exit_code == 0, result.output
+        assert self._owner(shared_id_db, "tags") == ["acct-1"]
+
+    def test_follows_active_account_switch(self, shared_id_db: Path) -> None:
+        conn = get_db(path=shared_id_db)
+        set_active_account(conn, "other")
+        conn.close()
+        runner.invoke(app, ["note", "5", "scoped"])
+        assert self._owner(shared_id_db, "notes") == ["acct-2"]
+
+    def test_id_only_in_other_account_is_not_found(self, shared_id_db: Path) -> None:
+        result = runner.invoke(app, ["note", "77", "wrong account"])
+        assert result.exit_code == 1
+        assert "account 'main'" in result.output
+
+    def test_ambiguous_id_without_active_account_exits_1(
+        self, shared_id_db: Path
+    ) -> None:
+        conn = get_db(path=shared_id_db)
+        conn.execute("DELETE FROM config WHERE key = 'active_account'")
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["tag", "5", "breakout"])
+        assert result.exit_code == 1
+        assert "2 accounts" in result.output
+        assert self._owner(shared_id_db, "tags") == []
+
+    def test_unique_id_without_active_account_succeeds(
+        self, shared_id_db: Path
+    ) -> None:
+        conn = get_db(path=shared_id_db)
+        conn.execute("DELETE FROM config WHERE key = 'active_account'")
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["note", "77", "unique"])
+        assert result.exit_code == 0, result.output
+        assert self._owner(shared_id_db, "notes") == ["acct-2"]
+
+    def test_completion_only_offers_active_accounts_ids(
+        self, shared_id_db: Path
+    ) -> None:
+        assert _complete_oanda_id("") == ["5"]

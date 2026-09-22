@@ -77,10 +77,16 @@ def _complete_oanda_id(incomplete: str) -> list[str]:
     """
     conn = get_db()
     try:
+        # Match _resolve_transaction: only suggest the active account's IDs.
+        account = get_active_account(conn)
+        account_sql = "AND account_id = ? " if account is not None else ""
+        params: list[str] = [f"{incomplete}%"]
+        if account is not None:
+            params.append(account.oanda_id)
         rows = conn.execute(
             "SELECT DISTINCT oanda_id FROM transactions WHERE oanda_id LIKE ? "
-            "ORDER BY CAST(oanda_id AS INTEGER) DESC LIMIT 50",
-            (f"{incomplete}%",),
+            f"{account_sql}ORDER BY CAST(oanda_id AS INTEGER) DESC LIMIT 50",
+            params,
         ).fetchall()
     finally:
         conn.close()
@@ -95,6 +101,47 @@ def _complete_tag(incomplete: str) -> list[str]:
     finally:
         conn.close()
     return [r[0] for r in rows if r[0].startswith(incomplete.lower())]
+
+
+def _resolve_transaction(conn: sqlite3.Connection, oanda_id: str) -> int:
+    """Return the local ``transactions.id`` for *oanda_id*, or exit 1.
+
+    Oanda transaction IDs are only unique within one account, so the lookup
+    is scoped to the active account.  With no active account there is
+    nothing to scope to: a unique match is accepted, but an ID present in
+    several accounts is rejected as ambiguous rather than guessed at.
+    """
+    account = get_active_account(conn)
+
+    # Step 1: find candidate rows, scoped to the active account if any.
+    if account is not None:
+        rows = conn.execute(
+            "SELECT id FROM transactions WHERE oanda_id = ? AND account_id = ?",
+            (oanda_id, account.oanda_id),
+        ).fetchall()
+        where = f" for account {account.name!r}"
+    else:
+        rows = conn.execute(
+            "SELECT id FROM transactions WHERE oanda_id = ?", (oanda_id,)
+        ).fetchall()
+        where = ""
+
+    # Step 2: exactly one match is the only acceptable outcome.
+    if not rows:
+        typer.echo(
+            f"Transaction {oanda_id!r} not found in local database{where}. "
+            f"Run 'frmj sync' first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if len(rows) > 1:
+        typer.echo(
+            f"Transaction {oanda_id!r} exists in {len(rows)} accounts. "
+            "Select one first with 'frmj account use NAME'.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    return int(rows[0]["id"])
 
 
 # ---------------------------------------------------------------------------
@@ -114,20 +161,10 @@ def note(
     """Attach a note to a locally-synced transaction."""
     conn = get_db()
     try:
-        row = conn.execute(
-            "SELECT id FROM transactions WHERE oanda_id = ?",
-            (oanda_id,),
-        ).fetchone()
-        if not row:
-            typer.echo(
-                f"Transaction {oanda_id!r} not found in local database. "
-                f"Run 'frmj sync' first.",
-                err=True,
-            )
-            raise typer.Exit(1)
+        txn_id = _resolve_transaction(conn, oanda_id)
         conn.execute(
             "INSERT INTO notes (transaction_id, body) VALUES (?, ?)",
-            (row["id"], text),
+            (txn_id, text),
         )
         conn.commit()
     finally:
@@ -152,18 +189,8 @@ def tag(
     """Attach one or more labels to a locally-synced transaction."""
     conn = get_db()
     try:
-        row = conn.execute(
-            "SELECT id FROM transactions WHERE oanda_id = ?",
-            (oanda_id,),
-        ).fetchone()
-        if not row:
-            typer.echo(
-                f"Transaction {oanda_id!r} not found in local database. "
-                f"Run 'frmj sync' first.",
-                err=True,
-            )
-            raise typer.Exit(1)
-        attached = _attach_tags(conn, row["id"], tags)
+        txn_id = _resolve_transaction(conn, oanda_id)
+        attached = _attach_tags(conn, txn_id, tags)
     finally:
         conn.close()
     label = "tag" if attached == 1 else "tags"
