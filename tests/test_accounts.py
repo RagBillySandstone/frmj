@@ -30,6 +30,7 @@ from frmj.accounts import (
     remove_account,
     remove_group_member,
     rename_account,
+    resolve_account,
     set_active_account,
     set_live_mode,
 )
@@ -195,6 +196,32 @@ class TestActiveAccount:
         set_active_account(conn, "a")
         set_active_account(conn, "b")
         assert get_active_account_name(conn) == "b"
+
+
+class TestResolveAccount:
+    """``resolve_account`` backs the per-command ``--account NAME`` override."""
+
+    def test_none_falls_back_to_active_account(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "a", "a-id", is_practice=True)
+        set_active_account(conn, "a")
+        record = resolve_account(conn, None)
+        assert record is not None
+        assert record.name == "a"
+
+    def test_name_overrides_active_account(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "a", "a-id", is_practice=True)
+        add_account(conn, "b", "b-id", is_practice=False)
+        set_active_account(conn, "a")
+        record = resolve_account(conn, "b")
+        assert record is not None
+        assert record.name == "b"
+        # The override is per-call only — the active account is unchanged.
+        assert get_active_account_name(conn) == "a"
+
+    def test_unknown_name_returns_none(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "a", "a-id", is_practice=True)
+        set_active_account(conn, "a")
+        assert resolve_account(conn, "ghost") is None
 
 
 # ---------------------------------------------------------------------------

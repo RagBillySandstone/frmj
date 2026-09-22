@@ -66,7 +66,7 @@ import keyring.errors
 from frmj.accounts import (
     AccountRecord,
     get_account_count,
-    get_active_account,
+    resolve_account,
     add_account,
     set_active_account,
     set_live_mode,
@@ -414,18 +414,29 @@ def get_client_for_account(account: AccountRecord) -> OandaClient:
     )
 
 
-def get_client(conn: sqlite3.Connection) -> OandaClient:
+def get_client(
+    conn: sqlite3.Connection, account_name: str | None = None
+) -> OandaClient:
     """
-    Build an ``OandaClient`` from the active account profile.
+    Build an ``OandaClient`` for *account_name*, or the active account profile.
 
-    Reads the active account name from config, looks up its profile in the
-    ``accounts`` table, and delegates to ``get_client_for_account``.
+    *account_name* carries a command's ``--account NAME`` override; when it is
+    ``None`` the active account name is read from config instead. The profile
+    is looked up in the ``accounts`` table and handed to
+    ``get_client_for_account``.
 
     Raises ``RuntimeError`` with a clear message when a required value is
     missing so the CLI can surface it as a user-facing error rather than a
     traceback.
     """
-    account: AccountRecord | None = get_active_account(conn)
+    account: AccountRecord | None = resolve_account(conn, account_name)
+    # A named account that doesn't exist gets its own message: the
+    # "activate one" hint below would be misleading for a typo in --account.
+    if account is None and account_name is not None:
+        raise RuntimeError(
+            f"No account named '{account_name}'. List accounts with:\n"
+            "  frmj account list"
+        )
     if account is None:
         raise RuntimeError(
             "No active account selected. Add an account with:\n"

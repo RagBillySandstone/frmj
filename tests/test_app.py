@@ -257,6 +257,28 @@ class TestGetClient:
         with pytest.raises(RuntimeError, match="No active account"):
             get_client(db)
 
+    def test_raises_for_unknown_account_name(
+        self, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An --account override naming no profile gets a targeted error."""
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token")
+        add_account(db, "practice", "101-001-12345-001", is_practice=True)
+        set_active_account(db, "practice")
+        with pytest.raises(RuntimeError, match="No account named 'ghost'"):
+            get_client(db, "ghost")
+
+    def test_account_name_overrides_active_account(
+        self, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A named account is used instead of the active one."""
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token")
+        add_account(db, "active", "101-001-12345-001", is_practice=True)
+        add_account(db, "other", "101-001-12345-002", is_practice=True)
+        set_active_account(db, "active")
+        client = get_client(db, "other")
+        assert client.account_id == "101-001-12345-002"
+        client.close()
+
     def test_raises_without_token(
         self, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:

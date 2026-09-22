@@ -187,6 +187,20 @@ def get_active_account(conn: sqlite3.Connection) -> AccountRecord | None:
     return get_account(conn, name)
 
 
+def resolve_account(conn: sqlite3.Connection, name: str | None) -> AccountRecord | None:
+    """
+    Return the account named *name*, or the active account when *name* is ``None``.
+
+    Backs the per-command ``--account NAME`` override: commands pass the
+    option's value straight through, so omitting the flag keeps the existing
+    active-account behavior. Returns ``None`` when the named account does not
+    exist, or when *name* is ``None`` and no active account is set.
+    """
+    if name is None:
+        return get_active_account(conn)
+    return get_account(conn, name)
+
+
 def set_active_account(conn: sqlite3.Connection, name: str) -> None:
     """
     Write *name* as the active account in the config table.
