@@ -8,9 +8,10 @@ from pathlib import Path
 
 import typer
 
-from frmj.accounts import get_active_account
+from frmj.accounts import resolve_account
 from frmj.app import get_client, get_db
 from frmj.cli import app
+from frmj.cli._completion import _complete_account_name
 from frmj.cli._display import _display_transaction
 from frmj.execution.sync import sync_cold, sync_csv, sync_incremental
 
@@ -48,6 +49,13 @@ def sync(
             "csv, with Timezone set to UTC)."
         ),
     ),
+    account: str | None = typer.Option(
+        None,
+        "--account",
+        "-a",
+        help="Use this account instead of the active one (see 'frmj account list').",
+        autocompletion=_complete_account_name,
+    ),
 ) -> None:
     """Sync transactions from Oanda."""
     if csv_path is not None and (cold or watch):
@@ -58,20 +66,30 @@ def sync(
         typer.echo("Error: --watch and --cold cannot be used together.", err=True)
         raise typer.Exit(1)
 
+    # Name the overridden account up front so its results can't be mistaken
+    # for the active account's.
+    if account is not None:
+        typer.echo(f"Account: {account}")
+
     if watch:
-        _watch_loop(interval)
+        _watch_loop(interval, account)
         return
 
     conn = get_db()
     try:
         if csv_path is not None:
-            account = get_active_account(conn)
-            if account is None:
+            # CSV rows carry no account ID, so they're filed under the target
+            # account's Oanda ID — an unknown --account must not fall through.
+            record = resolve_account(conn, account)
+            if record is None and account is not None:
+                typer.echo(f"Error: no account named '{account}'.", err=True)
+                raise typer.Exit(1)
+            if record is None:
                 typer.echo("Error: no active account configured.", err=True)
                 raise typer.Exit(1)
-            result = sync_csv(conn, account.oanda_id, csv_path)
+            result = sync_csv(conn, record.oanda_id, csv_path)
         else:
-            client = get_client(conn)
+            client = get_client(conn, account)
             result = sync_cold(conn, client) if cold else sync_incremental(conn, client)
     except (RuntimeError, ValueError, OSError) as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -89,8 +107,11 @@ def sync(
         typer.echo("No transactions returned.")
 
 
-def _watch_loop(interval: int) -> None:
+def _watch_loop(interval: int, account: str | None = None) -> None:
     """Poll ``sync_incremental`` every *interval* seconds until Ctrl+C.
+
+    Watches *account* (the ``--account`` override), or the active account
+    when it is ``None``.
 
     New transactions are printed as they arrive using ``_display_transaction``.
     When no cursor exists (first run), only the count is reported to avoid
@@ -99,7 +120,7 @@ def _watch_loop(interval: int) -> None:
     """
     conn = get_db()
     try:
-        client = get_client(conn)
+        client = get_client(conn, account)
     except RuntimeError as exc:
         typer.echo(f"Error: {exc}", err=True)
         conn.close()

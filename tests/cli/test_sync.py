@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
 
+from frmj.accounts import add_account
 from frmj.app import get_db
 from frmj.cli import app
 
@@ -25,7 +27,9 @@ class TestSyncCommand:
         rows = [_row("1"), _row("2"), _row("3")]
         monkeypatch.setattr(
             "frmj.cli.sync.get_client",
-            lambda conn: FakeClient(account_id="acct-1", responses=[rows]),
+            lambda conn, account_name=None: FakeClient(
+                account_id="acct-1", responses=[rows]
+            ),
         )
         result = runner.invoke(app, ["sync"])
         assert result.exit_code == 0, result.output
@@ -39,7 +43,9 @@ class TestSyncCommand:
         """``frmj sync --cold`` reports 'cold' in the output."""
         monkeypatch.setattr(
             "frmj.cli.sync.get_client",
-            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+            lambda conn, account_name=None: FakeClient(
+                account_id="acct-1", responses=[[]]
+            ),
         )
         result = runner.invoke(app, ["sync", "--cold"])
         assert result.exit_code == 0, result.output
@@ -53,7 +59,9 @@ class TestSyncCommand:
         """Empty response prints 0 ingested."""
         monkeypatch.setattr(
             "frmj.cli.sync.get_client",
-            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+            lambda conn, account_name=None: FakeClient(
+                account_id="acct-1", responses=[[]]
+            ),
         )
         result = runner.invoke(app, ["sync"])
         assert result.exit_code == 0
@@ -68,7 +76,9 @@ class TestSyncCommand:
         rows = [_row("42")]
         monkeypatch.setattr(
             "frmj.cli.sync.get_client",
-            lambda conn: FakeClient(account_id="acct-1", responses=[rows]),
+            lambda conn, account_name=None: FakeClient(
+                account_id="acct-1", responses=[rows]
+            ),
         )
         result = runner.invoke(app, ["sync"])
         assert result.exit_code == 0
@@ -86,6 +96,82 @@ class TestSyncCommand:
         result = runner.invoke(app, ["sync"])
         assert result.exit_code == 1
         assert "No active account" in result.stderr
+
+
+class TestSyncAccountOption:
+    """``frmj sync --account NAME`` targets a profile other than the active one."""
+
+    @pytest.fixture()
+    def two_account_db(self, db_path: Path) -> Path:
+        """``db_path`` (active: 'practice' / acct-1) plus 'other' / acct-2."""
+        conn = get_db(path=db_path)
+        add_account(conn, "other", "acct-2", is_practice=True)
+        conn.close()
+        return db_path
+
+    def test_account_passed_to_get_client(
+        self, two_account_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        requested: list[str | None] = []
+
+        def _get_client(conn: object, account_name: str | None = None) -> FakeClient:
+            requested.append(account_name)
+            return FakeClient(account_id="acct-2", responses=[[]])
+
+        monkeypatch.setattr("frmj.cli.sync.get_client", _get_client)
+        result = runner.invoke(app, ["sync", "--account", "other"])
+        assert result.exit_code == 0, result.output
+        assert requested == ["other"]
+        assert "Account: other" in result.output
+
+    def test_csv_files_rows_under_named_account(
+        self, two_account_db: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """CSV rows have no account ID, so --account decides where they land."""
+        seen: list[str] = []
+
+        def _fake_sync_csv(conn: object, account_id: str, csv_path: Path) -> object:
+            seen.append(account_id)
+            return SimpleNamespace(rows_ingested=0, rows_skipped=0, last_oanda_id=None)
+
+        monkeypatch.setattr("frmj.cli.sync.sync_csv", _fake_sync_csv)
+        csv_file = tmp_path / "export.csv"
+        csv_file.write_text("")
+        result = runner.invoke(
+            app, ["sync", "--csv", str(csv_file), "--account", "other"]
+        )
+        assert result.exit_code == 0, result.output
+        assert seen == ["acct-2"]
+
+    def test_csv_unknown_account_exits_1(
+        self, two_account_db: Path, tmp_path: Path
+    ) -> None:
+        """An unknown --account must not fall back to the active account."""
+        csv_file = tmp_path / "export.csv"
+        csv_file.write_text("")
+        result = runner.invoke(
+            app, ["sync", "--csv", str(csv_file), "--account", "ghost"]
+        )
+        assert result.exit_code == 1
+        assert "no account named 'ghost'" in result.stderr
+
+    def test_watch_passes_account_to_get_client(
+        self, two_account_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        requested: list[str | None] = []
+
+        def _get_client(conn: object, account_name: str | None = None) -> FakeClient:
+            requested.append(account_name)
+            return FakeClient(account_id="acct-2")
+
+        def _interrupt(conn: object, client: object) -> None:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("frmj.cli.sync.get_client", _get_client)
+        monkeypatch.setattr("frmj.cli.sync.sync_incremental", _interrupt)
+        result = runner.invoke(app, ["sync", "--watch", "--account", "other"])
+        assert result.exit_code == 0, result.output
+        assert requested == ["other"]
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +214,8 @@ class TestSyncWatch:
             raise KeyboardInterrupt
 
         monkeypatch.setattr(
-            "frmj.cli.sync.get_client", lambda conn: FakeClient(account_id="acct-1")
+            "frmj.cli.sync.get_client",
+            lambda conn, account_name=None: FakeClient(account_id="acct-1"),
         )
         monkeypatch.setattr("frmj.cli.sync.sync_incremental", fake_sync)
         monkeypatch.setattr("frmj.cli.sync.time.sleep", lambda _: None)
@@ -148,7 +235,8 @@ class TestSyncWatch:
             raise KeyboardInterrupt
 
         monkeypatch.setattr(
-            "frmj.cli.sync.get_client", lambda conn: FakeClient(account_id="acct-1")
+            "frmj.cli.sync.get_client",
+            lambda conn, account_name=None: FakeClient(account_id="acct-1"),
         )
         monkeypatch.setattr("frmj.cli.sync.sync_incremental", fake_sync)
         monkeypatch.setattr("frmj.cli.sync.time.sleep", lambda _: None)
@@ -184,7 +272,8 @@ class TestSyncWatch:
             raise KeyboardInterrupt
 
         monkeypatch.setattr(
-            "frmj.cli.sync.get_client", lambda conn: FakeClient(account_id="acct-1")
+            "frmj.cli.sync.get_client",
+            lambda conn, account_name=None: FakeClient(account_id="acct-1"),
         )
         monkeypatch.setattr("frmj.cli.sync.sync_incremental", fake_sync)
         monkeypatch.setattr("frmj.cli.sync.time.sleep", lambda _: None)
@@ -236,7 +325,8 @@ class TestSyncWatch:
             raise KeyboardInterrupt
 
         monkeypatch.setattr(
-            "frmj.cli.sync.get_client", lambda conn: FakeClient(account_id="acct-1")
+            "frmj.cli.sync.get_client",
+            lambda conn, account_name=None: FakeClient(account_id="acct-1"),
         )
         monkeypatch.setattr("frmj.cli.sync.sync_incremental", fake_sync)
         monkeypatch.setattr("frmj.cli.sync.time.sleep", lambda _: None)
@@ -264,7 +354,8 @@ class TestSyncWatch:
             raise KeyboardInterrupt
 
         monkeypatch.setattr(
-            "frmj.cli.sync.get_client", lambda conn: FakeClient(account_id="acct-1")
+            "frmj.cli.sync.get_client",
+            lambda conn, account_name=None: FakeClient(account_id="acct-1"),
         )
         monkeypatch.setattr("frmj.cli.sync.sync_incremental", fake_sync)
         monkeypatch.setattr("frmj.cli.sync.time.sleep", lambda _: None)
@@ -291,7 +382,8 @@ class TestSyncWatch:
             raise KeyboardInterrupt
 
         monkeypatch.setattr(
-            "frmj.cli.sync.get_client", lambda conn: FakeClient(account_id="acct-1")
+            "frmj.cli.sync.get_client",
+            lambda conn, account_name=None: FakeClient(account_id="acct-1"),
         )
         monkeypatch.setattr("frmj.cli.sync.sync_incremental", fake_sync)
         monkeypatch.setattr("frmj.cli.sync.time.sleep", lambda _: None)
@@ -321,7 +413,8 @@ class TestSyncWatch:
             raise KeyboardInterrupt
 
         monkeypatch.setattr(
-            "frmj.cli.sync.get_client", lambda conn: FakeClient(account_id="acct-1")
+            "frmj.cli.sync.get_client",
+            lambda conn, account_name=None: FakeClient(account_id="acct-1"),
         )
         monkeypatch.setattr("frmj.cli.sync.sync_incremental", fake_sync)
         monkeypatch.setattr("frmj.cli.sync.time.sleep", lambda s: sleep_calls.append(s))
