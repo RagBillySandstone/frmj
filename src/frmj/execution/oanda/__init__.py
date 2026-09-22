@@ -39,8 +39,10 @@ from .models import (
     AccountSummary,
     CloseFill,
     FinancingRate,
+    LimitOrderResult,
     OpenTrade,
     OrderFill,
+    PendingOrder,
     TransactionRow,
 )
 from .parsing import (
@@ -52,6 +54,8 @@ from .parsing import (
     _parse_instrument_spec,
     _parse_open_trade,
     _parse_order_create_txn_id,
+    _parse_order_fill,
+    _parse_pending_order,
     _resolve_financing_parents,
 )
 
@@ -65,6 +69,8 @@ __all__ = [
     "AccountSummary",
     "FinancingRate",
     "OrderFill",
+    "LimitOrderResult",
+    "PendingOrder",
     "CloseFill",
     "_compute_conversion_rate",
     "_extract_bid_ask",
@@ -74,5 +80,7 @@ __all__ = [
     "_parse_instrument_spec",
     "_parse_open_trade",
     "_parse_order_create_txn_id",
+    "_parse_order_fill",
+    "_parse_pending_order",
     "_resolve_financing_parents",
 ]

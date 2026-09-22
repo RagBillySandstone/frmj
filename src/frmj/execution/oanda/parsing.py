@@ -20,6 +20,7 @@ from .models import (
     FinancingRate,
     OpenTrade,
     OrderFill,
+    PendingOrder,
     TransactionRow,
 )
 
@@ -80,6 +81,30 @@ def _parse_open_trade(trade: dict[str, Any]) -> OpenTrade:
         take_profit_price=Decimal(tp_order["price"]) if tp_order else None,
         stop_loss_price=Decimal(sl_order["price"]) if sl_order else None,
         open_time=trade["openTime"],
+    )
+
+
+def _parse_pending_order(order: dict[str, Any]) -> PendingOrder:
+    """Parse one entry order from the ``orders`` array of GET /pendingOrders.
+
+    Callers filter out non-entry order types first; see ``PendingOrder``.
+    ``units`` is signed in Oanda's payload and normalised here to a direction
+    string plus a positive count, as ``_parse_open_trade`` does.
+    """
+    units_raw = int(Decimal(order["units"]))
+    tp_on_fill = order.get("takeProfitOnFill")
+    sl_on_fill = order.get("stopLossOnFill")
+    return PendingOrder(
+        order_id=str(order["id"]),
+        order_type=order["type"],
+        instrument=order["instrument"],
+        direction="LONG" if units_raw >= 0 else "SHORT",
+        units=abs(units_raw),
+        price=Decimal(order["price"]),
+        time_in_force=order["timeInForce"],
+        create_time=order["createTime"],
+        take_profit_price=Decimal(tp_on_fill["price"]) if tp_on_fill else None,
+        stop_loss_price=Decimal(sl_on_fill["price"]) if sl_on_fill else None,
     )
 
 

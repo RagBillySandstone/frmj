@@ -141,6 +141,49 @@ class OrderFill:
 
 
 @dataclass(frozen=True, slots=True)
+class LimitOrderResult:
+    """Result of placing a limit (pending entry) order.
+
+    ``order_id`` is the ID of the created order. In Oanda it is also the ID
+    of the LIMIT_ORDER transaction that created it, which is what journal
+    notes, tags, and the trade plan attach to until the order fills.
+
+    ``fill`` is set only when the order filled as soon as it arrived (the
+    market had already crossed the limit price by then). It is ``None`` in
+    the normal case, where the order rests until price reaches it.
+    """
+
+    order_id: str
+    fill: OrderFill | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PendingOrder:
+    """One pending entry order from GET /accounts/{id}/pendingOrders.
+
+    Only entry orders (LIMIT, STOP, MARKET_IF_TOUCHED) become a
+    ``PendingOrder``. The TAKE_PROFIT/STOP_LOSS orders attached to open
+    trades are also "pending" to Oanda, but they can't open a new position.
+
+    ``direction`` is ``"LONG"`` or ``"SHORT"`` and ``units`` is always
+    positive, matching ``OpenTrade``. ``take_profit_price`` and
+    ``stop_loss_price`` come from the order's ``takeProfitOnFill`` /
+    ``stopLossOnFill`` and are ``None`` when not set.
+    """
+
+    order_id: str
+    order_type: str
+    instrument: str
+    direction: str
+    units: int
+    price: Decimal
+    time_in_force: str
+    create_time: str
+    take_profit_price: Decimal | None
+    stop_loss_price: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
 class CloseFill:
     """Result of closing an open trade via PUT /trades/{id}/close.
 

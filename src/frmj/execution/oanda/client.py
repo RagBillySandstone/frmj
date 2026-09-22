@@ -8,7 +8,8 @@ Endpoints implemented
   GET  /accounts/{id}/instruments              (InstrumentSpec / financing rates)
   GET  /accounts/{id}/pricing                  (live bid/ask + conversions)
   GET  /accounts/{id}/trades                   (open ticket count per instrument)
-  POST /accounts/{id}/orders                   (place market order)
+  GET  /accounts/{id}/pendingOrders            (pending entry orders)
+  POST /accounts/{id}/orders                   (place market / limit order)
 
 We deliberately avoid the official v20 Python SDK so that:
 
@@ -56,8 +57,10 @@ from .models import (
     AccountSummary,
     CloseFill,
     FinancingRate,
+    LimitOrderResult,
     OpenTrade,
     OrderFill,
+    PendingOrder,
     TransactionRow,
 )
 from .parsing import (
@@ -70,6 +73,7 @@ from .parsing import (
     _parse_open_trade,
     _parse_order_create_txn_id,
     _parse_order_fill,
+    _parse_pending_order,
     _resolve_financing_parents,
 )
 
@@ -88,6 +92,11 @@ _CONNECT_TIMEOUT: float = 5.0  # seconds — fail fast on broken network
 _READ_TIMEOUT: float = 15.0  # seconds — cold pages can be large
 _WRITE_TIMEOUT: float = 5.0  # seconds — tiny uploads
 _POOL_TIMEOUT: float = 5.0  # seconds — connection pool wait
+
+# Pending order types that open a position when triggered. Everything else
+# in /pendingOrders (TAKE_PROFIT, STOP_LOSS, TRAILING_STOP_LOSS, ...) is an
+# exit order attached to an existing trade.
+_ENTRY_ORDER_TYPES: frozenset[str] = frozenset({"LIMIT", "STOP", "MARKET_IF_TOUCHED"})
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +323,24 @@ class OandaClient:
         resp.raise_for_status()
         return [_parse_open_trade(t) for t in resp.json().get("trades", [])]
 
+    def get_pending_orders(self) -> list[PendingOrder]:
+        """Fetch the account's pending *entry* orders.
+
+        Uses GET /accounts/{id}/pendingOrders and keeps only order types that
+        can open a position (``_ENTRY_ORDER_TYPES``), dropping the TP/SL
+        orders attached to open trades. Returns an empty list when there are
+        none. Raises ``httpx.HTTPStatusError`` on Oanda errors.
+        """
+        resp = self._http.get(
+            f"{self._base_url}/accounts/{self.account_id}/pendingOrders"
+        )
+        resp.raise_for_status()
+        return [
+            _parse_pending_order(o)
+            for o in resp.json().get("orders", [])
+            if o.get("type") in _ENTRY_ORDER_TYPES
+        ]
+
     def close_trade(self, trade_id: str) -> CloseFill:
         """Close an open trade in full.
 
@@ -369,6 +396,73 @@ class OandaClient:
             )
 
         return _parse_order_fill(payload["orderFillTransaction"])
+
+    def place_limit_order(
+        self,
+        instrument: str,
+        units_signed: int,
+        price: Decimal,
+        take_profit_price: Decimal | None = None,
+        stop_loss_price: Decimal | None = None,
+    ) -> LimitOrderResult:
+        """Place a GTC limit entry order, with TP/SL set to apply on fill.
+
+        ``units_signed`` follows Oanda's sign convention (positive = long).
+        TP/SL go in the order body as ``takeProfitOnFill`` /
+        ``stopLossOnFill``: Oanda attaches them the moment the order fills,
+        so there is no attach-after-fill step and no unprotected window.
+        Prices must already be rounded to the instrument's display precision;
+        Oanda rejects extra decimals.
+
+        Usually the order rests and ``fill`` is ``None``. If the market has
+        already crossed *price* when the order arrives, Oanda fills it at
+        once and the fill is returned too.
+
+        Raises:
+            RuntimeError: if Oanda cancels the order on arrival (reported in
+                ``orderCancelTransaction``), or the response has no
+                ``orderCreateTransaction``.
+            httpx.HTTPStatusError: on 4xx/5xx, including a rejected order.
+        """
+        # Build the order body; TP/SL are optional and only sent when set.
+        order: dict[str, Any] = {
+            "type": "LIMIT",
+            "instrument": instrument,
+            "units": str(units_signed),
+            "price": str(price),
+            "timeInForce": "GTC",
+            "positionFill": "DEFAULT",
+        }
+        if take_profit_price is not None:
+            order["takeProfitOnFill"] = {"price": str(take_profit_price)}
+        if stop_loss_price is not None:
+            order["stopLossOnFill"] = {"price": str(stop_loss_price)}
+
+        resp = self._http.post(
+            f"{self._base_url}/accounts/{self.account_id}/orders",
+            json={"order": order},
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+
+        # A cancel with no fill means the order never went live (e.g. a
+        # price outside Oanda's allowed bounds) — surface it, don't hide it.
+        if (
+            "orderCancelTransaction" in payload
+            and "orderFillTransaction" not in payload
+        ):
+            reason = payload["orderCancelTransaction"].get("reason", "unknown")
+            raise RuntimeError(
+                f"Limit order cancelled by Oanda (reason: {reason}). "
+                f"Oanda response: {json.dumps(payload)}"
+            )
+
+        order_id = _parse_order_create_txn_id(payload)
+        fill_txn = payload.get("orderFillTransaction")
+        return LimitOrderResult(
+            order_id=order_id,
+            fill=_parse_order_fill(fill_txn) if fill_txn is not None else None,
+        )
 
     def attach_take_profit(self, trade_id: str, price: Decimal) -> str:
         """Attach a GTC take-profit order to an existing open trade.

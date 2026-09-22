@@ -423,6 +423,170 @@ class TestPlaceMarketOrder:
 
 
 # ---------------------------------------------------------------------------
+# place_limit_order
+# ---------------------------------------------------------------------------
+
+
+class TestPlaceLimitOrder:
+    _RESTING = {
+        "orderCreateTransaction": {"id": "5001", "type": "LIMIT_ORDER"},
+        "relatedTransactionIDs": ["5001"],
+    }
+
+    def test_request_body_is_gtc_limit_with_tpsl_on_fill(self) -> None:
+        """TP/SL ride in the order body, so Oanda attaches them on fill."""
+        client = _make_client(self._RESTING)
+        client.place_limit_order(
+            "EUR_USD",
+            -10_000,
+            Decimal("1.10150"),
+            take_profit_price=Decimal("1.09650"),
+            stop_loss_price=Decimal("1.10450"),
+        )
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        assert http.calls[0].method == "POST"
+        assert http.calls[0].url.endswith("/accounts/101-001-test-001/orders")
+        assert http.calls[0].kwargs["json"] == {
+            "order": {
+                "type": "LIMIT",
+                "instrument": "EUR_USD",
+                "units": "-10000",
+                "price": "1.10150",
+                "timeInForce": "GTC",
+                "positionFill": "DEFAULT",
+                "takeProfitOnFill": {"price": "1.09650"},
+                "stopLossOnFill": {"price": "1.10450"},
+            }
+        }
+
+    def test_tpsl_omitted_when_not_set(self) -> None:
+        client = _make_client(self._RESTING)
+        client.place_limit_order("EUR_USD", 10_000, Decimal("1.09850"))
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        order = http.calls[0].kwargs["json"]["order"]
+        assert "takeProfitOnFill" not in order
+        assert "stopLossOnFill" not in order
+
+    def test_resting_order_returns_order_id_without_fill(self) -> None:
+        client = _make_client(self._RESTING)
+        result = client.place_limit_order("EUR_USD", 10_000, Decimal("1.09850"))
+        assert result.order_id == "5001"
+        assert result.fill is None
+
+    def test_immediate_fill_is_returned(self) -> None:
+        """A limit the market already crossed fills on arrival."""
+        response = {
+            "orderCreateTransaction": {"id": "5001", "type": "LIMIT_ORDER"},
+            "orderFillTransaction": {
+                "id": "5002",
+                "price": "1.09840",
+                "units": "10000",
+                "tradeOpened": {"tradeID": "5002"},
+            },
+        }
+        client = _make_client(response)
+        result = client.place_limit_order("EUR_USD", 10_000, Decimal("1.09850"))
+        assert result.order_id == "5001"
+        assert result.fill is not None
+        assert result.fill.transaction_id == "5002"
+        assert result.fill.fill_price == Decimal("1.09840")
+
+    def test_cancelled_on_arrival_raises(self) -> None:
+        response = {
+            "orderCreateTransaction": {"id": "5001", "type": "LIMIT_ORDER"},
+            "orderCancelTransaction": {
+                "id": "5002",
+                "type": "ORDER_CANCEL",
+                "reason": "PRICE_BOUND_EXCEEDED",
+            },
+        }
+        client = _make_client(response)
+        with pytest.raises(RuntimeError, match="PRICE_BOUND_EXCEEDED"):
+            client.place_limit_order("EUR_USD", 10_000, Decimal("1.09850"))
+
+    def test_rejection_raises_http_error(self) -> None:
+        client = _make_client(_ErrorResponse(400))
+        with pytest.raises(httpx.HTTPStatusError):
+            client.place_limit_order("EUR_USD", 10_000, Decimal("1.09850"))
+
+
+# ---------------------------------------------------------------------------
+# get_pending_orders
+# ---------------------------------------------------------------------------
+
+
+class TestGetPendingOrders:
+    def test_keeps_entry_orders_and_drops_exit_orders(self) -> None:
+        """TP/SL attached to open trades are pending too, but aren't entries."""
+        response = {
+            "orders": [
+                {
+                    "id": "5001",
+                    "type": "LIMIT",
+                    "instrument": "EUR_USD",
+                    "units": "-10000",
+                    "price": "1.10150",
+                    "timeInForce": "GTC",
+                    "createTime": "2026-09-22T10:00:00.000000000Z",
+                    "takeProfitOnFill": {"price": "1.09650"},
+                    "stopLossOnFill": {"price": "1.10450"},
+                },
+                {
+                    "id": "4001",
+                    "type": "TAKE_PROFIT",
+                    "tradeID": "3001",
+                    "price": "1.12000",
+                    "timeInForce": "GTC",
+                    "createTime": "2026-09-21T10:00:00.000000000Z",
+                },
+                {
+                    "id": "4002",
+                    "type": "STOP_LOSS",
+                    "tradeID": "3001",
+                    "price": "1.08000",
+                    "timeInForce": "GTC",
+                    "createTime": "2026-09-21T10:00:00.000000000Z",
+                },
+            ]
+        }
+        client = _make_client(response)
+        orders = client.get_pending_orders()
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        assert http.calls[0].url.endswith("/accounts/101-001-test-001/pendingOrders")
+        assert len(orders) == 1
+        order = orders[0]
+        assert order.order_id == "5001"
+        assert order.order_type == "LIMIT"
+        assert order.direction == "SHORT"
+        assert order.units == 10_000
+        assert order.price == Decimal("1.10150")
+        assert order.take_profit_price == Decimal("1.09650")
+        assert order.stop_loss_price == Decimal("1.10450")
+
+    def test_order_without_tpsl_has_none(self) -> None:
+        response = {
+            "orders": [
+                {
+                    "id": "5003",
+                    "type": "STOP",
+                    "instrument": "USD_JPY",
+                    "units": "5000",
+                    "price": "150.250",
+                    "timeInForce": "GTC",
+                    "createTime": "2026-09-22T10:00:00.000000000Z",
+                }
+            ]
+        }
+        orders = _make_client(response).get_pending_orders()
+        assert orders[0].direction == "LONG"
+        assert orders[0].take_profit_price is None
+        assert orders[0].stop_loss_price is None
+
+    def test_empty_when_no_orders(self) -> None:
+        assert _make_client({"orders": []}).get_pending_orders() == []
+
+
+# ---------------------------------------------------------------------------
 # close_trade
 # ---------------------------------------------------------------------------
 
