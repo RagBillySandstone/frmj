@@ -14,7 +14,13 @@ from decimal import Decimal
 
 import typer
 
-from frmj.execution.oanda import AccountSummary, FinancingRate, OpenTrade
+from frmj.domain.sizing import PriceQuote
+from frmj.execution.oanda import (
+    AccountSummary,
+    FinancingRate,
+    OpenTrade,
+    PendingOrder,
+)
 
 # ---------------------------------------------------------------------------
 # Financing-rate formatting (shared by financing.py and trade.py)
@@ -286,6 +292,54 @@ def _display_open_trade(
         f"  {exits_str}"
         f"{financing_str}"
     )
+    typer.echo("")
+
+
+def _display_pending_order(
+    conn: sqlite3.Connection, order: PendingOrder, quote: PriceQuote | None
+) -> None:
+    """Print one pending entry order in the positions view.
+
+    ``quote`` is the instrument's live quote, used to show the current price
+    on the side the order would fill against (ask for a long, bid for a
+    short) next to the order's price. ``None`` when the quote couldn't be
+    fetched, in which case that figure is omitted.
+
+    The ``[note]`` flag reflects notes on the order's own transaction (the
+    order ID), where ``frmj trade --limit`` puts them until the order fills.
+    """
+    note_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM notes n
+        JOIN transactions t ON n.transaction_id = t.id
+        WHERE t.oanda_id = ?
+        """,
+        (order.order_id,),
+    ).fetchone()[0]
+    note_flag = "  [note]" if note_count else ""
+
+    # "MARKET_IF_TOUCHED" reads better as "MARKET IF TOUCHED".
+    order_type = order.order_type.replace("_", " ")
+    typer.echo(
+        f"  #{order.order_id}  {order.instrument}  {order.direction} {order_type}"
+        f"  {order.units:,} units  @ {order.price}  {order.time_in_force}"
+        f"  (placed {_to_local_str(order.create_time)}){note_flag}"
+    )
+
+    parts: list[str] = []
+    if quote is not None:
+        # Show the side of the book the order fills against.
+        if order.direction == "LONG":
+            parts.append(f"market: ask {quote.ask}")
+        else:
+            parts.append(f"market: bid {quote.bid}")
+    if order.take_profit_price is not None:
+        parts.append(f"TP: {order.take_profit_price}")
+    if order.stop_loss_price is not None:
+        parts.append(f"SL: {order.stop_loss_price}")
+    if order.take_profit_price is None and order.stop_loss_price is None:
+        parts.append("no TP/SL set")
+    typer.echo("         " + "  ".join(parts))
     typer.echo("")
 
 

@@ -1,4 +1,5 @@
-"""``frmj positions`` — show open trades with live P/L and TP/SL levels."""
+"""``frmj positions`` — show open trades with live P/L and TP/SL levels, and
+pending entry orders."""
 
 from __future__ import annotations
 
@@ -8,7 +9,11 @@ from frmj import services
 from frmj.app import get_client, get_db
 from frmj.cli import app
 from frmj.cli._completion import _complete_account_name
-from frmj.cli._display import _display_account_summary, _display_open_trade
+from frmj.cli._display import (
+    _display_account_summary,
+    _display_open_trade,
+    _display_pending_order,
+)
 
 # ---------------------------------------------------------------------------
 # positions command
@@ -25,7 +30,8 @@ def positions(
         autocompletion=_complete_account_name,
     ),
 ) -> None:
-    """Show all open trades with current P/L and TP/SL levels."""
+    """Show all open trades with current P/L and TP/SL levels, and pending
+    entry orders."""
     conn = get_db()
     try:
         client = get_client(conn, account)
@@ -46,24 +52,43 @@ def positions(
     if account is not None:
         typer.echo(f"Account: {account}")
 
-    if not view.trades:
+    # --- Open trades ---------------------------------------------------------
+    if view.trades:
+        label = "position" if len(view.trades) == 1 else "positions"
+        typer.echo(f"{len(view.trades)} open {label}")
+        typer.echo("─" * 56)
+        for trade in view.trades:
+            quote = view.quotes.get(trade.instrument)
+            _display_open_trade(
+                conn,
+                trade,
+                quote.quote_to_home if quote is not None else None,
+                view.financing_rates.get(trade.instrument),
+            )
+        typer.echo("─" * 56)
+    else:
         typer.echo("No open positions.")
-        conn.close()
-        return
 
-    label = "position" if len(view.trades) == 1 else "positions"
-    typer.echo(f"{len(view.trades)} open {label}")
-    typer.echo("─" * 56)
-
-    for trade in view.trades:
-        _display_open_trade(
-            conn,
-            trade,
-            view.quote_to_home.get(trade.instrument),
-            view.financing_rates.get(trade.instrument),
+    # --- Pending entry orders ------------------------------------------------
+    # A failed fetch is a warning, not "no pending orders": the user should
+    # know the list may be incomplete.
+    if view.pending_error is not None:
+        typer.echo(
+            f"Warning: could not fetch pending orders — {view.pending_error}",
+            err=True,
         )
+    pending = view.pending_orders or []
+    if pending:
+        typer.echo("")
+        label = "order" if len(pending) == 1 else "orders"
+        typer.echo(f"{len(pending)} pending {label}")
+        typer.echo("─" * 56)
+        for order in pending:
+            _display_pending_order(conn, order, view.quotes.get(order.instrument))
+        typer.echo("─" * 56)
 
-    typer.echo("─" * 56)
-    _display_account_summary(view.summary)
+    # The account summary only adds something when there's exposure to see.
+    if view.trades or pending:
+        _display_account_summary(view.summary)
 
     conn.close()

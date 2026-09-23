@@ -13,9 +13,9 @@ from frmj.app import get_db, set_config
 from frmj.cli import app
 from frmj.cli._display import _daily_financing_home
 from frmj.domain.sizing import PriceQuote
-from frmj.execution.oanda import FinancingRate, OpenTrade
+from frmj.execution.oanda import FinancingRate, OpenTrade, PendingOrder
 
-from .conftest import FakeFullClient, _open_trade
+from .conftest import FakeFullClient, _open_trade, _pending_order
 
 runner = CliRunner()
 
@@ -253,6 +253,136 @@ class TestPositionsCommand:
         result = runner.invoke(app, ["positions", "--account", "ghost"])
         assert result.exit_code == 1
         assert "No account named 'ghost'" in result.output + result.stderr
+
+
+class TestPositionsPendingOrders:
+    """``frmj positions`` lists pending entry orders after open trades.
+
+    FakeFullClient quotes every instrument at bid 1.09990 / ask 1.10010.
+    """
+
+    @pytest.fixture()
+    def pos_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "pos_pending_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        conn.close()
+        return path
+
+    def _invoke(self, monkeypatch: pytest.MonkeyPatch, fake: FakeFullClient) -> object:
+        monkeypatch.setattr(
+            "frmj.cli.positions.get_client", lambda conn, account_name=None: fake
+        )
+        return runner.invoke(app, ["positions"])
+
+    def test_pending_only_shows_section_and_summary(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(pending_orders=[_pending_order()])
+        result = self._invoke(monkeypatch, fake)
+        assert result.exit_code == 0, result.output
+        assert "No open positions." in result.output
+        assert "1 pending order" in result.output
+        assert "#7001  EUR_USD  LONG LIMIT  10,000 units  @ 1.09500  GTC" in (
+            result.output
+        )
+        assert "market: ask 1.10010" in result.output
+        assert "no TP/SL set" in result.output
+        assert "Margin Available" in result.output
+
+    def test_short_order_shows_bid_and_tpsl(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        order = PendingOrder(
+            order_id="7002",
+            order_type="MARKET_IF_TOUCHED",
+            instrument="EUR_USD",
+            direction="SHORT",
+            units=5_000,
+            price=Decimal("1.10500"),
+            time_in_force="GTC",
+            create_time="2026-04-25T14:30:00.000000Z",
+            take_profit_price=Decimal("1.10000"),
+            stop_loss_price=Decimal("1.10800"),
+        )
+        result = self._invoke(monkeypatch, FakeFullClient(pending_orders=[order]))
+        assert result.exit_code == 0, result.output
+        assert "SHORT MARKET IF TOUCHED" in result.output
+        assert "market: bid 1.09990  TP: 1.10000  SL: 1.10800" in result.output
+
+    def test_open_trades_and_pending_orders_both_listed(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(
+            open_trades=[_open_trade()],
+            pending_orders=[_pending_order(order_id="7001"), _pending_order("7003")],
+        )
+        result = self._invoke(monkeypatch, fake)
+        assert result.exit_code == 0, result.output
+        assert "1 open position" in result.output
+        assert "2 pending orders" in result.output
+        # Open trades come first, then pending orders.
+        assert result.output.index("#6368") < result.output.index("#7001")
+
+    def test_no_pending_section_when_none(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self._invoke(monkeypatch, FakeFullClient(open_trades=[_open_trade()]))
+        assert result.exit_code == 0, result.output
+        assert "pending" not in result.output
+
+    def test_note_flag_on_pending_order(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Notes live on the LIMIT_ORDER transaction until the order fills."""
+        conn = sqlite3.connect(str(pos_db))
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+            "VALUES ('7001', 'acct-1', 'LIMIT_ORDER', '2026-04-25T14:30:00Z', '{}')"
+        )
+        txn_id = conn.execute(
+            "SELECT id FROM transactions WHERE oanda_id='7001'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO notes (transaction_id, body) VALUES (?, 'Waiting')",
+            (txn_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        fake = FakeFullClient(pending_orders=[_pending_order(order_id="7001")])
+        result = self._invoke(monkeypatch, fake)
+        assert "[note]" in result.output
+
+    def test_quote_failure_omits_market_price(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(pending_orders=[_pending_order()])
+
+        def _fail(instrument: str, home_currency: str = "USD") -> PriceQuote:
+            raise RuntimeError("no price")
+
+        fake.get_price = _fail  # type: ignore[method-assign]
+        result = self._invoke(monkeypatch, fake)
+        assert result.exit_code == 0, result.output
+        assert "#7001" in result.output
+        assert "market:" not in result.output
+
+    def test_pending_fetch_failure_warns_and_still_shows_trades(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(open_trades=[_open_trade()])
+
+        def _fail() -> list:
+            raise RuntimeError("Oanda unreachable")
+
+        fake.get_pending_orders = _fail  # type: ignore[method-assign]
+        result = self._invoke(monkeypatch, fake)
+        assert result.exit_code == 0, result.output
+        assert "#6368" in result.output
+        assert "could not fetch pending orders" in result.output + result.stderr
 
 
 # ---------------------------------------------------------------------------

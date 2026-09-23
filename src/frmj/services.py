@@ -403,32 +403,55 @@ def execute_post_limit(
 
 @dataclass(frozen=True, slots=True)
 class PositionsView:
-    """Live open trades and account summary for the ``positions`` command."""
+    """Live open trades, pending entry orders, and account summary for the
+    ``positions`` command.
+
+    ``quotes`` holds one live quote per instrument with an open trade or a
+    pending order. ``pending_orders`` is ``None`` (with ``pending_error``
+    set) when the pending-orders fetch failed, so the caller can say so
+    rather than implying there are none.
+    """
 
     trades: list[OpenTrade]
     summary: AccountSummary
-    quote_to_home: dict[str, Decimal]
+    quotes: dict[str, PriceQuote]
     financing_rates: dict[str, FinancingRate]
+    pending_orders: list[PendingOrder] | None
+    pending_error: str | None
 
 
 def fetch_positions_view(client: OandaClient) -> PositionsView:
-    """Fetch open trades, account summary, and one live quote + financing rate
-    per open instrument (so the caller can show projected dollar P/L at each
-    exit level and the estimated daily financing charge for each position).
+    """Fetch open trades, pending entry orders, account summary, one live
+    quote per instrument, and financing rates for open instruments (so the
+    caller can show projected dollar P/L at each exit level, the estimated
+    daily financing charge for each position, and how far each pending
+    order is from the market).
 
-    The per-instrument quote and financing-rate fetches are best-effort: a
-    failed fetch just means that instrument's trades display without a
-    projected-P/L or financing figure, rather than failing the whole command.
+    Everything after the trades and summary is best-effort: a failed quote
+    or financing fetch just means that instrument displays without those
+    figures, and a failed pending-orders fetch is reported in
+    ``pending_error``, rather than failing the whole command.
     """
     trades = client.get_open_trades()
     summary = client.get_account_summary()
 
-    instruments = {trade.instrument for trade in trades}
+    pending_orders: list[PendingOrder] | None
+    pending_error: str | None = None
+    try:
+        pending_orders = client.get_pending_orders()
+    except Exception as exc:
+        pending_orders = None
+        pending_error = str(exc)
 
-    quote_to_home: dict[str, Decimal] = {}
-    for instrument in instruments:
+    instruments = {trade.instrument for trade in trades}
+    # Pending orders need a quote too (to show the current price), but not a
+    # financing rate — they aren't paying financing yet.
+    quote_instruments = instruments | {o.instrument for o in pending_orders or []}
+
+    quotes: dict[str, PriceQuote] = {}
+    for instrument in quote_instruments:
         try:
-            quote_to_home[instrument] = client.get_price(instrument).quote_to_home
+            quotes[instrument] = client.get_price(instrument)
         except Exception:
             pass
 
@@ -443,8 +466,10 @@ def fetch_positions_view(client: OandaClient) -> PositionsView:
     return PositionsView(
         trades=trades,
         summary=summary,
-        quote_to_home=quote_to_home,
+        quotes=quotes,
         financing_rates=financing_rates,
+        pending_orders=pending_orders,
+        pending_error=pending_error,
     )
 
 
