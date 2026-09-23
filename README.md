@@ -239,6 +239,8 @@ frmj stats
 
 Output includes: win rate, average P/L, total P/L, best/worst trade, breakdowns by instrument, weekday, hour (UTC), and tag, and a total financing paid/earned breakdown by instrument.
 
+![Example frmj stats output](docs/frmj_stats.png)
+
 ### `frmj journal`
 
 Display recent transactions with any attached notes and tags. Auto-syncs before displaying. Only the active account's transactions are shown unless `--all-accounts` is given.
