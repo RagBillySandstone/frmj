@@ -221,7 +221,7 @@ class MaxTradesExceeded(Exception):
 
 class ScaleInForbidden(Exception):
     """Raised when ``scale_in`` is ``NEVER`` and the target instrument already
-    has at least one open ticket.
+    has at least one open ticket or pending entry order.
 
     Distinct from ``MaxTradesExceeded`` because the user-facing remediation is
     different: scale-in failures suggest "close the existing ticket first or
@@ -315,6 +315,7 @@ def evaluate_trade(
     open_tickets_on_instrument: int,
     available_margin: Decimal,
     equity: Decimal,
+    pending_orders_on_instrument: int = 0,
 ) -> SizingDecision:
     """Decide how much capital to deploy for a proposed trade.
 
@@ -336,6 +337,11 @@ def evaluate_trade(
         equity: Total account equity (NAV), in account currency. Also from
             Oanda. Used as the basis for ``safety_reserve_pct`` and for the
             ``PERCENT_OF_EQUITY`` strategy.
+        pending_orders_on_instrument: How many unfilled entry orders (limit,
+            stop, ...) target the same instrument. Counted alongside
+            ``open_tickets_on_instrument`` for the scale-in check, since a
+            pending order becomes another ticket on the instrument once it
+            fills. Defaults to 0.
 
     Returns:
         A ``SizingDecision`` containing the recommended capital to deploy and
@@ -343,7 +349,7 @@ def evaluate_trade(
 
     Raises:
         ScaleInForbidden: scale_in is ``NEVER`` and the instrument already
-            has at least one open ticket.
+            has at least one open ticket or pending order.
         MaxTradesExceeded: ``open_trades >= max_open_trades`` under
             ``HARD_BLOCK`` mode.
         ValueError: on negative inputs.
@@ -353,7 +359,11 @@ def evaluate_trade(
     # Catch obviously-bad inputs before doing anything else. These would
     # almost always indicate a bug in the service layer (e.g., a failed Oanda
     # call returning -1), so a loud ValueError is the right response.
-    if open_trades < 0 or open_tickets_on_instrument < 0:
+    if (
+        open_trades < 0
+        or open_tickets_on_instrument < 0
+        or (pending_orders_on_instrument < 0)
+    ):
         raise ValueError("trade counts must be >= 0")
     if available_margin < Decimal(0) or equity < Decimal(0):
         raise ValueError("money values must be >= 0")
@@ -369,18 +379,23 @@ def evaluate_trade(
     # failure: telling the user "you can't scale in" is more actionable than
     # the generic "you're at the cap". A user with a NEVER policy who is also
     # at the cap should hear about scale-in first.
-    if open_tickets_on_instrument > 0:
+    if open_tickets_on_instrument > 0 or pending_orders_on_instrument > 0:
+        # Name open tickets and pending orders separately, so the user knows
+        # whether to look in ``frmj positions`` or at their pending orders.
+        existing_parts: list[str] = []
+        if open_tickets_on_instrument > 0:
+            existing_parts.append(f"{open_tickets_on_instrument} open ticket(s)")
+        if pending_orders_on_instrument > 0:
+            existing_parts.append(f"{pending_orders_on_instrument} pending order(s)")
+        existing = " and ".join(existing_parts)
+
         if config.scale_in is ScaleInPolicy.NEVER:
             # Hard rejection — let the service layer translate to a CLI prompt.
             raise ScaleInForbidden(
-                f"instrument already has {open_tickets_on_instrument} "
-                f"open ticket(s); scale_in policy is NEVER"
+                f"instrument already has {existing}; scale_in policy is NEVER"
             )
         if config.scale_in is ScaleInPolicy.WARN:
-            warnings.append(
-                f"scaling in: instrument already has "
-                f"{open_tickets_on_instrument} open ticket(s)"
-            )
+            warnings.append(f"scaling in: instrument already has {existing}")
         # ScaleInPolicy.ALLOW: silent fall-through, no warning.
 
     # ----- Max-trades cap -----------------------------------------------------

@@ -170,6 +170,54 @@ class TestScaleIn:
         )
         assert d.warnings == ()
 
+    def test_never_raises_when_instrument_has_pending_order(self) -> None:
+        """A pending entry order on the instrument counts as a scale-in."""
+        with pytest.raises(ScaleInForbidden, match=r"1 pending order\(s\)"):
+            evaluate_trade(
+                config=_cfg(scale_in=ScaleInPolicy.NEVER),
+                open_trades=2,
+                open_tickets_on_instrument=0,
+                pending_orders_on_instrument=1,
+                available_margin=Decimal("5000"),
+                equity=Decimal("10000"),
+            )
+
+    def test_message_names_open_and_pending_separately(self) -> None:
+        d = evaluate_trade(
+            config=_cfg(scale_in=ScaleInPolicy.WARN),
+            open_trades=2,
+            open_tickets_on_instrument=1,
+            pending_orders_on_instrument=2,
+            available_margin=Decimal("5000"),
+            equity=Decimal("10000"),
+        )
+        assert d.warnings == (
+            "scaling in: instrument already has 1 open ticket(s) and "
+            "2 pending order(s)",
+        )
+
+    def test_open_ticket_only_message_omits_pending(self) -> None:
+        with pytest.raises(ScaleInForbidden) as exc_info:
+            evaluate_trade(
+                config=_cfg(scale_in=ScaleInPolicy.NEVER),
+                open_trades=2,
+                open_tickets_on_instrument=1,
+                available_margin=Decimal("5000"),
+                equity=Decimal("10000"),
+            )
+        assert "pending" not in str(exc_info.value)
+
+    def test_negative_pending_count_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            evaluate_trade(
+                config=_cfg(),
+                open_trades=0,
+                open_tickets_on_instrument=0,
+                pending_orders_on_instrument=-1,
+                available_margin=Decimal("5000"),
+                equity=Decimal("10000"),
+            )
+
 
 class TestMaxTradesEnforcement:
     def test_hard_block_raises_at_cap(self) -> None:

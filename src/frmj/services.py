@@ -179,7 +179,8 @@ def plan_account_sizing(
     multi-account trade flows. Pending entry orders are treated as already
     filled: each counts toward the open-trade cap and the correlation check,
     and their estimated margin is deducted from available margin (see
-    ``AccountContext``). The scale-in check still looks at open tickets only.
+    ``AccountContext``), and pending orders on *instrument* count toward the
+    scale-in check.
 
     Raises ``MaxTradesExceeded`` or ``ScaleInForbidden`` (from
     ``evaluate_trade``), ``CorrelatedPositionForbidden`` (from
@@ -199,6 +200,9 @@ def plan_account_sizing(
         open_tickets_on_instrument=account.open_tickets_on_instrument,
         available_margin=available_margin,
         equity=account.summary.nav,
+        pending_orders_on_instrument=sum(
+            1 for o in account.pending_orders if o.instrument == instrument
+        ),
     )
     # Correlation looks at open trades and pending orders together, since a
     # pending order becomes the same directional exposure once it fills.

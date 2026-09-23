@@ -782,6 +782,19 @@ class TestTradePendingOrders:
         assert result.exit_code == 1
         assert "Cannot trade" in result.output + result.stderr
 
+    def test_pending_order_on_same_instrument_blocks_scale_in(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Default scale_in=never refuses a trade on an instrument with a
+        pending order, naming the pending order in the error."""
+        fake = FakeFullClient(pending_orders=[_pending_order(instrument="EUR_USD")])
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
+        result = runner.invoke(app, ["trade", "EUR_USD", "long"])
+        assert result.exit_code == 1
+        assert "1 pending order(s)" in result.output + result.stderr
+
     def test_correlated_pending_order_warns(
         self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
