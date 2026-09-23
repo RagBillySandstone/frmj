@@ -243,7 +243,8 @@ def _save_trade_plan(
     """Persist the intended TP/SL for a fill transaction if either side was set.
 
     For a limit order that hasn't filled yet, *fill_oanda_id* is the
-    LIMIT_ORDER transaction that created it.
+    LIMIT_ORDER transaction that created it; sync moves the plan to the
+    ORDER_FILL once the order fills.
 
     Silent no-op when neither TP nor SL was specified, or when the fill
     transaction is not yet in the local DB (post-fill sync may have failed).

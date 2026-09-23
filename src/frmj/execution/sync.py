@@ -14,6 +14,10 @@ the persistence schema (``persistence/schema.py``).  It is responsible for:
     We separate each batch into parent-first, children-second before writing.
   * Cursor management — after a successful ingest we write (or advance) the
     ``sync_cursors`` row so the next incremental sync knows where to resume.
+  * Entry-order journal linking — notes, tags, and the trade plan attached
+    to a pending entry order (e.g. by ``frmj trade --limit``) move to that
+    order's ORDER_FILL when the fill is ingested, since stats and the
+    journal key everything on the fill. See ``_move_order_journal_to_fill``.
 
 Three public entry points
 --------------------------
@@ -46,6 +50,7 @@ Design notes
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -152,6 +157,63 @@ def _resolve_parent_id(
     return row[0] if row else None
 
 
+# Transaction types that create a pending entry order. An ORDER_FILL whose
+# ``orderID`` names one of these is that order filling.
+_ENTRY_ORDER_TXN_TYPES: tuple[str, ...] = (
+    "LIMIT_ORDER",
+    "STOP_ORDER",
+    "MARKET_IF_TOUCHED_ORDER",
+)
+
+
+def _move_order_journal_to_fill(
+    conn: sqlite3.Connection,
+    account_id: str,
+    fill_raw_json: str,
+    fill_id: int,
+) -> None:
+    """Move an entry order's notes, tags, and trade plan onto its fill.
+
+    A limit order has no fill when it is placed, so ``frmj trade --limit``
+    attaches the entry's journal to the order's LIMIT_ORDER transaction.
+    When the ORDER_FILL for that order arrives (its ``orderID`` is the
+    order transaction's ID), everything is re-pointed at the fill (row
+    *fill_id*), where stats and the journal look for it.
+
+    Only entry-order transactions are considered, so notes a user put on
+    anything else an ORDER_FILL can reference (a market order, a TP/SL
+    order) stay where they are. If an order fills in parts, the first
+    fill ingested takes the journal and later fills get nothing.
+
+    Runs inside the caller's batch; does not commit.
+    """
+    # Unparseable JSON or a fill with no orderID (e.g. CSV imports) has
+    # nothing to link, and must not abort the sync.
+    try:
+        order_oanda_id = json.loads(fill_raw_json).get("orderID")
+    except (ValueError, AttributeError):
+        return
+    if order_oanda_id is None:
+        return
+
+    placeholders = ", ".join("?" for _ in _ENTRY_ORDER_TXN_TYPES)
+    order_row = conn.execute(
+        "SELECT id FROM transactions "
+        f"WHERE account_id = ? AND oanda_id = ? AND type IN ({placeholders})",
+        (account_id, str(order_oanda_id), *_ENTRY_ORDER_TXN_TYPES),
+    ).fetchone()
+    if order_row is None:
+        return
+
+    # The fill row was just inserted, so it has no notes/tags/plan of its own
+    # and the UNIQUE constraints on tags and trade_plans can't collide.
+    for table in ("notes", "tags", "trade_plans"):
+        conn.execute(
+            f"UPDATE {table} SET transaction_id = ? WHERE transaction_id = ?",
+            (fill_id, order_row[0]),
+        )
+
+
 def _ingest_rows(
     conn: sqlite3.Connection,
     rows: list[TransactionRow],
@@ -169,6 +231,11 @@ def _ingest_rows(
     Duplicate rows (same ``account_id`` + ``oanda_id``) are skipped via the
     unique index rather than raising — this makes re-sync idempotent.
 
+    Each newly inserted ORDER_FILL then takes over its entry order's
+    journal, if any (``_move_order_journal_to_fill``). This runs after the
+    whole batch is inserted so an order and its fill in the same batch
+    still link.
+
     We do NOT commit inside this function.  The caller commits once the whole
     batch is written, giving atomic batch semantics.
     """
@@ -182,6 +249,8 @@ def _ingest_rows(
 
     ingested = 0
     skipped = 0
+    # (row, synthetic id) for each ORDER_FILL inserted in this batch.
+    new_fills: list[tuple[TransactionRow, int]] = []
 
     for row in parents + children:
         # Resolve parent FK (None for the vast majority of rows).
@@ -211,11 +280,18 @@ def _ingest_rows(
             assert cur.lastrowid is not None
             page_index[row.oanda_id] = cur.lastrowid
             ingested += 1
+            if row.type == "ORDER_FILL":
+                new_fills.append((row, cur.lastrowid))
         except sqlite3.IntegrityError:
             # Unique constraint violation — row already in the database from a
             # previous sync run.  Skip silently; don't update page_index (the
             # existing row's synthetic id is already in the DB if needed).
             skipped += 1
+
+    for fill_row, fill_id in new_fills:
+        _move_order_journal_to_fill(
+            conn, fill_row.account_id, fill_row.raw_json, fill_id
+        )
 
     return ingested, skipped
 

@@ -20,11 +20,13 @@ TestFakeClientProtocol   — sanity-check that FakeClient satisfies the Protocol
 TestSyncCold             — full-history ingestion, cursor writing, deduplication
 TestSyncIncremental      — cursor reading, delta ingestion, no-new-rows case
 TestParentChildLinking   — DAILY_FINANCING parent/child FK resolution
+TestEntryOrderJournal    — notes/tags/plan move from an entry order to its fill
 TestSyncCsv              — CSV import: ingestion, dedup, forward-only cursor
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -434,6 +436,118 @@ def _csv_row(oanda_id: str, time: str = "2026-02-03 00:00:00 UTC") -> str:
 def _write_csv(path: Path, *rows: str) -> Path:
     path.write_text("\n".join((_CSV_HEADER, *rows)), encoding="utf-8")
     return path
+
+
+def _txn_id(conn: sqlite3.Connection, oanda_id: str) -> int:
+    return conn.execute(
+        "SELECT id FROM transactions WHERE oanda_id = ?", (oanda_id,)
+    ).fetchone()[0]
+
+
+def _journal_owner(conn: sqlite3.Connection, table: str) -> list[str]:
+    """Oanda IDs of the transactions that *table*'s rows point at."""
+    return [
+        r[0]
+        for r in conn.execute(
+            f"SELECT t.oanda_id FROM {table} x "
+            "JOIN transactions t ON x.transaction_id = t.id ORDER BY x.id"
+        ).fetchall()
+    ]
+
+
+def _fill(oanda_id: str, order_id: str, **kwargs: str) -> TransactionRow:
+    return _row(
+        oanda_id,
+        raw_json=json.dumps({"type": "ORDER_FILL", "orderID": order_id}),
+        **kwargs,
+    )
+
+
+class TestEntryOrderJournal:
+    """When a pending entry order fills, its journal moves to the ORDER_FILL."""
+
+    def _seed_order_with_journal(
+        self, db: sqlite3.Connection, order_id: str = "100", type_: str = "LIMIT_ORDER"
+    ) -> None:
+        """Sync an order transaction and attach a note, tag, and plan to it."""
+        client = FakeClient("acct-1", responses=[[_row(order_id, type_=type_)]])
+        sync_incremental(db, client)
+        txn = _txn_id(db, order_id)
+        db.execute("INSERT INTO notes (transaction_id, body) VALUES (?, 'n')", (txn,))
+        db.execute("INSERT INTO tags (transaction_id, tag) VALUES (?, 't')", (txn,))
+        db.execute(
+            "INSERT INTO trade_plans (transaction_id, tp_price, sl_price) "
+            "VALUES (?, '1.1', '1.0')",
+            (txn,),
+        )
+        db.commit()
+
+    def test_fill_in_later_sync_takes_over_journal(
+        self, db: sqlite3.Connection
+    ) -> None:
+        self._seed_order_with_journal(db)
+        client = FakeClient("acct-1", responses=[[_fill("105", "100")]])
+        sync_incremental(db, client)
+        assert _journal_owner(db, "notes") == ["105"]
+        assert _journal_owner(db, "tags") == ["105"]
+        assert _journal_owner(db, "trade_plans") == ["105"]
+
+    @pytest.mark.parametrize("type_", ["STOP_ORDER", "MARKET_IF_TOUCHED_ORDER"])
+    def test_other_entry_order_types_link_too(
+        self, db: sqlite3.Connection, type_: str
+    ) -> None:
+        self._seed_order_with_journal(db, type_=type_)
+        sync_incremental(db, FakeClient("acct-1", responses=[[_fill("105", "100")]]))
+        assert _journal_owner(db, "notes") == ["105"]
+
+    def test_non_entry_order_journal_stays_put(self, db: sqlite3.Connection) -> None:
+        """A note on a TP order must not move to the fill that closes the trade."""
+        self._seed_order_with_journal(db, type_="TAKE_PROFIT_ORDER")
+        sync_incremental(db, FakeClient("acct-1", responses=[[_fill("105", "100")]]))
+        assert _journal_owner(db, "notes") == ["100"]
+        assert _journal_owner(db, "trade_plans") == ["100"]
+
+    def test_fill_for_other_order_leaves_journal(self, db: sqlite3.Connection) -> None:
+        self._seed_order_with_journal(db)
+        sync_incremental(db, FakeClient("acct-1", responses=[[_fill("105", "999")]]))
+        assert _journal_owner(db, "notes") == ["100"]
+
+    def test_same_order_id_on_other_account_not_linked(
+        self, db: sqlite3.Connection
+    ) -> None:
+        self._seed_order_with_journal(db)
+        other = FakeClient(
+            "acct-2", responses=[[_fill("105", "100", account_id="acct-2")]]
+        )
+        sync_incremental(db, other)
+        assert _journal_owner(db, "notes") == ["100"]
+
+    def test_second_partial_fill_does_not_steal_journal(
+        self, db: sqlite3.Connection
+    ) -> None:
+        self._seed_order_with_journal(db)
+        sync_incremental(db, FakeClient("acct-1", responses=[[_fill("105", "100")]]))
+        sync_incremental(db, FakeClient("acct-1", responses=[[_fill("110", "100")]]))
+        assert _journal_owner(db, "notes") == ["105"]
+        assert _journal_owner(db, "trade_plans") == ["105"]
+
+    def test_resynced_duplicate_fill_is_harmless(self, db: sqlite3.Connection) -> None:
+        self._seed_order_with_journal(db)
+        sync_incremental(db, FakeClient("acct-1", responses=[[_fill("105", "100")]]))
+        sync_cold(db, FakeClient("acct-1", responses=[[_fill("105", "100")]]))
+        assert _journal_owner(db, "notes") == ["105"]
+
+    def test_fill_without_order_id_or_bad_json_is_ignored(
+        self, db: sqlite3.Connection
+    ) -> None:
+        self._seed_order_with_journal(db)
+        client = FakeClient(
+            "acct-1",
+            responses=[[_row("105", raw_json="{}"), _row("106", raw_json="not json")]],
+        )
+        result = sync_incremental(db, client)
+        assert result.rows_ingested == 2
+        assert _journal_owner(db, "notes") == ["100"]
 
 
 class TestSyncCsv:
