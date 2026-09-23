@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from decimal import Decimal
 
 import httpx
@@ -39,6 +40,7 @@ from frmj.domain.risk import (
     ScaleInForbidden,
 )
 from frmj.domain.sizing import Direction
+from frmj.execution.oanda import OandaClient, OrderFill
 
 # ---------------------------------------------------------------------------
 # trade command
@@ -477,6 +479,19 @@ def trade(
             conn.close()
             return
 
+    _report_market_fill(conn, client, fill, tp_price, sl_price)
+    _prompt_note_and_tags(conn, client.account_id, fill.transaction_id)
+    conn.close()
+
+
+def _report_market_fill(
+    conn: sqlite3.Connection,
+    client: OandaClient,
+    fill: OrderFill,
+    tp_price: Decimal | None,
+    sl_price: Decimal | None,
+) -> None:
+    """Report a market fill, attach TP/SL, sync, and save the trade plan."""
     typer.echo(
         f"Order filled at {fill.fill_price} — transaction #{fill.transaction_id}"
     )
@@ -519,40 +534,48 @@ def trade(
             f"[sync] Warning: post-fill sync failed — {post_fill.sync_error}", err=True
         )
 
-    # --- Optional entry note and tags ----------------------------------------
-    # Resolve the fill's synthetic DB id once; used for both note and tags.
-    fill_row = conn.execute(
+
+def _prompt_note_and_tags(
+    conn: sqlite3.Connection, account_id: str, journal_oanda_id: str
+) -> None:
+    """Prompt for an optional entry note and tags and attach them to the
+    transaction *journal_oanda_id* (a fill, or a pending limit order's
+    LIMIT_ORDER transaction).
+
+    If that transaction isn't in the local DB yet (post-order sync failed),
+    nothing is saved and the user is told how to add them later.
+    """
+    # Resolve the transaction's synthetic DB id once; used for note and tags.
+    txn_row = conn.execute(
         "SELECT id FROM transactions WHERE oanda_id = ? AND account_id = ?",
-        (fill.transaction_id, client.account_id),
+        (journal_oanda_id, account_id),
     ).fetchone()
 
     note_text = typer.prompt("Add a note (Enter to skip)", default="").strip()
     if note_text:
-        if fill_row:
+        if txn_row:
             conn.execute(
                 "INSERT INTO notes (transaction_id, body) VALUES (?, ?)",
-                (fill_row["id"], note_text),
+                (txn_row["id"], note_text),
             )
             conn.commit()
             typer.echo("Note saved.")
         else:
             typer.echo(
-                "Note not saved: fill transaction not yet in local DB. "
+                "Note not saved: transaction not yet in local DB. "
                 "Run 'frmj sync' then add the note manually.",
                 err=True,
             )
 
     tags_raw = typer.prompt("Tags (space-separated, Enter to skip)", default="").strip()
-    if tags_raw and fill_row:
-        attached = _attach_tags(conn, fill_row["id"], tags_raw.split())
+    if tags_raw and txn_row:
+        attached = _attach_tags(conn, txn_row["id"], tags_raw.split())
         label = "tag" if attached == 1 else "tags"
         if attached:
             typer.echo(f"{attached} {label} saved.")
-    elif tags_raw and not fill_row:
+    elif tags_raw and not txn_row:
         typer.echo(
-            "Tags not saved: fill transaction not yet in local DB. "
+            "Tags not saved: transaction not yet in local DB. "
             "Run 'frmj sync' then add tags with 'frmj tag'.",
             err=True,
         )
-
-    conn.close()
