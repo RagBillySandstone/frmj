@@ -134,6 +134,8 @@ frmj sync --account funded        # sync a non-active account
 
 Show all open trades with live P/L, margin, TP/SL levels, and an estimated daily financing charge (in home currency, colored green/red — not the raw annualized rate), plus an account summary footer.
 
+Pending entry orders (limit, stop, and market-if-touched — e.g. from `frmj trade --limit`) are listed in their own section below the open trades, with their price, units, time in force, TP/SL, and the current market price on the side they would fill against (ask for a long, bid for a short). Cancelling a pending order is done in Oanda's own interface for now.
+
 ```sh
 frmj positions
 ```
@@ -175,6 +177,7 @@ frmj trade AUD_USD long --dry-run    # show plan only; no order placed
 frmj trade --resume                  # execute a previously saved draft plan
 frmj trade EUR_USD long --multi my-props   # fan the same trade out to a saved account group
 frmj trade EUR_USD long --account funded   # trade a non-active account
+frmj trade EUR_USD long --limit      # place a GTC limit entry order instead of a market order
 ```
 
 The flow:
@@ -186,8 +189,8 @@ The flow:
 5. Prompts for take-profit and stop-loss (pips or `%` return-on-margin).
 6. Displays exit prices, projected P/L, and R:R ratio.
 7. Confirms before placing the order (`y` / `n` / `e` to re-enter TP/SL).
-8. Places a market order; on failure, prompts to retry, save the draft, or abort.
-9. Attaches TP/SL to the open trade on Oanda.
+8. Places a market order (or a limit order with `--limit`, see below); on failure, prompts to retry, save the draft, or abort.
+9. Attaches TP/SL to the open trade on Oanda (a limit order carries them instead).
 10. Syncs the fill into the local journal.
 11. Prompts for an optional note and tags.
 
@@ -201,6 +204,16 @@ The flow:
 If the account being traded (the active account, or `--account NAME`) is a live account and live mode is not enabled, the `trade` command exits with a clear error before placing any order.
 
 If the order placement request times out or fails, the plan can be saved (`s`) and resumed later with `frmj trade --resume`. The saved plan records the account it was planned for, and `--resume` places the order on that account even if the active account has since changed. `--account` cannot be combined with `--resume` or `--multi`.
+
+**`--limit`** (`-l`) places a GTC limit entry order instead of a market order. After the risk check, the current bid/ask is shown and you're prompted for the entry:
+
+| Input | Meaning |
+|---|---|
+| `15` or `15p` | 15 pips better than the market — below the ask for a long, above the bid for a short |
+| `@1.0950` | the limit price itself |
+| `0.5%` | 0.5% of the current price (a percent of *price*, not of margin as for TP/SL) |
+
+A price that would fill immediately (at or above the ask for a long, at or below the bid for a short) is rejected and re-prompted. TP/SL, R:R, and financing in the plan are computed at the limit price; the unit count is sized at current conversion rates. TP/SL are sent with the order and Oanda applies them when it fills, so there is no separate attach step. The entry's note, tags, and TP/SL plan are stored against the pending order and move to its fill on the next `frmj sync` after it fills. If Oanda fills the order the moment it arrives (the market crossed the price first), it is reported as filled and journaled on the fill directly. A saved draft remembers the limit price, so `--resume` places it as a limit order again. `--limit` cannot be combined with `--resume` or `--multi`.
 
 **`--multi GROUP`** places the same trade on every account in a saved group (see `frmj account group` below) instead of just the active account. Risk, sizing, and correlation are evaluated independently per account (each has its own NAV and open positions); the instrument and TP/SL choice are shared, and a single confirmation covers the whole group. Not supported together with `--resume`.
 
@@ -333,6 +346,8 @@ Three sizing strategies are supported:
 
 All strategies respect `safety_reserve_pct`: that fraction of equity is subtracted from available margin before any formula is applied.
 
+**Pending entry orders** (limit, stop, market-if-touched) are treated as if they had already filled, for market and limit trades alike: each one counts toward `N` and the `max_open_trades` cap, its estimated margin at current prices is subtracted from available margin before sizing, and it counts for the `scale_in` and correlation checks. Oanda sets aside no margin for a pending order, so without this a new trade could leave too little margin for it to fill. The trade plan shows them next to open trades, e.g. `Open trades: 2 / 6 (+1 pending)`.
+
 
 ---
 
@@ -353,8 +368,8 @@ Account IDs and active account selection are managed via `frmj account`, not `fr
 | `max_open_trades` | Yes | — | Maximum concurrent open tickets (e.g. `6`) |
 | `risk_strategy` | No | `remaining_margin_fraction` | Sizing strategy (see Risk Model) |
 | `blocking_mode` | No | `hard_block` | `hard_block` or `warning_only` at the trade cap |
-| `scale_in` | No | `never` | `never`, `warn`, or `allow` for same-instrument adds |
-| `correlation_blocking_mode` | No | `warning_only` | `hard_block` or `warning_only` for correlated open positions |
+| `scale_in` | No | `never` | `never`, `warn`, or `allow` for same-instrument adds (an open ticket or pending order on the instrument) |
+| `correlation_blocking_mode` | No | `warning_only` | `hard_block` or `warning_only` for correlated open positions or pending orders |
 | `safety_reserve_pct` | No | `0` | Fraction of equity to never deploy, e.g. `0.10` for 10% |
 | `percent_of_equity` | Conditional | — | Required when `risk_strategy = percent_of_equity` |
 | `fixed_dollar` | Conditional | — | Required when `risk_strategy = fixed_dollar` |
@@ -408,7 +423,7 @@ SQLite at `~/.local/share/frmj/frmj.db` (or `$FRMJ_DB_PATH`). WAL mode. Foreign 
 | `transactions` | Append-only Oanda event ledger. Stores full raw JSON alongside parsed index columns. |
 | `notes` | Free-text notes attached to transactions. |
 | `tags` | Short labels attached to transactions; used in journal filters and stats breakdowns. |
-| `trade_plans` | Intended TP/SL prices recorded at order time; shown in `journal` alongside fills. |
+| `trade_plans` | Intended TP/SL prices recorded at order time; shown in `journal` alongside fills. For a limit order the plan (and any notes/tags) sits on the pending order's transaction until sync moves it to the fill. |
 | `sync_cursors` | One row per account; tracks the last ingested Oanda transaction ID for incremental sync. |
 | `config` | Flat key/value store for all runtime configuration, including `active_account` and `live_mode`. |
 
