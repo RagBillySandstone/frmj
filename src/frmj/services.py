@@ -204,12 +204,12 @@ def plan_account_sizing(
             1 for o in account.pending_orders if o.instrument == instrument
         ),
     )
-    # Correlation looks at open trades and pending orders together, since a
-    # pending order becomes the same directional exposure once it fills.
-    open_positions = [(t.instrument, t.direction) for t in account.open_trades]
-    open_positions += [(o.instrument, o.direction) for o in account.pending_orders]
+    # Correlation checks pending orders too, since a pending order becomes
+    # the same directional exposure once it fills; they're passed separately
+    # so the warning can say "pending" rather than "open".
     correlation_warnings = evaluate_correlation(
-        open_positions=open_positions,
+        open_positions=[(t.instrument, t.direction) for t in account.open_trades],
+        pending_positions=[(o.instrument, o.direction) for o in account.pending_orders],
         new_instrument=instrument,
         new_direction=direction,
         blocking_mode=risk_config.correlation_blocking_mode,

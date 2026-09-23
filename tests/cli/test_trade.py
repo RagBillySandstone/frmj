@@ -807,7 +807,10 @@ class TestTradePendingOrders:
         )
         result = runner.invoke(app, ["trade", "EUR_USD", "long"], input="n\n")
         assert result.exit_code == 0, result.output
-        assert "shares USD exposure" in result.output + result.stderr
+        assert (
+            "shares USD exposure with pending GBP_USD LONG"
+            in result.output + result.stderr
+        )
         assert "Order cancelled" in result.output + result.stderr
 
     def test_pending_order_fetch_failure_exits_1(

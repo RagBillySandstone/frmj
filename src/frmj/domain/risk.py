@@ -246,12 +246,16 @@ class CorrelatedPositionForbidden(Exception):
 
 @dataclass(frozen=True, slots=True)
 class CorrelatedPosition:
-    """One open position that shares same-sign currency exposure with a
-    proposed new trade — see ``find_correlated_positions``."""
+    """One open position or pending entry order that shares same-sign
+    currency exposure with a proposed new trade — see
+    ``find_correlated_positions``."""
 
     instrument: str
     direction: str  # "LONG" or "SHORT", matching OpenTrade.direction
     shared_currency: str
+    # True when the match is an unfilled pending order rather than an open
+    # ticket, so the warning can say "pending" instead of "open".
+    pending: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +510,7 @@ def find_correlated_positions(
     open_positions: Sequence[tuple[str, str]],
     new_instrument: str,
     new_direction: Direction,
+    pending_positions: Sequence[tuple[str, str]] = (),
 ) -> tuple[CorrelatedPosition, ...]:
     """Find open positions that share same-sign currency exposure with a
     proposed new trade.
@@ -516,17 +521,27 @@ def find_correlated_positions(
             ``OpenTrade.direction``).
         new_instrument: Instrument of the proposed new trade.
         new_direction: Direction of the proposed new trade.
+        pending_positions: ``(instrument, direction)`` pairs for pending
+            entry orders, checked the same way as open positions (a pending
+            order becomes the same exposure once it fills). Matches from
+            here are flagged ``pending=True``. Defaults to none.
 
     Returns:
-        One ``CorrelatedPosition`` per open position that shares a same-sign
-        currency with the new trade. Same-instrument positions are skipped —
-        that overlap is ``ScaleInPolicy``'s job, not this check's.
+        One ``CorrelatedPosition`` per open position or pending order that
+        shares a same-sign currency with the new trade, open positions
+        first. Same-instrument positions are skipped — that overlap is
+        ``ScaleInPolicy``'s job, not this check's.
     """
 
     new_exposure = _currency_exposure(new_instrument, new_direction)
 
+    # Tag each candidate with whether it is pending, then scan them all in
+    # one pass so open and pending positions follow identical rules.
+    candidates = [(inst, d, False) for inst, d in open_positions]
+    candidates += [(inst, d, True) for inst, d in pending_positions]
+
     matches: list[CorrelatedPosition] = []
-    for instrument, direction_str in open_positions:
+    for instrument, direction_str, pending in candidates:
         if instrument == new_instrument:
             continue
         open_exposure = _currency_exposure(instrument, Direction[direction_str])
@@ -537,6 +552,7 @@ def find_correlated_positions(
                         instrument=instrument,
                         direction=direction_str,
                         shared_currency=currency,
+                        pending=pending,
                     )
                 )
                 # One flagged currency per open position is enough; a pair can
@@ -553,6 +569,7 @@ def evaluate_correlation(
     new_instrument: str,
     new_direction: Direction,
     blocking_mode: BlockingMode,
+    pending_positions: Sequence[tuple[str, str]] = (),
 ) -> tuple[str, ...]:
     """Check a proposed trade for shared currency exposure with open positions.
 
@@ -562,10 +579,12 @@ def evaluate_correlation(
         new_instrument: Instrument of the proposed new trade.
         new_direction: Direction of the proposed new trade.
         blocking_mode: ``HARD_BLOCK`` raises instead of warning.
+        pending_positions: ``(instrument, direction)`` pairs for pending
+            entry orders, as in ``find_correlated_positions``.
 
     Returns:
-        Human-readable warning strings, one per correlated open position.
-        Empty if none found.
+        Human-readable warning strings, one per correlated open position or
+        pending order ("open"/"pending" says which). Empty if none found.
 
     Raises:
         CorrelatedPositionForbidden: matches were found and ``blocking_mode``
@@ -576,6 +595,7 @@ def evaluate_correlation(
         open_positions=open_positions,
         new_instrument=new_instrument,
         new_direction=new_direction,
+        pending_positions=pending_positions,
     )
     if not matches:
         return ()
@@ -583,7 +603,8 @@ def evaluate_correlation(
     new_direction_label = new_direction.name  # "LONG" or "SHORT"
     messages = tuple(
         f"{new_instrument} {new_direction_label} shares {match.shared_currency} "
-        f"exposure with open {match.instrument} {match.direction} — this "
+        f"exposure with {'pending' if match.pending else 'open'} "
+        f"{match.instrument} {match.direction} — this "
         f"doubles your {match.shared_currency} risk"
         for match in matches
     )

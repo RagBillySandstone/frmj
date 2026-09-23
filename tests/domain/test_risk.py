@@ -428,3 +428,54 @@ class TestCorrelation:
                 new_direction=Direction.LONG,
                 blocking_mode=BlockingMode.HARD_BLOCK,
             )
+
+    def test_pending_position_is_detected_and_flagged(self) -> None:
+        matches = find_correlated_positions(
+            open_positions=[],
+            pending_positions=[("GBP_USD", "LONG")],
+            new_instrument="EUR_USD",
+            new_direction=Direction.LONG,
+        )
+        assert len(matches) == 1
+        assert matches[0].instrument == "GBP_USD"
+        assert matches[0].pending is True
+
+    def test_open_position_is_not_flagged_pending(self) -> None:
+        matches = find_correlated_positions(
+            open_positions=[("GBP_USD", "LONG")],
+            new_instrument="EUR_USD",
+            new_direction=Direction.LONG,
+        )
+        assert matches[0].pending is False
+
+    def test_pending_same_instrument_is_excluded(self) -> None:
+        """Same-instrument pending orders are scale-in's job too."""
+        matches = find_correlated_positions(
+            open_positions=[],
+            pending_positions=[("EUR_USD", "LONG")],
+            new_instrument="EUR_USD",
+            new_direction=Direction.LONG,
+        )
+        assert matches == ()
+
+    def test_messages_say_open_or_pending(self) -> None:
+        messages = evaluate_correlation(
+            open_positions=[("GBP_USD", "LONG")],
+            pending_positions=[("AUD_USD", "LONG")],
+            new_instrument="EUR_USD",
+            new_direction=Direction.LONG,
+            blocking_mode=BlockingMode.WARNING_ONLY,
+        )
+        assert len(messages) == 2
+        assert "with open GBP_USD LONG" in messages[0]
+        assert "with pending AUD_USD LONG" in messages[1]
+
+    def test_hard_block_raises_for_pending_only(self) -> None:
+        with pytest.raises(CorrelatedPositionForbidden, match="pending GBP_USD"):
+            evaluate_correlation(
+                open_positions=[],
+                pending_positions=[("GBP_USD", "LONG")],
+                new_instrument="EUR_USD",
+                new_direction=Direction.LONG,
+                blocking_mode=BlockingMode.HARD_BLOCK,
+            )
