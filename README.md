@@ -237,7 +237,7 @@ Show trade performance statistics from the local journal. Auto-syncs before disp
 frmj stats
 ```
 
-Output includes: win rate, average P/L, total P/L, best/worst trade, breakdowns by instrument, weekday, hour (UTC), and tag, and a total financing paid/earned breakdown by instrument.
+Output includes: win rate, average P/L, total P/L, total financing, and best/worst trade; breakdowns by direction (long/short), instrument, instrument & direction (omitted when every pair was only traded one way), weekday (fixed UTC+10 AEST, no DST), hour (local timezone), and tag; and financing paid/earned by instrument. The weekday and hour tables show each bucket twice: by close time and by open time.
 
 ![Example frmj stats output](docs/frmj_stats.png)
 
