@@ -43,6 +43,7 @@ from frmj.domain.sizing import (
     PriceQuote,
     UnitsCalc,
     compute_units,
+    margin_per_unit,
 )
 from frmj.execution.oanda import (
     AccountSummary,
@@ -50,6 +51,7 @@ from frmj.execution.oanda import (
     OandaClient,
     OpenTrade,
     OrderFill,
+    PendingOrder,
 )
 from frmj.execution.sync import sync_incremental
 
@@ -93,22 +95,64 @@ def fetch_instrument_context(client: OandaClient, instrument: str) -> Instrument
 
 @dataclass(frozen=True, slots=True)
 class AccountContext:
-    """Live account state needed to risk-check and size a trade for one account."""
+    """Live account state needed to risk-check and size a trade for one account.
+
+    ``pending_orders`` are the account's unfilled entry orders (limit, stop,
+    market-if-touched). The risk model treats each one as if it had already
+    filled: it counts toward the open-trade cap and the correlation check,
+    and ``pending_margin`` — its estimated margin at current prices — is
+    deducted from available margin before sizing. Oanda itself reserves no
+    margin for a pending order, so without this deduction a trade sized now
+    could leave too little margin for the order to fill later.
+    """
 
     summary: AccountSummary
     open_tickets_on_instrument: int
     open_trades: list[OpenTrade]
+    pending_orders: list[PendingOrder]
+    pending_margin: Decimal
+
+
+def _estimate_pending_margin(
+    client: OandaClient, pending_orders: list[PendingOrder]
+) -> Decimal:
+    """Estimate the margin *pending_orders* would use if they all filled now.
+
+    Uses the same formula as unit sizing (``units * margin_rate *
+    base_to_home``), with each instrument's current margin rate and
+    base-to-home conversion — one spec and one quote fetch per distinct
+    instrument. This is an estimate: the real margin is set at fill time.
+    Fetch errors propagate, since silently treating a pending order as
+    margin-free would over-size the new trade.
+    """
+    total = Decimal(0)
+    # Cache the per-unit margin by instrument so several pending orders on
+    # the same instrument cost only one spec/quote round trip.
+    per_unit_by_instrument: dict[str, Decimal] = {}
+    for order in pending_orders:
+        per_unit = per_unit_by_instrument.get(order.instrument)
+        if per_unit is None:
+            spec = client.get_instrument(order.instrument)
+            quote = client.get_price(order.instrument)
+            per_unit = margin_per_unit(spec, quote.base_to_home)
+            per_unit_by_instrument[order.instrument] = per_unit
+        total += Decimal(order.units) * per_unit
+    return total
 
 
 def fetch_account_context(client: OandaClient, instrument: str) -> AccountContext:
-    """Fetch one account's summary, open-ticket count on *instrument*, and
-    open trades — the account-specific state needed to risk-check and size a
-    trade on this account.
+    """Fetch one account's summary, open-ticket count on *instrument*, open
+    trades, and pending entry orders (with their estimated margin) — the
+    account-specific state needed to risk-check and size a trade on this
+    account.
     """
+    pending_orders = client.get_pending_orders()
     return AccountContext(
         summary=client.get_account_summary(),
         open_tickets_on_instrument=client.get_open_tickets_on_instrument(instrument),
         open_trades=client.get_open_trades(),
+        pending_orders=pending_orders,
+        pending_margin=_estimate_pending_margin(client, pending_orders),
     )
 
 
@@ -132,7 +176,10 @@ def plan_account_sizing(
     and unit sizing for one account's leg of a trade on *instrument*.
 
     This is the one per-account planning step shared by the single- and
-    multi-account trade flows.
+    multi-account trade flows. Pending entry orders are treated as already
+    filled: each counts toward the open-trade cap and the correlation check,
+    and their estimated margin is deducted from available margin (see
+    ``AccountContext``). The scale-in check still looks at open tickets only.
 
     Raises ``MaxTradesExceeded`` or ``ScaleInForbidden`` (from
     ``evaluate_trade``), ``CorrelatedPositionForbidden`` (from
@@ -141,15 +188,24 @@ def plan_account_sizing(
     callers should catch these and surface them as user-facing errors rather
     than tracebacks.
     """
+    # Pending orders reserve a slot and margin as if already filled; clamp at
+    # zero since the estimate can exceed what Oanda currently reports free.
+    available_margin = max(
+        Decimal(0), account.summary.margin_available - account.pending_margin
+    )
     sizing_decision = evaluate_trade(
         config=risk_config,
-        open_trades=account.summary.open_trade_count,
+        open_trades=account.summary.open_trade_count + len(account.pending_orders),
         open_tickets_on_instrument=account.open_tickets_on_instrument,
-        available_margin=account.summary.margin_available,
+        available_margin=available_margin,
         equity=account.summary.nav,
     )
+    # Correlation looks at open trades and pending orders together, since a
+    # pending order becomes the same directional exposure once it fills.
+    open_positions = [(t.instrument, t.direction) for t in account.open_trades]
+    open_positions += [(o.instrument, o.direction) for o in account.pending_orders]
     correlation_warnings = evaluate_correlation(
-        open_positions=[(t.instrument, t.direction) for t in account.open_trades],
+        open_positions=open_positions,
         new_instrument=instrument,
         new_direction=direction,
         blocking_mode=risk_config.correlation_blocking_mode,

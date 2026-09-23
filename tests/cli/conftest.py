@@ -24,6 +24,7 @@ from frmj.execution.oanda import (
     FinancingRate,
     OpenTrade,
     OrderFill,
+    PendingOrder,
     TransactionRow,
 )
 
@@ -149,8 +150,13 @@ class FakeFullClient:
     financing_rates: list[FinancingRate] = field(default_factory=list)
     financing_should_fail: bool = False
 
+    pending_orders: list[PendingOrder] = field(default_factory=list)
+
     def get_open_trades(self) -> list[OpenTrade]:
         return self.open_trades
+
+    def get_pending_orders(self) -> list[PendingOrder]:
+        return self.pending_orders
 
     def get_financing_rates(self, instruments: list[str]) -> list[FinancingRate]:
         if self.financing_should_fail:
@@ -195,6 +201,27 @@ def _open_trade(
         take_profit_price=Decimal(tp_price) if tp_price else None,
         stop_loss_price=Decimal(sl_price) if sl_price else None,
         open_time="2026-04-25T14:30:00.000000Z",
+    )
+
+
+def _pending_order(
+    order_id: str = "7001",
+    instrument: str = "EUR_USD",
+    direction: str = "LONG",
+    units: int = 10_000,
+    price: str = "1.09500",
+) -> PendingOrder:
+    return PendingOrder(
+        order_id=order_id,
+        order_type="LIMIT",
+        instrument=instrument,
+        direction=direction,
+        units=units,
+        price=Decimal(price),
+        time_in_force="GTC",
+        create_time="2026-04-25T14:30:00.000000Z",
+        take_profit_price=None,
+        stop_loss_price=None,
     )
 
 

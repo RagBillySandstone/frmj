@@ -21,7 +21,7 @@ from frmj.cli import app
 from frmj.domain.sizing import InstrumentSpec
 from frmj.execution.oanda import AccountSummary, FinancingRate, OrderFill
 
-from .conftest import FakeFullClient, _open_trade
+from .conftest import FakeFullClient, _open_trade, _pending_order
 
 runner = CliRunner()
 
@@ -710,6 +710,109 @@ class TestTradeErrors:
         )
         assert result.exit_code == 0, result.output
         assert "not yet in local DB" in result.output + result.stderr
+
+
+class TestTradePendingOrders:
+    """Pending entry orders are risk-checked as if they had already filled."""
+
+    @pytest.fixture()
+    def trade_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Practice DB with max_open_trades=5 (default hard_block mode)."""
+        path = tmp_path / "trade_pending.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        add_account(conn, "practice", "acct-1", is_practice=True)
+        set_active_account(conn, "practice")
+        set_config(conn, "max_open_trades", "5")
+        conn.close()
+        return path
+
+    def test_pending_order_counts_toward_n_and_reduces_margin(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One pending order moves N from 2 to 3 and deducts its margin.
+
+        FakeFullClient: 8000 margin available, 2 open trades; pending order
+        margin = 10,000 units * 0.02 * 1.10 = 220. Sizing is therefore
+        (8000 - 220) * 1/(5+1-3) = 2593.33.
+        """
+        fake = FakeFullClient(
+            pending_orders=[_pending_order(instrument="USD_JPY", direction="LONG")]
+        )
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="\n\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "2 / 5 (+1 pending)" in result.output
+        assert "Size fraction:   1/3" in result.output
+        assert "Capital at risk: $2,593.33" in result.output
+
+    def test_no_pending_orders_shows_no_pending_note(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without pending orders the plan is unchanged: 1/4 of 8000."""
+        fake = FakeFullClient()
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="\n\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "pending" not in result.output
+        assert "Capital at risk: $2,000.00" in result.output
+
+    def test_pending_orders_hit_max_trades_cap(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """2 open + 3 pending reaches max_open_trades=5, so HARD_BLOCK refuses."""
+        fake = FakeFullClient(
+            pending_orders=[
+                _pending_order(order_id=str(i), instrument="USD_JPY") for i in range(3)
+            ]
+        )
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
+        result = runner.invoke(app, ["trade", "EUR_USD", "long"])
+        assert result.exit_code == 1
+        assert "Cannot trade" in result.output + result.stderr
+
+    def test_correlated_pending_order_warns(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pending GBP_USD long shares USD exposure with a new EUR_USD long."""
+        fake = FakeFullClient(
+            pending_orders=[_pending_order(instrument="GBP_USD", direction="LONG")]
+        )
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
+        result = runner.invoke(app, ["trade", "EUR_USD", "long"], input="n\n")
+        assert result.exit_code == 0, result.output
+        assert "shares USD exposure" in result.output + result.stderr
+        assert "Order cancelled" in result.output + result.stderr
+
+    def test_pending_order_fetch_failure_exits_1(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed pendingOrders fetch aborts rather than sizing without it."""
+
+        def _fail() -> list:
+            raise RuntimeError("Oanda unreachable")
+
+        fake = FakeFullClient()
+        monkeypatch.setattr(fake, "get_pending_orders", _fail)
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
+        result = runner.invoke(app, ["trade", "EUR_USD", "long"])
+        assert result.exit_code == 1
+        assert "Error fetching market data" in result.output + result.stderr
 
 
 class TestTradeFailureAndRetry:

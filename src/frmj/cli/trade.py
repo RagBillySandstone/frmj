@@ -316,8 +316,12 @@ def trade(
         if account is not None:
             typer.echo(f"  Account:         {account}")
         typer.echo(f"  Account NAV:     ${summary.nav:,.2f}")
+        # Pending entry orders count toward the cap, so show them alongside.
+        pending_count = len(account_ctx.pending_orders)
+        pending_note = f" (+{pending_count} pending)" if pending_count else ""
         typer.echo(
-            f"  Open trades:     {summary.open_trade_count} / {risk_config.max_open_trades}"
+            f"  Open trades:     {summary.open_trade_count} / "
+            f"{risk_config.max_open_trades}{pending_note}"
         )
         if sizing_decision.size_fraction is not None:
             frac = sizing_decision.size_fraction
