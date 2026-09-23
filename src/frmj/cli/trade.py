@@ -28,19 +28,20 @@ from frmj.cli._completion import (
 from frmj.cli._display import _color_financing_pct, _daily_financing_home, _pl_str
 from frmj.cli._trade_helpers import (
     _display_exits,
+    _prompt_limit_price,
     _prompt_retry_save_abort,
     _prompt_tpsl,
 )
 from frmj.cli._trade_multi import _trade_multi_account
 from frmj.cli.journal import _attach_tags
-from frmj.domain.pricing import compute_exit_levels, pip_value_home
+from frmj.domain.pricing import compute_exit_levels, pip_size, pip_value_home
 from frmj.domain.risk import (
     CorrelatedPositionForbidden,
     MaxTradesExceeded,
     ScaleInForbidden,
 )
 from frmj.domain.sizing import Direction
-from frmj.execution.oanda import OandaClient, OrderFill
+from frmj.execution.oanda import LimitOrderResult, OandaClient, OrderFill
 
 # ---------------------------------------------------------------------------
 # trade command
@@ -113,6 +114,14 @@ def trade(
         help="Use this account instead of the active one (see 'frmj account list').",
         autocompletion=_complete_account_name,
     ),
+    limit: bool = typer.Option(
+        False,
+        "--limit",
+        "-l",
+        help="Place a GTC limit (pending) entry order instead of a market order. "
+        "Prompts for the entry as pips better than the market, @price, or a "
+        "percent of the current price.",
+    ),
 ) -> None:
     """Plan and (optionally) execute a trade."""
     # --- Validate argument combinations --------------------------------------
@@ -129,6 +138,13 @@ def trade(
             typer.echo(
                 "Error: --account is not used with --resume "
                 "(the saved plan records its account).",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if limit:
+            typer.echo(
+                "Error: --limit is not used with --resume "
+                "(the saved plan records its order type).",
                 err=True,
             )
             raise typer.Exit(1)
@@ -151,6 +167,9 @@ def trade(
     # behavior for a feature most trades never touch.
     if multi is not None and account is not None:
         typer.echo("Error: --account cannot be combined with --multi.", err=True)
+        raise typer.Exit(1)
+    if multi is not None and limit:
+        typer.echo("Error: --limit is not supported with --multi.", err=True)
         raise typer.Exit(1)
     if multi is not None:
         conn = get_db()
@@ -219,6 +238,8 @@ def trade(
     units_signed: int
     tp_price: Decimal | None
     sl_price: Decimal | None
+    # Set only for a limit order; None means a market order.
+    limit_price: Decimal | None = None
 
     if resume:
         # --- Resume path: skip planning; confirm the draft loaded above ------
@@ -229,6 +250,8 @@ def trade(
         units_signed = plan["units_signed"]
         tp_price = Decimal(plan["tp_price"]) if plan.get("tp_price") else None
         sl_price = Decimal(plan["sl_price"]) if plan.get("sl_price") else None
+        # Plans saved before --limit existed have no "limit_price": market.
+        limit_price = Decimal(plan["limit_price"]) if plan.get("limit_price") else None
 
         typer.echo(f"Resuming saved plan: {instrument} {direction_str.upper()}")
         typer.echo("─" * 40)
@@ -236,6 +259,8 @@ def trade(
             typer.echo(f"  Account:   {account}")
         direction_label = "LONG" if units_signed > 0 else "SHORT"
         typer.echo(f"  Units:     {abs(units_signed):,} ({direction_label})")
+        if limit_price is not None:
+            typer.echo(f"  Limit price: {limit_price} (GTC)")
         if tp_price is not None:
             typer.echo(f"  Take-profit: {tp_price}")
         if sl_price is not None:
@@ -309,7 +334,15 @@ def trade(
             conn.close()
             raise typer.Exit(0)
 
-        entry_price = quote.entry_price(direction)
+        # A limit order enters at the price the user picks; TP/SL, R:R, and
+        # financing below are all computed from it. Unit sizing above still
+        # used today's conversion rates, which is what the order is sized at.
+        if limit:
+            typer.echo(f"Market: bid {quote.bid} / ask {quote.ask}")
+            limit_price = _prompt_limit_price(direction, spec, quote)
+            entry_price = limit_price
+        else:
+            entry_price = quote.entry_price(direction)
 
         # Trade plan header
         typer.echo("")
@@ -335,7 +368,18 @@ def trade(
         typer.echo(f"  Units:   {units_calc.units:,}")
         typer.echo(f"  Margin:  ${units_calc.margin_used:,.2f}")
         typer.echo(f"  Pip:     ${pv:.2f}  ({pip_pct:.2f}% of margin)")
-        typer.echo(f"  Entry:   {entry_price} ({direction_str})")
+        if limit_price is not None:
+            # Show how far the limit sits from the side it would fill against.
+            reference_label = "ask" if direction is Direction.LONG else "bid"
+            distance_pips = abs(quote.entry_price(direction) - limit_price) / pip_size(
+                spec
+            )
+            typer.echo(
+                f"  Entry:   {entry_price} ({direction_str} limit, GTC — "
+                f"{distance_pips:.1f} pips from {reference_label})"
+            )
+        else:
+            typer.echo(f"  Entry:   {entry_price} ({direction_str})")
         typer.echo(f"  Unused:  ${units_calc.capital_unused:,.2f}")
         if financing_rate is not None:
             rate = (
@@ -439,9 +483,18 @@ def trade(
             raise typer.Exit(1)
 
     # --- Place order with retry loop -----------------------------------------
+    # Exactly one of these is set once the loop exits: a market order yields
+    # a fill, a limit order a LimitOrderResult (which may itself hold a fill).
+    fill: OrderFill | None = None
+    limit_result: LimitOrderResult | None = None
     while True:
         try:
-            fill = client.place_market_order(instrument, units_signed)
+            if limit_price is not None:
+                limit_result = client.place_limit_order(
+                    instrument, units_signed, limit_price, tp_price, sl_price
+                )
+            else:
+                fill = client.place_market_order(instrument, units_signed)
             clear_draft_plan()
             break
         except httpx.TimeoutException as exc:
@@ -465,6 +518,9 @@ def trade(
                     "units_signed": units_signed,
                     "tp_price": str(tp_price) if tp_price is not None else None,
                     "sl_price": str(sl_price) if sl_price is not None else None,
+                    "limit_price": (
+                        str(limit_price) if limit_price is not None else None
+                    ),
                     "account": (
                         target_account.name if target_account is not None else None
                     ),
@@ -479,9 +535,54 @@ def trade(
             conn.close()
             return
 
-    _report_market_fill(conn, client, fill, tp_price, sl_price)
-    _prompt_note_and_tags(conn, client.account_id, fill.transaction_id)
+    if limit_result is not None:
+        journal_oanda_id = _report_limit_order(
+            conn, client, limit_result, limit_price, tp_price, sl_price
+        )
+    else:
+        assert fill is not None
+        _report_market_fill(conn, client, fill, tp_price, sl_price)
+        journal_oanda_id = fill.transaction_id
+
+    _prompt_note_and_tags(conn, client.account_id, journal_oanda_id)
     conn.close()
+
+
+def _report_limit_order(
+    conn: sqlite3.Connection,
+    client: OandaClient,
+    result: LimitOrderResult,
+    limit_price: Decimal | None,
+    tp_price: Decimal | None,
+    sl_price: Decimal | None,
+) -> str:
+    """Report a placed limit order, sync it, and save its trade plan.
+
+    TP/SL went in the order body, so there is nothing to attach — Oanda
+    sets them when the order fills. Returns the Oanda transaction ID the
+    entry's note and tags should attach to (see ``execute_post_limit``).
+    """
+    if result.fill is not None:
+        # The market crossed the limit before the order arrived.
+        typer.echo(
+            f"Limit order filled immediately at {result.fill.fill_price} — "
+            f"transaction #{result.fill.transaction_id}"
+        )
+        when = "set"
+    else:
+        typer.echo(f"Limit order #{result.order_id} placed at {limit_price} (GTC)")
+        when = "will be set when it fills"
+    if tp_price is not None:
+        typer.echo(f"Take-profit {tp_price} {when}")
+    if sl_price is not None:
+        typer.echo(f"Stop-loss {sl_price} {when}")
+
+    post = services.execute_post_limit(conn, client, result, tp_price, sl_price)
+    if post.sync_error is not None:
+        typer.echo(
+            f"[sync] Warning: post-order sync failed — {post.sync_error}", err=True
+        )
+    return post.journal_oanda_id
 
 
 def _report_market_fill(

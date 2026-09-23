@@ -831,6 +831,287 @@ class TestTradePendingOrders:
         assert "Error fetching market data" in result.output + result.stderr
 
 
+class TestTradeLimit:
+    """``trade --limit`` places a GTC limit entry order.
+
+    FakeFullClient quotes EUR_USD at bid 1.09990 / ask 1.10010, so a long
+    limit 15 pips better than the market is 1.09860.
+    """
+
+    @pytest.fixture()
+    def trade_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "trade_limit_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        set_config(conn, "max_open_trades", "5")
+        conn.close()
+        return path
+
+    @pytest.fixture()
+    def plan_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Redirect draft plan writes to a temp path."""
+        path = tmp_path / "saved_plan.json"
+        monkeypatch.setattr("frmj.app._DRAFT_PLAN_PATH", path)
+        return path
+
+    def _invoke(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeFullClient,
+        inputs: str,
+        *extra: str,
+        direction: str = "long",
+    ) -> object:
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
+        return runner.invoke(
+            app, ["trade", "EUR_USD", direction, "--limit", *extra], input=inputs
+        )
+
+    def _seed_txn(self, db: Path, oanda_id: str, txn_type: str) -> None:
+        """Insert a transaction as if the post-order sync had brought it in."""
+        conn = get_db(path=db)
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+            "VALUES (?, 'acct-1', ?, '2026-04-29T12:00:00Z', '{}')",
+            (oanda_id, txn_type),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_dry_run_plans_at_limit_price(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Entry, TP, and SL are all computed from the limit price."""
+        fake = FakeFullClient()
+        # limit=15 pips, TP=50 pips, SL=30 pips
+        result = self._invoke(monkeypatch, fake, "15\n50\n30\n", "--dry-run")
+        assert result.exit_code == 0, result.output
+        assert "Market: bid 1.09990 / ask 1.10010" in result.output
+        assert "pips from ask" in result.output
+        assert "Entry:   1.09860 (long limit, GTC — 15.0 pips from ask)" in (
+            result.output
+        )
+        assert "TP: 1.10360" in result.output
+        assert "SL: 1.09560" in result.output
+        assert fake.limit_orders == []
+
+    def test_short_offset_measured_from_bid(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        result = self._invoke(
+            monkeypatch, fake, "15\n\n\n", "--dry-run", direction="short"
+        )
+        assert result.exit_code == 0, result.output
+        assert "Entry:   1.10140 (short limit, GTC — 15.0 pips from bid)" in (
+            result.output
+        )
+
+    @pytest.mark.parametrize(
+        "entry, expected",
+        [("@1.0950", "1.09500"), ("1%", "1.08910"), ("15p", "1.09860")],
+    )
+    def test_entry_formats(
+        self,
+        trade_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        entry: str,
+        expected: str,
+    ) -> None:
+        """@price is absolute; % is a percent of price (1.10010 * 0.99)."""
+        fake = FakeFullClient()
+        result = self._invoke(monkeypatch, fake, f"{entry}\n\n\n", "--dry-run")
+        assert result.exit_code == 0, result.output
+        assert f"Entry:   {expected} (long limit" in result.output
+
+    def test_limit_that_would_fill_immediately_reprompts(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        # @1.2 is above the ask for a long; "abc" isn't a number; then 15 pips.
+        result = self._invoke(monkeypatch, fake, "@1.2\nabc\n15\n\n\n", "--dry-run")
+        assert result.exit_code == 0, result.output
+        assert "would fill immediately" in result.output
+        assert "is not a number" in result.output
+        assert "Entry:   1.09860" in result.output
+
+    def test_places_limit_order_with_tpsl_on_fill(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """TP/SL go in the order; nothing is attached and no market order sent."""
+        fake = FakeFullClient()
+        # limit, TP, SL, confirm=y, note=skip, tags=skip
+        result = self._invoke(monkeypatch, fake, "15\n50\n30\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert len(fake.limit_orders) == 1
+        order = fake.limit_orders[0]
+        assert order["instrument"] == "EUR_USD"
+        assert order["units_signed"] > 0
+        assert order["price"] == Decimal("1.09860")
+        assert order["take_profit_price"] == Decimal("1.10360")
+        assert order["stop_loss_price"] == Decimal("1.09560")
+        assert fake.order_placed is False
+        assert fake.tp_attached is None
+        assert fake.sl_attached is None
+        assert "Limit order #88888 placed at 1.09860 (GTC)" in result.output
+        assert "Take-profit 1.10360 will be set when it fills" in result.output
+        assert "Stop-loss 1.09560 will be set when it fills" in result.output
+
+    def test_short_limit_sends_negative_units(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        result = self._invoke(monkeypatch, fake, "15\n\n\ny\n\n\n", direction="short")
+        assert result.exit_code == 0, result.output
+        assert fake.limit_orders[0]["units_signed"] < 0
+
+    def test_immediate_fill_reported_without_attaching(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(limit_fills_immediately=True)
+        result = self._invoke(monkeypatch, fake, "15\n50\n30\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert "Limit order filled immediately at 1.09860" in result.output
+        assert "Take-profit 1.10360 set" in result.output
+        assert fake.tp_attached is None
+        assert fake.sl_attached is None
+
+    def test_note_tags_and_plan_attach_to_limit_order_txn(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unfilled order's journal entries key on its LIMIT_ORDER txn."""
+        self._seed_txn(trade_db, "88888", "LIMIT_ORDER")
+        fake = FakeFullClient()
+        result = self._invoke(
+            monkeypatch, fake, "15\n50\n30\ny\nWaiting for pullback\npullback\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "Note saved." in result.output
+        assert "1 tag saved." in result.output
+
+        conn = get_db(path=trade_db)
+        txn_id = conn.execute(
+            "SELECT id FROM transactions WHERE oanda_id = '88888'"
+        ).fetchone()[0]
+        note = conn.execute(
+            "SELECT body FROM notes WHERE transaction_id = ?", (txn_id,)
+        ).fetchone()
+        tag = conn.execute(
+            "SELECT tag FROM tags WHERE transaction_id = ?", (txn_id,)
+        ).fetchone()
+        plan = conn.execute(
+            "SELECT tp_price, sl_price FROM trade_plans WHERE transaction_id = ?",
+            (txn_id,),
+        ).fetchone()
+        conn.close()
+        assert note[0] == "Waiting for pullback"
+        assert tag[0] == "pullback"
+        assert (plan["tp_price"], plan["sl_price"]) == ("1.10360", "1.09560")
+
+    def test_immediate_fill_journals_on_fill_txn(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An order that filled on arrival keys its journal on the ORDER_FILL."""
+        self._seed_txn(trade_db, "88888", "LIMIT_ORDER")
+        self._seed_txn(trade_db, "88889", "ORDER_FILL")
+        fake = FakeFullClient(limit_fills_immediately=True)
+        result = self._invoke(monkeypatch, fake, "15\n50\n30\ny\nFilled fast\n\n")
+        assert result.exit_code == 0, result.output
+
+        conn = get_db(path=trade_db)
+        row = conn.execute(
+            "SELECT t.oanda_id FROM notes n "
+            "JOIN transactions t ON n.transaction_id = t.id"
+        ).fetchone()
+        plan_row = conn.execute(
+            "SELECT t.oanda_id FROM trade_plans p "
+            "JOIN transactions t ON p.transaction_id = t.id"
+        ).fetchone()
+        conn.close()
+        assert row[0] == "88889"
+        assert plan_row[0] == "88889"
+
+    def test_note_not_saved_when_order_txn_missing(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        result = self._invoke(monkeypatch, fake, "15\n\n\ny\nsome note\n\n")
+        assert result.exit_code == 0, result.output
+        assert "not yet in local DB" in result.output + result.stderr
+
+    def test_post_order_sync_failure_warns(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(sync_should_fail=True)
+        result = self._invoke(monkeypatch, fake, "15\n\n\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert "post-order sync failed" in result.output + result.stderr
+
+    def test_failed_order_saves_limit_price_in_draft(
+        self, trade_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(limit_fail_count=1)
+        # limit, TP, SL, confirm=y, retry prompt=s
+        result = self._invoke(monkeypatch, fake, "15\n50\n30\ny\ns\n")
+        assert result.exit_code == 0, result.output
+        plan = json.loads(plan_file.read_text())
+        assert plan["limit_price"] == "1.09860"
+        assert plan["tp_price"] == "1.10360"
+
+    def test_retry_places_limit_order(
+        self, trade_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(limit_fail_count=1)
+        result = self._invoke(monkeypatch, fake, "15\n\n\ny\nr\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert len(fake.limit_orders) == 1
+
+    def test_resume_places_saved_limit_order(
+        self, trade_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plan_file.write_text(
+            json.dumps(
+                {
+                    "instrument": "EUR_USD",
+                    "direction": "long",
+                    "units_signed": 1000,
+                    "tp_price": "1.10360",
+                    "sl_price": None,
+                    "limit_price": "1.09860",
+                    "account": None,
+                }
+            )
+        )
+        fake = FakeFullClient()
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
+        result = runner.invoke(app, ["trade", "--resume"], input="y\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert "Limit price: 1.09860 (GTC)" in result.output
+        assert fake.limit_orders[0]["price"] == Decimal("1.09860")
+        assert fake.limit_orders[0]["take_profit_price"] == Decimal("1.10360")
+        assert fake.order_placed is False
+
+    def test_limit_with_resume_exits_1(self, trade_db: Path) -> None:
+        result = runner.invoke(app, ["trade", "--resume", "--limit"])
+        assert result.exit_code == 1
+        assert "--limit is not used with --resume" in result.output + result.stderr
+
+    def test_limit_with_multi_exits_1(self, trade_db: Path) -> None:
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--limit", "--multi", "grp"]
+        )
+        assert result.exit_code == 1
+        assert "--limit is not supported with --multi" in (
+            result.output + result.stderr
+        )
+
+
 class TestTradeFailureAndRetry:
     """Tests for the retry loop triggered when place_market_order raises."""
 

@@ -22,6 +22,7 @@ from frmj.execution.oanda import (
     AccountSummary,
     CloseFill,
     FinancingRate,
+    LimitOrderResult,
     OpenTrade,
     OrderFill,
     PendingOrder,
@@ -131,6 +132,44 @@ class FakeFullClient:
             units_filled=units_signed,
             trade_id="99999",
         )
+
+    # --- Limit orders -------------------------------------------------------
+    # Each placed limit order's arguments, in call order.
+    limit_orders: list[dict] = field(default_factory=list)
+    # Simulate the market crossing the limit before the order arrives.
+    limit_fills_immediately: bool = False
+    # Number of place_limit_order calls that raise before one succeeds.
+    limit_fail_count: int = 0
+
+    def place_limit_order(
+        self,
+        instrument: str,
+        units_signed: int,
+        price: Decimal,
+        take_profit_price: Decimal | None = None,
+        stop_loss_price: Decimal | None = None,
+    ) -> LimitOrderResult:
+        if self.limit_fail_count > 0:
+            self.limit_fail_count -= 1
+            raise RuntimeError("Network error")
+        self.limit_orders.append(
+            {
+                "instrument": instrument,
+                "units_signed": units_signed,
+                "price": price,
+                "take_profit_price": take_profit_price,
+                "stop_loss_price": stop_loss_price,
+            }
+        )
+        fill = None
+        if self.limit_fills_immediately:
+            fill = OrderFill(
+                transaction_id="88889",
+                fill_price=price,
+                units_filled=units_signed,
+                trade_id="88889",
+            )
+        return LimitOrderResult(order_id="88888", fill=fill)
 
     def attach_take_profit(self, trade_id: str, price: Decimal) -> str:
         if self.tp_should_fail:

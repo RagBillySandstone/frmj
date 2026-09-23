@@ -13,7 +13,7 @@ This is the split described in TODO item 6 ("Service layer extraction"):
 ``fetch_instrument_context``/``fetch_account_context`` + ``plan_account_sizing``
 cover the market-data and risk-check steps of the trade flow,
 ``execute_post_fill`` covers the TP/SL-attach + sync + persist steps after an
-order is placed, and ``fetch_positions_view`` / ``execute_close`` cover the
+order is placed (``execute_post_limit`` is its limit-order counterpart), and ``fetch_positions_view`` / ``execute_close`` cover the
 ``positions`` and ``close`` commands respectively. Order placement itself
 (with its retry/save/abort prompt) stays in ``cli.py`` because the retry
 decision is inherently interactive.
@@ -48,6 +48,7 @@ from frmj.domain.sizing import (
 from frmj.execution.oanda import (
     AccountSummary,
     FinancingRate,
+    LimitOrderResult,
     OandaClient,
     OpenTrade,
     OrderFill,
@@ -241,6 +242,9 @@ def _save_trade_plan(
 ) -> None:
     """Persist the intended TP/SL for a fill transaction if either side was set.
 
+    For a limit order that hasn't filled yet, *fill_oanda_id* is the
+    LIMIT_ORDER transaction that created it.
+
     Silent no-op when neither TP nor SL was specified, or when the fill
     transaction is not yet in the local DB (post-fill sync may have failed).
     Uses INSERT OR IGNORE so a duplicate call (e.g. from a retry) is harmless.
@@ -333,6 +337,59 @@ def execute_post_fill(
         tp_error=tp_error,
         sl_transaction_id=sl_transaction_id,
         sl_error=sl_error,
+        sync_rows_ingested=sync_rows_ingested,
+        sync_error=sync_error,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PostLimitResult:
+    """Outcome of syncing and persisting the trade plan after a limit order.
+
+    ``journal_oanda_id`` is the Oanda transaction the entry's note, tags, and
+    trade plan belong to: the ORDER_FILL when the order filled on arrival,
+    otherwise the LIMIT_ORDER transaction that created it (whose ID is the
+    order ID). As with ``PostFillResult``, a sync failure is reported here
+    rather than raised, since the order itself was accepted.
+    """
+
+    journal_oanda_id: str
+    sync_rows_ingested: int
+    sync_error: str | None
+
+
+def execute_post_limit(
+    conn: sqlite3.Connection,
+    client: OandaClient,
+    result: LimitOrderResult,
+    tp_price: Decimal | None,
+    sl_price: Decimal | None,
+) -> PostLimitResult:
+    """Sync a just-placed limit order into the local DB and persist its
+    trade plan.
+
+    Unlike ``execute_post_fill`` there is no TP/SL attach step: the limit
+    order carried TP/SL as ``takeProfitOnFill``/``stopLossOnFill``, so Oanda
+    applies them itself when the order fills — including an immediate fill.
+    Attaching them again would fail against the TP/SL Oanda already set.
+    """
+    # Key the journal on the fill if there is one; otherwise on the order.
+    journal_oanda_id = (
+        result.fill.transaction_id if result.fill is not None else result.order_id
+    )
+
+    sync_rows_ingested = 0
+    sync_error: str | None = None
+    try:
+        sync_result = sync_incremental(conn, client)
+        sync_rows_ingested = sync_result.rows_ingested
+    except Exception as exc:
+        sync_error = str(exc)
+
+    _save_trade_plan(conn, journal_oanda_id, client.account_id, tp_price, sl_price)
+
+    return PostLimitResult(
+        journal_oanda_id=journal_oanda_id,
         sync_rows_ingested=sync_rows_ingested,
         sync_error=sync_error,
     )
