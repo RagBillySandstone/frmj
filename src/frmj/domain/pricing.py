@@ -27,6 +27,11 @@ the given direction; signs in the output (P/L, return) are derived.
 
 This keeps the user-facing surface symmetric and avoids the "did I have to
 negate the SL?" foot-gun.
+
+The same "positive magnitude, direction supplies the sign" convention applies
+to limit-order entries (``LimitEntrySpec`` / ``compute_limit_price``): a pip
+or percent offset always means "this much better than the current price" —
+below the ask for a long, above the bid for a short.
 """
 
 from __future__ import annotations
@@ -352,3 +357,94 @@ def compute_exit_levels(
         return_on_margin_at_sl=rom_sl,
         warnings=tuple(warnings),
     )
+
+
+# ---------------------------------------------------------------------------
+# Limit-order entry price
+# ---------------------------------------------------------------------------
+
+
+class LimitEntryKind(Enum):
+    """How the user expressed a limit order's entry price."""
+
+    # Distance in pips from the current ask (long) or bid (short).
+    PIPS = "pips"
+    # Fraction of the current ask (long) or bid (short), e.g. 0.005 = 0.5%.
+    # Deliberately a percent of *price*, not of margin as for TP/SL.
+    PERCENT_OF_PRICE = "percent_of_price"
+    # The limit price itself.
+    PRICE = "price"
+
+
+@dataclass(frozen=True, slots=True)
+class LimitEntrySpec:
+    """A limit order's entry, as an offset from the market or an absolute price.
+
+    ``value`` is always positive. For ``PIPS`` and ``PERCENT_OF_PRICE`` it is
+    a magnitude and ``compute_limit_price`` supplies the sign from the
+    trade's direction; for ``PRICE`` it is the price itself.
+    """
+
+    kind: LimitEntryKind
+    value: Decimal
+
+    def __post_init__(self) -> None:
+        if self.value <= 0:
+            raise ValueError(
+                f"LimitEntrySpec.value must be positive; got {self.value!r}"
+            )
+
+
+def compute_limit_price(
+    *,
+    entry: LimitEntrySpec,
+    direction: Direction,
+    spec: InstrumentSpec,
+    quote: PriceQuote,
+) -> Decimal:
+    """Turn a ``LimitEntrySpec`` into a broker-legal limit price.
+
+    Offsets are measured from the side of the book the order would fill
+    against — the ask for a long, the bid for a short (``quote.entry_price``)
+    — and always move the price in the trader's favour: below the ask for a
+    long, above the bid for a short. The result is rounded to
+    ``spec.display_precision``, as Oanda requires.
+
+    Raises:
+        ValueError: if the (rounded) price would fill immediately — at or
+            above the ask for a long, at or below the bid for a short — or is
+            not positive. A limit that fills at once is really a market
+            order, and the user should place it as one deliberately.
+    """
+    reference = quote.entry_price(direction)
+    # -1 moves a long's limit below the ask; +1 moves a short's above the bid.
+    better_sign = Decimal(-1) if direction is Direction.LONG else Decimal(1)
+
+    # Convert the user's input into a raw (unrounded) price.
+    if entry.kind is LimitEntryKind.PIPS:
+        raw = reference + better_sign * entry.value * pip_size(spec)
+    elif entry.kind is LimitEntryKind.PERCENT_OF_PRICE:
+        raw = reference * (Decimal(1) + better_sign * entry.value)
+    elif entry.kind is LimitEntryKind.PRICE:
+        raw = entry.value
+    else:  # pragma: no cover - defensive against future enum additions
+        raise AssertionError(f"unknown limit entry kind: {entry.kind!r}")
+
+    # Round first, then validate: rounding a tiny offset can land the price
+    # back on the ask/bid, and the order must be judged on what is sent.
+    price = _quantize_price(raw, spec)
+    if price <= 0:
+        raise ValueError(f"limit price must be positive; got {price}")
+
+    # Reject a limit on the wrong side of the book: it would fill at once.
+    if direction is Direction.LONG and price >= quote.ask:
+        raise ValueError(
+            f"long limit {price} is at or above the ask {quote.ask} and would "
+            "fill immediately; place a market order instead"
+        )
+    if direction is Direction.SHORT and price <= quote.bid:
+        raise ValueError(
+            f"short limit {price} is at or below the bid {quote.bid} and would "
+            "fill immediately; place a market order instead"
+        )
+    return price

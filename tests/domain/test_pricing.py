@@ -24,9 +24,12 @@ from frmj.domain.pricing import (
     UNREALISTIC_PIP_THRESHOLD,
     UNREALISTIC_RETURN_THRESHOLD,
     ExitLevels,
+    LimitEntryKind,
+    LimitEntrySpec,
     TPSLKind,
     TPSLSpec,
     compute_exit_levels,
+    compute_limit_price,
     pip_size,
     pip_value_home,
 )
@@ -562,3 +565,94 @@ class TestPipValueHome:
     def test_always_positive(self) -> None:
         result = pip_value_home(1_000, _eur_usd_spec(), _eur_usd_quote())
         assert result > 0
+
+
+# ---------------------------------------------------------------------------
+# Limit-order entry price
+# ---------------------------------------------------------------------------
+#
+# _eur_usd_quote() has bid 1.0998 / ask 1.1002, so a long's offsets are
+# measured from 1.1002 and a short's from 1.0998.
+
+
+def _limit(
+    kind: LimitEntryKind,
+    value: str,
+    direction: Direction,
+    spec: InstrumentSpec | None = None,
+    quote: PriceQuote | None = None,
+) -> Decimal:
+    return compute_limit_price(
+        entry=LimitEntrySpec(kind=kind, value=Decimal(value)),
+        direction=direction,
+        spec=spec or _eur_usd_spec(),
+        quote=quote or _eur_usd_quote(),
+    )
+
+
+class TestLimitEntrySpecValidation:
+    @pytest.mark.parametrize("value", ["0", "-5"])
+    def test_non_positive_value_rejected(self, value: str) -> None:
+        with pytest.raises(ValueError):
+            LimitEntrySpec(kind=LimitEntryKind.PIPS, value=Decimal(value))
+
+
+class TestComputeLimitPrice:
+    def test_long_pips_below_ask(self) -> None:
+        assert _limit(LimitEntryKind.PIPS, "15", Direction.LONG) == Decimal("1.09870")
+
+    def test_short_pips_above_bid(self) -> None:
+        assert _limit(LimitEntryKind.PIPS, "15", Direction.SHORT) == Decimal("1.10130")
+
+    def test_long_percent_of_price(self) -> None:
+        # 1.1002 * 0.99 = 1.089198 -> rounded to 5 dp.
+        assert _limit(
+            LimitEntryKind.PERCENT_OF_PRICE, "0.01", Direction.LONG
+        ) == Decimal("1.08920")
+
+    def test_short_percent_of_price(self) -> None:
+        # 1.0998 * 1.01 = 1.110798 -> rounded to 5 dp.
+        assert _limit(
+            LimitEntryKind.PERCENT_OF_PRICE, "0.01", Direction.SHORT
+        ) == Decimal("1.11080")
+
+    def test_absolute_price_is_rounded(self) -> None:
+        assert _limit(LimitEntryKind.PRICE, "1.095004", Direction.LONG) == Decimal(
+            "1.09500"
+        )
+
+    def test_absolute_inside_spread_is_accepted(self) -> None:
+        """Below the ask is enough for a long, even if above the bid."""
+        assert _limit(LimitEntryKind.PRICE, "1.1000", Direction.LONG) == Decimal(
+            "1.10000"
+        )
+
+    def test_jpy_pair_uses_its_pip_size(self) -> None:
+        # ask 150.01 - 20 pips of 0.01 = 149.81
+        price = _limit(
+            LimitEntryKind.PIPS,
+            "20",
+            Direction.LONG,
+            spec=_usd_jpy_spec(),
+            quote=_usd_jpy_quote(),
+        )
+        assert price == Decimal("149.810")
+
+    @pytest.mark.parametrize("value", ["1.1002", "1.1100"])
+    def test_long_at_or_above_ask_rejected(self, value: str) -> None:
+        with pytest.raises(ValueError, match="fill immediately"):
+            _limit(LimitEntryKind.PRICE, value, Direction.LONG)
+
+    @pytest.mark.parametrize("value", ["1.0998", "1.0900"])
+    def test_short_at_or_below_bid_rejected(self, value: str) -> None:
+        with pytest.raises(ValueError, match="fill immediately"):
+            _limit(LimitEntryKind.PRICE, value, Direction.SHORT)
+
+    def test_offset_that_rounds_back_to_ask_rejected(self) -> None:
+        """0.001 pips is below the display precision, so it rounds to the ask."""
+        with pytest.raises(ValueError, match="fill immediately"):
+            _limit(LimitEntryKind.PIPS, "0.001", Direction.LONG)
+
+    def test_offset_past_zero_rejected(self) -> None:
+        with pytest.raises(ValueError, match="positive"):
+            _limit(LimitEntryKind.PIPS, "20000", Direction.LONG)
