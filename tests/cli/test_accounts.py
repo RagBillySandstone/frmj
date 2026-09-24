@@ -104,6 +104,18 @@ class TestAccountCommands:
         assert result.exit_code == 0, result.output
         assert "removed" in result.output
 
+    def test_account_remove_grouped_account_reports_groups(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Removing a grouped account succeeds and names the groups it left."""
+        monkeypatch.setattr("frmj.app.keyring.set_password", lambda s, u, p: None)
+        runner.invoke(app, ["account", "add", "to-del"], input="del-001\npractice\n")
+        runner.invoke(app, ["account", "group", "add", "props", "to-del"])
+        runner.invoke(app, ["account", "group", "add", "solo", "to-del"])
+        result = runner.invoke(app, ["account", "remove", "to-del"])
+        assert result.exit_code == 0, result.output
+        assert "Also removed from groups: props, solo" in result.output
+
     def test_account_remove_active_account_exits_1(self, db_path: Path) -> None:
         """Removing the currently active account is refused → exit 1."""
         result = runner.invoke(app, ["account", "remove", "practice"])
@@ -152,6 +164,16 @@ class TestAccountCommands:
         assert result.exit_code == 0, result.output
         assert "practice" in result.output
         assert "demo" in result.output
+
+    def test_account_rename_grouped_account(self, db_path: Path) -> None:
+        """Renaming a grouped account succeeds and the group follows."""
+        runner.invoke(app, ["account", "group", "add", "props", "practice"])
+        result = runner.invoke(app, ["account", "rename", "practice", "demo"])
+        assert result.exit_code == 0, result.output
+        shown = runner.invoke(app, ["account", "group", "show", "props"])
+        # Each member line starts with the name ("demo  [practice, acct-1]").
+        members = [ln.split()[0] for ln in shown.output.splitlines() if ln.strip()]
+        assert members == ["demo"]
 
     def test_account_rename_account_is_listed_under_new_name(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch

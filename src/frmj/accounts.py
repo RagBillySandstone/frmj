@@ -109,10 +109,22 @@ def remove_account(conn: sqlite3.Connection, name: str) -> bool:
     Returns ``True`` when a row was removed, ``False`` when *name* was not
     found.  Does not remove the OS keychain entry — the caller should call
     ``delete_account_token`` from ``app`` if a clean removal is wanted.
+
+    Also removes *name* from every account group, in the same transaction:
+    ``account_groups`` references ``accounts(name)`` with no ``ON DELETE``
+    action, so the profile row can't be deleted while memberships remain.
+    Callers wanting to report the affected groups should read them first
+    with ``list_groups_for_account``.
     """
+    # Memberships first, so the foreign key never points at a missing row.
+    conn.execute("DELETE FROM account_groups WHERE account_name = ?", (name,))
     cursor = conn.execute("DELETE FROM accounts WHERE name = ?", (name,))
+    if cursor.rowcount == 0:
+        # Nothing to remove — undo the (necessarily empty) membership delete.
+        conn.rollback()
+        return False
     conn.commit()
-    return cursor.rowcount > 0
+    return True
 
 
 def get_account_count(conn: sqlite3.Connection) -> int:
@@ -125,9 +137,10 @@ def rename_account(conn: sqlite3.Connection, old_name: str, new_name: str) -> bo
     """
     Rename the profile *old_name* to *new_name*.
 
-    Updates the ``accounts`` table and, when *old_name* is the active account,
-    atomically updates the ``active_account`` config key in the same
-    transaction — so the active pointer is never left dangling.
+    Updates the ``accounts`` table and, in the same transaction, the
+    account's group memberships and — when *old_name* is the active account —
+    the ``active_account`` config key, so nothing is left pointing at the old
+    name.
 
     Returns ``True`` when the rename succeeded, ``False`` when *old_name* was
     not found.  Raises ``sqlite3.IntegrityError`` when *new_name* already
@@ -137,10 +150,15 @@ def rename_account(conn: sqlite3.Connection, old_name: str, new_name: str) -> bo
     Does **not** touch the OS keychain — callers that need to migrate the
     stored token should call ``rename_account_token`` from ``app.py``.
     """
-    # Read current active name before modifying the accounts table so both
+    # Read current active name before modifying the accounts table so all
     # writes can be committed atomically.
     active_name = get_active_account_name(conn)
 
+    # account_groups references accounts(name) with no ON UPDATE action, so
+    # whichever of the two tables is updated first briefly violates the
+    # foreign key. Defer the check to COMMIT, by which point both agree.
+    # The pragma resets itself when the transaction ends.
+    conn.execute("PRAGMA defer_foreign_keys = ON")
     cursor = conn.execute(
         "UPDATE accounts SET name = ? WHERE name = ?",
         (new_name, old_name),
@@ -149,6 +167,10 @@ def rename_account(conn: sqlite3.Connection, old_name: str, new_name: str) -> bo
         # old_name did not exist — roll back any implicit transaction state.
         conn.rollback()
         return False
+    conn.execute(
+        "UPDATE account_groups SET account_name = ? WHERE account_name = ?",
+        (new_name, old_name),
+    )
 
     # Keep active_account config in sync when renaming the active profile.
     if active_name == old_name:
@@ -300,6 +322,16 @@ def list_group_names(conn: sqlite3.Connection) -> list[str]:
     """Return every distinct group name, alphabetically sorted."""
     rows = conn.execute(
         "SELECT DISTINCT group_name FROM account_groups ORDER BY group_name"
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
+def list_groups_for_account(conn: sqlite3.Connection, account_name: str) -> list[str]:
+    """Return the names of every group *account_name* belongs to, sorted."""
+    rows = conn.execute(
+        "SELECT group_name FROM account_groups WHERE account_name = ? "
+        "ORDER BY group_name",
+        (account_name,),
     ).fetchall()
     return [row[0] for row in rows]
 

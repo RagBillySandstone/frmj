@@ -14,6 +14,7 @@ from frmj.accounts import (
     list_accounts,
     list_group_members,
     list_group_names,
+    list_groups_for_account,
     remove_account,
     remove_group_member,
     rename_account,
@@ -173,7 +174,8 @@ def account_remove(
         ..., help="Account name to remove", autocompletion=_complete_account_name
     ),
 ) -> None:
-    """Remove an account profile (does not delete the associated token)."""
+    """Remove an account profile and its group memberships (does not delete
+    the associated token)."""
     conn = get_db()
     try:
         active_name = get_active_account_name(conn)
@@ -186,12 +188,17 @@ def account_remove(
             conn.close()
             raise typer.Exit(1)
 
+        # Read memberships before removing — remove_account deletes them.
+        groups = list_groups_for_account(conn, name)
         removed = remove_account(conn, name)
     finally:
         conn.close()
 
     if removed:
         typer.echo(f"Account '{name}' removed.")
+        if groups:
+            label = "group" if len(groups) == 1 else "groups"
+            typer.echo(f"Also removed from {label}: {', '.join(groups)}")
     else:
         typer.echo(f"Error: account '{name}' not found.", err=True)
         raise typer.Exit(1)
@@ -276,7 +283,8 @@ def account_rename(
             conn.close()
             raise typer.Exit(1)
 
-        # Rename in DB (accounts row + active_account config if applicable).
+        # Rename in DB (accounts row, group memberships, and active_account
+        # config if applicable).
         rename_account(conn, old_name, new_name)
     finally:
         conn.close()

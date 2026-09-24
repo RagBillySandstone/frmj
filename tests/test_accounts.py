@@ -27,6 +27,7 @@ from frmj.accounts import (
     list_accounts,
     list_group_members,
     list_group_names,
+    list_groups_for_account,
     remove_account,
     remove_group_member,
     rename_account,
@@ -133,6 +134,30 @@ class TestRemoveAccount:
         add_account(conn, "del", "d-acct", is_practice=False)
         remove_account(conn, "del")
         assert get_account(conn, "keep") is not None
+
+    def test_remove_grouped_account_drops_its_memberships(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """A grouped account can be removed; it leaves every group it was in,
+        and the other members stay."""
+        add_account(conn, "alpha", "a-id", is_practice=True)
+        add_account(conn, "beta", "b-id", is_practice=True)
+        add_group_member(conn, "props", "alpha")
+        add_group_member(conn, "props", "beta")
+        add_group_member(conn, "solo", "alpha")
+        assert remove_account(conn, "alpha") is True
+        assert get_account(conn, "alpha") is None
+        assert [m.name for m in list_group_members(conn, "props")] == ["beta"]
+        # A group whose only member was removed disappears.
+        assert list_group_names(conn) == ["props"]
+
+    def test_remove_nonexistent_leaves_other_memberships(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        add_account(conn, "alpha", "a-id", is_practice=True)
+        add_group_member(conn, "props", "alpha")
+        assert remove_account(conn, "ghost") is False
+        assert list_groups_for_account(conn, "alpha") == ["props"]
 
 
 class TestGetAccountCount:
@@ -462,6 +487,59 @@ class TestRenameAccount:
         set_active_account(conn, "active")
         rename_account(conn, "inactive", "renamed")
         assert get_active_account_name(conn) == "active"
+
+    def test_rename_grouped_account_moves_its_memberships(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """A grouped account can be renamed; its memberships follow it."""
+        add_account(conn, "alpha", "a-id", is_practice=True)
+        add_account(conn, "beta", "b-id", is_practice=True)
+        add_group_member(conn, "props", "alpha")
+        add_group_member(conn, "props", "beta")
+        add_group_member(conn, "solo", "alpha")
+        assert rename_account(conn, "alpha", "alpha2") is True
+        assert list_groups_for_account(conn, "alpha2") == ["props", "solo"]
+        assert list_groups_for_account(conn, "alpha") == []
+        assert [m.name for m in list_group_members(conn, "props")] == [
+            "alpha2",
+            "beta",
+        ]
+        # The deferred check passed at commit and nothing dangles.
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    def test_rename_does_not_leave_foreign_keys_deferred(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """defer_foreign_keys must reset at commit, so later writes on the same
+        connection are still checked immediately."""
+        add_account(conn, "alpha", "a-id", is_practice=True)
+        add_group_member(conn, "props", "alpha")
+        rename_account(conn, "alpha", "alpha2")
+        with pytest.raises(sqlite3.IntegrityError):
+            add_group_member(conn, "props", "ghost")
+
+    def test_rename_duplicate_name_leaves_memberships_intact(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        add_account(conn, "a", "a-id", is_practice=True)
+        add_account(conn, "b", "b-id", is_practice=True)
+        add_group_member(conn, "props", "a")
+        with pytest.raises(sqlite3.IntegrityError):
+            rename_account(conn, "a", "b")
+        conn.rollback()
+        assert list_groups_for_account(conn, "a") == ["props"]
+
+
+class TestListGroupsForAccount:
+    def test_lists_groups_sorted(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "alpha", "a-id", is_practice=True)
+        add_group_member(conn, "zeta", "alpha")
+        add_group_member(conn, "props", "alpha")
+        assert list_groups_for_account(conn, "alpha") == ["props", "zeta"]
+
+    def test_ungrouped_account_is_empty(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "alpha", "a-id", is_practice=True)
+        assert list_groups_for_account(conn, "alpha") == []
 
 
 # ---------------------------------------------------------------------------
