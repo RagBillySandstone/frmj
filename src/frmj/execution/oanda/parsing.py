@@ -157,7 +157,13 @@ def _parse_instrument_spec(instr: dict[str, Any]) -> InstrumentSpec:
     number of decimal places the API accepts for prices on this instrument.
     We need it to quantize TP/SL prices before submitting them; sending a
     price with more decimals than Oanda expects is rejected with a 400.
+
+    The trailing-stop distance bounds are optional in the payload; a missing
+    field leaves the bound as ``None`` (unchecked locally).
     """
+    # Read the optional trailing-stop bounds without assuming they exist.
+    min_trail = instr.get("minimumTrailingStopDistance")
+    max_trail = instr.get("maximumTrailingStopDistance")
     return InstrumentSpec(
         name=instr["name"],
         pip_location=int(instr["pipLocation"]),
@@ -165,6 +171,8 @@ def _parse_instrument_spec(instr: dict[str, Any]) -> InstrumentSpec:
         min_units=int(Decimal(instr["minimumTradeSize"])),
         units_increment=1,
         display_precision=int(instr["displayPrecision"]),
+        min_trailing_stop_distance=Decimal(min_trail) if min_trail else None,
+        max_trailing_stop_distance=Decimal(max_trail) if max_trail else None,
     )
 
 

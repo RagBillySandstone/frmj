@@ -82,6 +82,11 @@ class InstrumentSpec:
         pattern FX pairs follow — so it is carried separately. Prices we
         submit to Oanda (TP/SL) must be quantized to this precision or the
         order is rejected with a 400.
+    min_trailing_stop_distance / max_trailing_stop_distance:
+        Bounds, in *price units* (not pips), on the ``distance`` of a
+        trailing stop-loss order (Oanda's ``minimumTrailingStopDistance`` /
+        ``maximumTrailingStopDistance``). ``None`` means unknown: the bound
+        is not checked locally and Oanda remains the final judge.
     """
 
     name: str
@@ -90,6 +95,8 @@ class InstrumentSpec:
     min_units: int
     units_increment: int
     display_precision: int
+    min_trailing_stop_distance: Decimal | None = None
+    max_trailing_stop_distance: Decimal | None = None
 
     def __post_init__(self) -> None:
         # Cheap structural validation — catches typos in tests and bad data

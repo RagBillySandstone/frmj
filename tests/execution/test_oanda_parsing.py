@@ -183,6 +183,20 @@ class TestParseInstrumentSpec:
         )
         assert result.display_precision == 3
 
+    def test_trailing_stop_bounds_parsed(self) -> None:
+        payload = _instrument_payload()
+        payload["minimumTrailingStopDistance"] = "0.00050"
+        payload["maximumTrailingStopDistance"] = "1.00000"
+        result = _parse_instrument_spec(payload)
+        assert result.min_trailing_stop_distance == Decimal("0.00050")
+        assert result.max_trailing_stop_distance == Decimal("1.00000")
+
+    def test_trailing_stop_bounds_missing_are_none(self) -> None:
+        """Payloads without the bounds leave them unchecked, not zero."""
+        result = _parse_instrument_spec(_instrument_payload())
+        assert result.min_trailing_stop_distance is None
+        assert result.max_trailing_stop_distance is None
+
 
 # ---------------------------------------------------------------------------
 # _extract_bid_ask
