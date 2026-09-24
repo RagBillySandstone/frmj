@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
+from frmj.accounts import add_account, get_active_account_name, set_active_account
 from frmj.app import get_db, set_config
 from frmj.cli import app
 
@@ -35,7 +37,9 @@ class TestStatsCommand:
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
         monkeypatch.setattr(
             "frmj.cli.stats.get_client",
-            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+            lambda conn, account_name=None: FakeClient(
+                account_id="acct-1", responses=[[]]
+            ),
         )
         conn = get_db(path=path)
         set_config(conn, "account_id", "acct-1")
@@ -212,7 +216,9 @@ class TestStatsCommand:
         new_row = _row("9002")
         monkeypatch.setattr(
             "frmj.cli.stats.get_client",
-            lambda conn: FakeClient(account_id="acct-1", responses=[[new_row]]),
+            lambda conn, account_name=None: FakeClient(
+                account_id="acct-1", responses=[[new_row]]
+            ),
         )
         result = runner.invoke(app, ["stats"])
         assert result.exit_code == 0, result.output
@@ -251,7 +257,10 @@ class TestStatsCommand:
         conn = get_db(path=path)
         set_config(conn, "account_id", "acct-1")
         conn.close()
-        monkeypatch.setattr("frmj.cli.stats.get_client", lambda conn: ExplodingClient())
+        monkeypatch.setattr(
+            "frmj.cli.stats.get_client",
+            lambda conn, account_name=None: ExplodingClient(),
+        )
         result = runner.invoke(app, ["stats"])
         assert result.exit_code == 0, result.output
         assert "[sync] Warning: sync failed" in result.output + result.stderr
@@ -425,6 +434,140 @@ class TestStatsCommand:
         result = runner.invoke(app, ["stats"])
         assert result.exit_code == 0, result.output
         assert "Financing by instrument" not in result.output
+
+
+class TestStatsAccountScope:
+    """Stats default to the active account; ``--account`` picks another and
+    ``--all-accounts`` combines them."""
+
+    @pytest.fixture()
+    def scope_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Two accounts, each with one tagged closing fill and one financing
+        charge on a different instrument; ``main`` (acct-1) is active."""
+        path = tmp_path / "stats_scope.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        # Auto-sync is a no-op so only the seeded rows are counted.
+        monkeypatch.setattr(
+            "frmj.cli.stats.get_client",
+            lambda conn, account_name=None: FakeClient(
+                account_id="acct-1", responses=[[]]
+            ),
+        )
+        conn = get_db(path=path)
+        add_account(conn, "main", "acct-1", is_practice=True)
+        add_account(conn, "other", "acct-2", is_practice=True)
+        set_active_account(conn, "main")
+        seeds = [
+            ("acct-1", "EUR_USD", "30.00", "main-tag", "-1.25"),
+            ("acct-2", "GBP_JPY", "-70.00", "other-tag", "-4.50"),
+        ]
+        for account_id, instrument, pl, tag, financing in seeds:
+            # One closing fill (non-zero P/L) tagged with the account's tag.
+            cur = conn.execute(
+                "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json)"
+                " VALUES ('100', ?, 'ORDER_FILL', '2026-04-25T09:00:00Z', ?)",
+                (account_id, _closing_fill_json(instrument=instrument, pl=pl)),
+            )
+            conn.execute(
+                "INSERT INTO tags (transaction_id, tag) VALUES (?, ?)",
+                (cur.lastrowid, tag),
+            )
+            # One day's financing on the same instrument.
+            conn.execute(
+                "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json)"
+                " VALUES ('101', ?, 'DAILY_FINANCING', '2026-04-25T21:00:00Z', ?)",
+                (
+                    account_id,
+                    json.dumps(
+                        {
+                            "positionFinancings": [
+                                {"instrument": instrument, "financing": financing}
+                            ]
+                        }
+                    ),
+                ),
+            )
+        conn.commit()
+        conn.close()
+        return path
+
+    def test_default_counts_only_active_account(self, scope_db: Path) -> None:
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        assert "Account: main" in result.output
+        assert "(1 closed trades)" in result.output
+        assert "EUR_USD" in result.output
+        assert "GBP_JPY" not in result.output
+
+    def test_tags_and_financing_follow_scope(self, scope_db: Path) -> None:
+        """The tag and financing breakdowns are scoped too, not just fills."""
+        result = runner.invoke(app, ["stats"])
+        assert "main-tag" in result.output
+        assert "other-tag" not in result.output
+        assert "-$4.50" not in result.output
+
+    @pytest.mark.parametrize("flag", ["--account", "-a"])
+    def test_account_option_counts_only_named_account(
+        self, scope_db: Path, flag: str
+    ) -> None:
+        result = runner.invoke(app, ["stats", flag, "other"])
+        assert result.exit_code == 0, result.output
+        assert "Account: other" in result.output
+        assert "GBP_JPY" in result.output
+        assert "EUR_USD" not in result.output
+        assert "other-tag" in result.output
+        # The active account is untouched.
+        conn = get_db(path=scope_db)
+        assert get_active_account_name(conn) == "main"
+        conn.close()
+
+    def test_account_option_syncs_named_account(
+        self, scope_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The auto-sync targets the --account profile, not the active one."""
+        requested: list[str | None] = []
+
+        def _get_client(conn: object, account_name: str | None = None) -> object:
+            requested.append(account_name)
+            return FakeClient(account_id="acct-2", responses=[[]])
+
+        monkeypatch.setattr("frmj.cli.stats.get_client", _get_client)
+        result = runner.invoke(app, ["stats", "--account", "other"])
+        assert result.exit_code == 0, result.output
+        assert requested == ["other"]
+
+    @pytest.mark.parametrize("flag", ["--all-accounts", "-A"])
+    def test_all_accounts_combines_every_account(
+        self, scope_db: Path, flag: str
+    ) -> None:
+        result = runner.invoke(app, ["stats", flag])
+        assert result.exit_code == 0, result.output
+        assert "Accounts: all" in result.output
+        assert "(2 closed trades)" in result.output
+        assert "EUR_USD" in result.output
+        assert "GBP_JPY" in result.output
+
+    def test_no_active_account_combines_everything(self, scope_db: Path) -> None:
+        conn = get_db(path=scope_db)
+        conn.execute("DELETE FROM config WHERE key = 'active_account'")
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        assert "Accounts: all" in result.output
+        assert "(2 closed trades)" in result.output
+
+    def test_unknown_account_exits_1(self, scope_db: Path) -> None:
+        """A typo in --account fails instead of widening to every account."""
+        result = runner.invoke(app, ["stats", "--account", "ghost"])
+        assert result.exit_code == 1
+        assert "No account named 'ghost'" in result.output + result.stderr
+        assert "closed trades" not in result.output
+
+    def test_account_with_all_accounts_exits_1(self, scope_db: Path) -> None:
+        result = runner.invoke(app, ["stats", "--account", "other", "--all-accounts"])
+        assert result.exit_code == 1
+        assert "cannot be used together" in result.output + result.stderr
 
 
 # ---------------------------------------------------------------------------

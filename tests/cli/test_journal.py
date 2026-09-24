@@ -241,7 +241,8 @@ class TestTagCommand:
         conn.close()
 
         monkeypatch.setattr(
-            "frmj.cli.stats.get_client", lambda conn: FakeClient(account_id="acct-1")
+            "frmj.cli.stats.get_client",
+            lambda conn, account_name=None: FakeClient(account_id="acct-1"),
         )
         result = runner.invoke(app, ["stats"])
         assert result.exit_code == 0, result.output

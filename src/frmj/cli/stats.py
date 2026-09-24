@@ -8,8 +8,10 @@ from decimal import Decimal
 
 import typer
 
+from frmj.accounts import resolve_account
 from frmj.app import get_client, get_db
 from frmj.cli import app
+from frmj.cli._completion import _complete_account_name
 from frmj.cli._display import _color_pl_padded, _pl_visible_width
 from frmj.domain.analytics import (
     ClosedTrade,
@@ -29,12 +31,55 @@ from frmj.execution.sync import sync_incremental
 
 
 @app.command()
-def stats() -> None:
-    """Show trade performance statistics from the local journal."""
+def stats(
+    all_accounts: bool = typer.Option(
+        False,
+        "--all-accounts",
+        "-A",
+        help="Combine statistics from every account, not just the active one.",
+    ),
+    account_name: str | None = typer.Option(
+        None,
+        "--account",
+        "-a",
+        help="Use this account instead of the active one (see 'frmj account list').",
+        autocompletion=_complete_account_name,
+        show_default=False,
+    ),
+) -> None:
+    """Show trade performance statistics from the local journal.
+
+    By default only the active account's trades are counted; pass
+    ``--account NAME`` to report on another account instead, or
+    ``--all-accounts`` to combine every account in the local database.  When
+    no active account is configured there is nothing to scope to, so all
+    accounts are combined.
+    """
+    # The two scoping options contradict each other; refuse rather than
+    # silently letting one win.
+    if account_name is not None and all_accounts:
+        typer.echo(
+            "Error: --account and --all-accounts cannot be used together.", err=True
+        )
+        raise typer.Exit(1)
+
     conn = get_db()
 
+    # Resolve the scope locally (no token needed) so stats still work when
+    # the auto-sync below fails.  A typo in --account must fail here rather
+    # than fall through to combining every account.
+    account = None if all_accounts else resolve_account(conn, account_name)
+    if account is None and account_name is not None:
+        typer.echo(
+            f"Error: No account named '{account_name}'. List accounts with:\n"
+            "  frmj account list",
+            err=True,
+        )
+        conn.close()
+        raise typer.Exit(1)
+
     try:
-        client = get_client(conn)
+        client = get_client(conn, account_name)
         sync_result = sync_incremental(conn, client)
         if sync_result.rows_ingested:
             typer.echo(f"[sync] +{sync_result.rows_ingested} transactions")
@@ -42,6 +87,14 @@ def stats() -> None:
         typer.echo(f"[sync] Warning: {exc}", err=True)
     except Exception as exc:
         typer.echo(f"[sync] Warning: sync failed — {exc}", err=True)
+
+    # Every query below is limited to the resolved account, or unfiltered
+    # when combining all accounts.  Each query aliases the transactions
+    # table differently, so the column is qualified per query.
+    scope_params: tuple[str, ...] = (account.oanda_id,) if account else ()
+    fills_sql = " AND t.account_id = ?" if account else ""
+    tags_sql = " AND tx.account_id = ?" if account else ""
+    fin_sql = " AND account_id = ?" if account else ""
 
     try:
         rows = conn.execute(
@@ -61,6 +114,8 @@ def stats() -> None:
                     )
             WHERE t.type = 'ORDER_FILL'
             """
+            + fills_sql,
+            scope_params,
         ).fetchall()
         # Tag breakdown: for each tag, collect P/L values of tagged closing fills.
         tag_rows = conn.execute(
@@ -70,11 +125,15 @@ def stats() -> None:
             JOIN transactions tx ON tg.transaction_id = tx.id
             WHERE tx.type = 'ORDER_FILL'
             """
+            + tags_sql,
+            scope_params,
         ).fetchall()
         # Financing breakdown: each DAILY_FINANCING row's "positionFinancings"
         # array is unpacked per-instrument below.
         financing_rows = conn.execute(
             "SELECT raw_json FROM transactions WHERE type = 'DAILY_FINANCING'"
+            + fin_sql,
+            scope_params,
         ).fetchall()
     finally:
         conn.close()
@@ -102,6 +161,10 @@ def stats() -> None:
             )
         except Exception:
             continue
+
+    # Name the scope up front: combined figures must never be mistaken for
+    # one account's.
+    typer.echo(f"Account: {account.name}" if account else "Accounts: all")
 
     if not trades:
         typer.echo("No closed trades in local database.")
