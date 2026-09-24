@@ -34,11 +34,7 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 
 [tool.mypy]
-# Incremental adoption: type-checks src/frmj only. tests/ leans on duck-typed
-# test doubles (fakes that satisfy a protocol structurally without inheriting
-# it) and dict-splat fixture builders that don't type-check cleanly under
-# mypy without a larger, separate refactor — see TODO.md.
-files = ["src/frmj"]
+files = ["src/frmj", "tests"]
 python_version = "3.11"
 disallow_untyped_defs = true
 check_untyped_defs = true
