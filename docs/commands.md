@@ -92,7 +92,7 @@ The flow:
 
 If the account being traded (the active account, or `--account NAME`) is a live account and live mode is not enabled, the `trade` command exits with a clear error before placing any order.
 
-If the order placement request times out or fails, the plan can be saved (`s`) and resumed later with `frmj trade --resume`. The saved plan records the account it was planned for, and `--resume` places the order on that account even if the active account has since changed. `--account` cannot be combined with `--resume` or `--multi`.
+If the order placement request times out or fails, the plan can be saved (`s`) and resumed later with `frmj trade --resume`. The saved plan records the account it was planned for, and `--resume` places the order on that account even if the active account has since changed. It follows the account through `frmj account rename`, and refuses to place the order if that Oanda account is no longer configured, even if another account now has its old name. `--account` cannot be combined with `--resume` or `--multi`.
 
 **`--limit`** (`-l`) places a GTC limit entry order instead of a market order. After the risk check, the current bid/ask is shown and you're prompted for the entry:
 
