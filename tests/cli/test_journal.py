@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from frmj.accounts import add_account, set_active_account
+from frmj.accounts import add_account, get_active_account_name, set_active_account
 from frmj.app import get_db, set_config
 from frmj.cli import app
 from frmj.cli._completion import _complete_txn_type
@@ -197,7 +197,7 @@ class TestTagCommand:
         runner.invoke(app, ["tag", "99", "breakout"])
         monkeypatch.setattr(
             "frmj.cli.journal.get_client",
-            lambda conn: FakeClient(account_id="acct-1"),
+            lambda conn, account_name=None: FakeClient(account_id="acct-1"),
         )
         result = runner.invoke(app, ["journal"])
         assert "Tags: breakout" in result.output
@@ -211,7 +211,7 @@ class TestTagCommand:
         # oanda_id 100 has no tag
         monkeypatch.setattr(
             "frmj.cli.journal.get_client",
-            lambda conn: FakeClient(account_id="acct-1"),
+            lambda conn, account_name=None: FakeClient(account_id="acct-1"),
         )
         result = runner.invoke(app, ["journal", "--tag", "breakout"])
         assert result.exit_code == 0
@@ -263,7 +263,9 @@ class TestJournalCommand:
         # Auto-sync is a no-op: returns 0 new rows so existing test output is stable.
         monkeypatch.setattr(
             "frmj.cli.journal.get_client",
-            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+            lambda conn, account_name=None: FakeClient(
+                account_id="acct-1", responses=[[]]
+            ),
         )
         conn = get_db(path=path)
         set_config(conn, "account_id", "acct-1")
@@ -308,7 +310,9 @@ class TestJournalCommand:
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
         monkeypatch.setattr(
             "frmj.cli.journal.get_client",
-            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+            lambda conn, account_name=None: FakeClient(
+                account_id="acct-1", responses=[[]]
+            ),
         )
         get_db(path=path).close()
         result = runner.invoke(app, ["journal"])
@@ -462,7 +466,9 @@ class TestJournalCommand:
         new_row = _row("9001")
         monkeypatch.setattr(
             "frmj.cli.journal.get_client",
-            lambda conn: FakeClient(account_id="acct-1", responses=[[new_row]]),
+            lambda conn, account_name=None: FakeClient(
+                account_id="acct-1", responses=[[new_row]]
+            ),
         )
         result = runner.invoke(app, ["journal"])
         assert result.exit_code == 0, result.output
@@ -506,7 +512,8 @@ class TestJournalCommand:
         set_config(conn, "account_id", "acct-1")
         conn.close()
         monkeypatch.setattr(
-            "frmj.cli.journal.get_client", lambda conn: ExplodingClient()
+            "frmj.cli.journal.get_client",
+            lambda conn, account_name=None: ExplodingClient(),
         )
         result = runner.invoke(app, ["journal"])
         assert result.exit_code == 0, result.output
@@ -596,7 +603,9 @@ class TestJournalCommand:
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
         monkeypatch.setattr(
             "frmj.cli.journal.get_client",
-            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+            lambda conn, account_name=None: FakeClient(
+                account_id="acct-1", responses=[[]]
+            ),
         )
         conn = get_db(path=path)
         set_config(conn, "account_id", "acct-1")
@@ -621,7 +630,9 @@ class TestJournalCommand:
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
         monkeypatch.setattr(
             "frmj.cli.journal.get_client",
-            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+            lambda conn, account_name=None: FakeClient(
+                account_id="acct-1", responses=[[]]
+            ),
         )
         conn = get_db(path=path)
         set_config(conn, "account_id", "acct-1")
@@ -648,7 +659,9 @@ class TestJournalCommand:
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
         monkeypatch.setattr(
             "frmj.cli.journal.get_client",
-            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+            lambda conn, account_name=None: FakeClient(
+                account_id="acct-1", responses=[[]]
+            ),
         )
         conn = get_db(path=path)
         set_config(conn, "account_id", "acct-1")
@@ -676,7 +689,9 @@ class TestJournalCommand:
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
         monkeypatch.setattr(
             "frmj.cli.journal.get_client",
-            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+            lambda conn, account_name=None: FakeClient(
+                account_id="acct-1", responses=[[]]
+            ),
         )
         conn = get_db(path=path)
         set_config(conn, "account_id", "acct-1")
@@ -708,7 +723,9 @@ class TestJournalFiltering:
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
         monkeypatch.setattr(
             "frmj.cli.journal.get_client",
-            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+            lambda conn, account_name=None: FakeClient(
+                account_id="acct-1", responses=[[]]
+            ),
         )
         conn = get_db(path=path)
         set_config(conn, "account_id", "acct-1")
@@ -831,7 +848,9 @@ class TestJournalAccountScope:
         # Auto-sync is a no-op so only the seeded rows are shown.
         monkeypatch.setattr(
             "frmj.cli.journal.get_client",
-            lambda conn: FakeClient(account_id="acct-1", responses=[[]]),
+            lambda conn, account_name=None: FakeClient(
+                account_id="acct-1", responses=[[]]
+            ),
         )
         conn = get_db(path=path)
         add_account(conn, "main", "acct-1", is_practice=True)
@@ -907,6 +926,55 @@ class TestJournalAccountScope:
         result = runner.invoke(app, ["journal", "--all-accounts"])
         ids = [ln.split()[0] for ln in result.output.splitlines() if ln.startswith("#")]
         assert ids[-1] == "#999"
+
+    def test_account_option_shows_only_named_account(self, scope_db: Path) -> None:
+        """--account overrides the active account without switching it."""
+        result = runner.invoke(app, ["journal", "--account", "other"])
+        assert result.exit_code == 0, result.output
+        assert "222" in result.output
+        assert "111" not in result.output
+        assert "account=other" in result.output
+        # The active account is untouched.
+        conn = get_db(path=scope_db)
+        assert get_active_account_name(conn) == "main"
+        conn.close()
+
+    def test_account_option_syncs_named_account(
+        self, scope_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The auto-sync targets the --account profile, not the active one."""
+        requested: list[str | None] = []
+
+        def _get_client(conn: object, account_name: str | None = None) -> object:
+            requested.append(account_name)
+            return FakeClient(account_id="acct-2", responses=[[]])
+
+        monkeypatch.setattr("frmj.cli.journal.get_client", _get_client)
+        result = runner.invoke(app, ["journal", "--account", "other"])
+        assert result.exit_code == 0, result.output
+        assert requested == ["other"]
+
+    def test_account_option_works_without_active_account(self, scope_db: Path) -> None:
+        conn = get_db(path=scope_db)
+        conn.execute("DELETE FROM config WHERE key = 'active_account'")
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["journal", "--account", "main"])
+        assert result.exit_code == 0, result.output
+        assert "111" in result.output
+        assert "222" not in result.output
+
+    def test_unknown_account_exits_1(self, scope_db: Path) -> None:
+        """A typo in --account fails instead of widening to every account."""
+        result = runner.invoke(app, ["journal", "--account", "ghost"])
+        assert result.exit_code == 1
+        assert "No account named 'ghost'" in result.output + result.stderr
+        assert "111" not in result.output
+
+    def test_account_with_all_accounts_exits_1(self, scope_db: Path) -> None:
+        result = runner.invoke(app, ["journal", "--account", "other", "--all-accounts"])
+        assert result.exit_code == 1
+        assert "cannot be used together" in result.output + result.stderr
 
     def test_all_accounts_unknown_account_falls_back_to_raw_id(
         self, scope_db: Path

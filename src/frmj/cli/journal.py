@@ -6,10 +6,14 @@ import sqlite3
 
 import typer
 
-from frmj.accounts import get_active_account, list_accounts
+from frmj.accounts import get_active_account, list_accounts, resolve_account
 from frmj.app import get_client, get_db
 from frmj.cli import app
-from frmj.cli._completion import _complete_instrument, _complete_txn_type
+from frmj.cli._completion import (
+    _complete_account_name,
+    _complete_instrument,
+    _complete_txn_type,
+)
 from frmj.cli._display import _display_transaction
 from frmj.execution.sync import sync_incremental
 
@@ -250,19 +254,48 @@ def journal(
         "-a",
         help="Show transactions from every account, not just the active one.",
     ),
+    account_name: str | None = typer.Option(
+        None,
+        "--account",
+        help="Use this account instead of the active one (see 'frmj account list').",
+        autocompletion=_complete_account_name,
+        show_default=False,
+    ),
 ) -> None:
     """Show recent transactions with their notes and tags.
 
     By default only the active account's transactions are shown; pass
+    ``--account NAME`` to show another account's instead, or
     ``--all-accounts`` to include every account in the local database.  When
     no active account is configured there is nothing to scope to, so all
     accounts are shown.
     """
+    # The two scoping options contradict each other; refuse rather than
+    # silently letting one win.
+    if account_name is not None and all_accounts:
+        typer.echo(
+            "Error: --account and --all-accounts cannot be used together.", err=True
+        )
+        raise typer.Exit(1)
+
     conn = get_db()
+
+    # Resolve the scope locally (no token needed) so the listing works even
+    # when the auto-sync below fails.  A typo in --account must fail here
+    # rather than fall through to showing every account.
+    account = None if all_accounts else resolve_account(conn, account_name)
+    if account is None and account_name is not None:
+        typer.echo(
+            f"Error: No account named '{account_name}'. List accounts with:\n"
+            "  frmj account list",
+            err=True,
+        )
+        conn.close()
+        raise typer.Exit(1)
 
     # Auto-sync: best-effort; journal display proceeds even if sync fails.
     try:
-        client = get_client(conn)
+        client = get_client(conn, account_name)
         sync_result = sync_incremental(conn, client)
         if sync_result.rows_ingested:
             typer.echo(f"[sync] +{sync_result.rows_ingested} transactions")
@@ -275,10 +308,7 @@ def journal(
         where: list[str] = []
         params: list[object] = []
 
-        # Scope to the active account unless the user asked for everything.
-        # Looked up locally (no token needed) so this works even when the
-        # auto-sync above failed.
-        account = None if all_accounts else get_active_account(conn)
+        # Scope to the resolved account unless the user asked for everything.
         if account is not None:
             where.append("account_id = ?")
             params.append(account.oanda_id)
