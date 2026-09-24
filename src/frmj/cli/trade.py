@@ -339,6 +339,10 @@ def trade(
         sl_price = Decimal(plan["sl_price"]) if plan.get("sl_price") else None
         # Plans saved before --limit existed have no "limit_price": market.
         limit_price = Decimal(plan["limit_price"]) if plan.get("limit_price") else None
+        # Likewise plans saved before --trail existed have no trailing stop.
+        if plan.get("trail_distance"):
+            trail_distance = Decimal(plan["trail_distance"])
+            trail_pips = Decimal(plan["trail_pips"])
 
         typer.echo(f"Resuming saved plan: {instrument} {direction_str.upper()}")
         typer.echo("─" * 40)
@@ -352,6 +356,8 @@ def trade(
             typer.echo(f"  Take-profit: {tp_price}")
         if sl_price is not None:
             typer.echo(f"  Stop-loss:   {sl_price}")
+        if trail_pips is not None:
+            typer.echo(f"  Trailing stop: {trail_pips:.1f} pips")
         typer.echo("")
 
         if not typer.confirm("Place order?", default=False):
@@ -634,6 +640,11 @@ def trade(
                     "limit_price": (
                         str(limit_price) if limit_price is not None else None
                     ),
+                    # Both forms: the distance is sent, the pips are shown.
+                    "trail_distance": (
+                        str(trail_distance) if trail_distance is not None else None
+                    ),
+                    "trail_pips": str(trail_pips) if trail_pips is not None else None,
                     "account": (
                         target_account.name if target_account is not None else None
                     ),

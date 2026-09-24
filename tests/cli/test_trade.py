@@ -1320,6 +1320,50 @@ class TestTradeTrail:
         assert result.exit_code == 0, result.output
         assert self._plan_trail(trade_db, "88888") == "20.0"
 
+    @pytest.fixture()
+    def plan_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Redirect draft plan writes to a temp path."""
+        path = tmp_path / "saved_plan.json"
+        monkeypatch.setattr("frmj.app._DRAFT_PLAN_PATH", path)
+        return path
+
+    def test_saved_draft_keeps_trail(
+        self, trade_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        monkeypatch.setattr(fake, "place_market_order", _failing_market_order)
+        # TP/SL skip, trail 20, confirm, order fails, save.
+        result = self._invoke(monkeypatch, fake, "\n\n20\ny\ns\n")
+        assert result.exit_code == 0, result.output
+        plan = json.loads(plan_file.read_text())
+        assert plan["trail_distance"] == "0.00200"
+        assert plan["trail_pips"] == "20.0"
+
+    def test_resume_attaches_saved_trail(
+        self, trade_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plan_file.write_text(
+            json.dumps(
+                {
+                    "instrument": "EUR_USD",
+                    "direction": "long",
+                    "units_signed": 10000,
+                    "tp_price": None,
+                    "sl_price": None,
+                    "trail_distance": "0.00200",
+                    "trail_pips": "20.0",
+                }
+            )
+        )
+        fake = FakeFullClient()
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
+        result = runner.invoke(app, ["trade", "--resume"], input="y\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert "Trailing stop: 20.0 pips" in result.output
+        assert fake.trail_attached == "0.00200"
+
     def test_trail_rejected_with_resume(
         self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
