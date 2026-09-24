@@ -1,5 +1,7 @@
+from dataclasses import replace
 from decimal import Decimal
 from fractions import Fraction
+from typing import Any
 
 import pytest
 
@@ -19,16 +21,20 @@ from frmj.domain.risk import (
 from frmj.domain.sizing import Direction
 
 
-def _cfg(**overrides) -> RiskConfig:
-    defaults = dict(
+def _cfg(**overrides: Any) -> RiskConfig:
+    """Return a baseline RiskConfig with *overrides* applied.
+
+    ``dataclasses.replace`` rejects unknown field names, so a typo in a test's
+    override fails loudly instead of being silently ignored.
+    """
+    base = RiskConfig(
         max_open_trades=6,
         strategy=RiskStrategy.REMAINING_MARGIN_FRACTION,
         blocking_mode=BlockingMode.HARD_BLOCK,
         scale_in=ScaleInPolicy.NEVER,
         safety_reserve_pct=Decimal("0"),
     )
-    defaults.update(overrides)
-    return RiskConfig(**defaults)
+    return replace(base, **overrides)
 
 
 class TestSizeFraction:

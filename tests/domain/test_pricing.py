@@ -323,8 +323,11 @@ class TestPercentTakeProfit:
             tp=TPSLSpec(TPSLKind.PERCENT_RETURN, Decimal("0.037")),
         )
         assert result.take_profit_price is not None
-        # EUR_USD display_precision=5 in the fixture spec.
-        assert -result.take_profit_price.as_tuple().exponent <= 5
+        # EUR_USD display_precision=5 in the fixture spec. The exponent is
+        # only a letter code for NaN/infinity, which a price never is.
+        exponent = result.take_profit_price.as_tuple().exponent
+        assert isinstance(exponent, int)
+        assert -exponent <= 5
 
     def test_no_warning_at_exactly_threshold(self) -> None:
         # Exactly 100% should NOT warn (boundary is strictly greater than).

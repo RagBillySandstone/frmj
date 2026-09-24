@@ -206,13 +206,20 @@ class TestComputeUnitsHappyPath:
     def test_short_uses_same_units_as_long(self) -> None:
         # Margin is symmetric for FX on Oanda; flipping direction shouldn't
         # change the unit count.
-        common = dict(
+        spec = _eur_usd()
+        quote = _eur_usd_quote(Decimal("1.10"))
+        long_result = compute_units(
             capital_to_deploy=Decimal("220"),
-            spec=_eur_usd(),
-            quote=_eur_usd_quote(Decimal("1.10")),
+            spec=spec,
+            quote=quote,
+            direction=Direction.LONG,
         )
-        long_result = compute_units(direction=Direction.LONG, **common)
-        short_result = compute_units(direction=Direction.SHORT, **common)
+        short_result = compute_units(
+            capital_to_deploy=Decimal("220"),
+            spec=spec,
+            quote=quote,
+            direction=Direction.SHORT,
+        )
         assert long_result.units == short_result.units
 
     def test_usd_jpy_sizing(self) -> None:
