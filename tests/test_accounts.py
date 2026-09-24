@@ -10,6 +10,7 @@ conftest.py handles this globally).
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -50,7 +51,7 @@ from frmj.persistence.schema import ensure_schema
 
 
 @pytest.fixture()
-def conn() -> sqlite3.Connection:
+def conn() -> Iterator[sqlite3.Connection]:
     """Return an in-memory SQLite connection with the full FRoMaJ schema."""
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row

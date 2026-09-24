@@ -14,6 +14,8 @@ from frmj.cli.config import (
     _complete_config_value,
 )
 
+from frmj.execution.oanda import AccountSummary
+
 from .conftest import FakeFullClient, _completion_ctx
 
 runner = CliRunner()
@@ -326,7 +328,7 @@ class TestConfigCheck:
         class BadClient:
             account_id = "acct-1"
 
-            def get_account_summary(self):
+            def get_account_summary(self) -> AccountSummary:
                 raise RuntimeError("connection refused")
 
         monkeypatch.setattr("frmj.cli.config.get_client", lambda conn: BadClient())

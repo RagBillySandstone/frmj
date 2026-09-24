@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
 
@@ -193,7 +194,9 @@ class TestGetDb:
 
 class TestConfigHelpers:
     @pytest.fixture()
-    def db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> sqlite3.Connection:
+    def db(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> Iterator[sqlite3.Connection]:
         monkeypatch.setenv("FRMJ_DB_PATH", str(tmp_path / "test.db"))
         conn = get_db()
         yield conn
@@ -243,7 +246,9 @@ class TestConfigHelpers:
 
 class TestGetClient:
     @pytest.fixture()
-    def db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> sqlite3.Connection:
+    def db(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> Iterator[sqlite3.Connection]:
         monkeypatch.setenv("FRMJ_DB_PATH", str(tmp_path / "test.db"))
         conn = get_db()
         yield conn
@@ -380,7 +385,9 @@ class TestGetClientForAccount:
 
 class TestGetRiskConfig:
     @pytest.fixture()
-    def db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> sqlite3.Connection:
+    def db(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> Iterator[sqlite3.Connection]:
         monkeypatch.setenv("FRMJ_DB_PATH", str(tmp_path / "test.db"))
         conn = get_db()
         yield conn

@@ -27,6 +27,12 @@ from .conftest import FakeFullClient, _open_trade, _pending_order
 runner = CliRunner()
 
 
+def _failing_market_order(instrument: str, units_signed: int) -> OrderFill:
+    """Stand-in for ``place_market_order`` that always fails, to reach the
+    retry / save / abort prompt."""
+    raise RuntimeError("fail")
+
+
 class TestDryRun:
     """The --dry-run flag shows the plan and exits without placing an order."""
 
@@ -1190,9 +1196,7 @@ class TestTradeFailureAndRetry:
         self, trade_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         fake = FakeFullClient()
-        fake.place_market_order = lambda i, u: (_ for _ in ()).throw(  # type: ignore[method-assign]
-            RuntimeError("fail")
-        )
+        fake.place_market_order = _failing_market_order  # type: ignore[method-assign]
         monkeypatch.setattr(
             "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
         )
@@ -1499,9 +1503,7 @@ class TestTradeAccountOption:
         self, account_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         fake = FakeFullClient()
-        fake.place_market_order = lambda i, u: (_ for _ in ()).throw(  # type: ignore[method-assign]
-            RuntimeError("fail")
-        )
+        fake.place_market_order = _failing_market_order  # type: ignore[method-assign]
         self._patch_client(monkeypatch, fake)
         # TP=50, SL=30, confirm=y, then Save at the retry prompt.
         runner.invoke(
@@ -1517,9 +1519,7 @@ class TestTradeAccountOption:
         """Without --account the resolved active account is recorded, so a
         later 'frmj account use' doesn't redirect the resumed order."""
         fake = FakeFullClient()
-        fake.place_market_order = lambda i, u: (_ for _ in ()).throw(  # type: ignore[method-assign]
-            RuntimeError("fail")
-        )
+        fake.place_market_order = _failing_market_order  # type: ignore[method-assign]
         self._patch_client(monkeypatch, fake)
         runner.invoke(app, ["trade", "EUR_USD", "long"], input="50\n30\ny\ns\n")
         assert json.loads(plan_file.read_text())["account"] == "practice"
@@ -1530,9 +1530,7 @@ class TestTradeAccountOption:
         """The draft records the account's Oanda ID alongside its name, so a
         resume can follow the account through a rename."""
         fake = FakeFullClient()
-        fake.place_market_order = lambda i, u: (_ for _ in ()).throw(  # type: ignore[method-assign]
-            RuntimeError("fail")
-        )
+        fake.place_market_order = _failing_market_order  # type: ignore[method-assign]
         self._patch_client(monkeypatch, fake)
         runner.invoke(
             app,
@@ -1934,7 +1932,7 @@ class TestTradeMultiAccount:
         """A market-data fetch failure on the primary account aborts the group."""
 
         class FailingClient(FakeFullClient):
-            def get_instrument(self, name: str) -> InstrumentSpec:  # type: ignore[override]
+            def get_instrument(self, name: str) -> InstrumentSpec:
                 raise RuntimeError("network down")
 
         fakes = {
@@ -1951,7 +1949,7 @@ class TestTradeMultiAccount:
         """An account-data fetch failure on any account aborts the group."""
 
         class FailingClient(FakeFullClient):
-            def get_account_summary(self) -> AccountSummary:  # type: ignore[override]
+            def get_account_summary(self) -> AccountSummary:
                 raise RuntimeError("account data unavailable")
 
         fakes = {

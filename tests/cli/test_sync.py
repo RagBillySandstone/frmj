@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +12,7 @@ from typer.testing import CliRunner
 from frmj.accounts import add_account
 from frmj.app import get_db
 from frmj.cli import app
+from frmj.execution.sync import SyncResult
 
 from .conftest import FakeClient, _row
 
@@ -210,7 +212,7 @@ class TestSyncWatch:
     ) -> None:
         """KeyboardInterrupt causes the loop to print 'Stopped.' and exit 0."""
 
-        def fake_sync(conn, client):
+        def fake_sync(conn: sqlite3.Connection, client: object) -> SyncResult:
             raise KeyboardInterrupt
 
         monkeypatch.setattr(
@@ -231,7 +233,7 @@ class TestSyncWatch:
     ) -> None:
         """The opening message includes the configured interval."""
 
-        def fake_sync(conn, client):
+        def fake_sync(conn: sqlite3.Connection, client: object) -> SyncResult:
             raise KeyboardInterrupt
 
         monkeypatch.setattr(
@@ -262,12 +264,10 @@ class TestSyncWatch:
 
         call_count = 0
 
-        def fake_sync(conn, client):
+        def fake_sync(conn: sqlite3.Connection, client: object) -> SyncResult:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                from frmj.execution.sync import SyncResult
-
                 return SyncResult(rows_ingested=0, rows_skipped=0, last_oanda_id="100")
             raise KeyboardInterrupt
 
@@ -315,12 +315,10 @@ class TestSyncWatch:
 
         call_count = 0
 
-        def fake_sync(conn, client):
+        def fake_sync(conn: sqlite3.Connection, client: object) -> SyncResult:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                from frmj.execution.sync import SyncResult
-
                 return SyncResult(rows_ingested=1, rows_skipped=0, last_oanda_id="101")
             raise KeyboardInterrupt
 
@@ -344,12 +342,10 @@ class TestSyncWatch:
         """First run (no cursor) shows a count + journal hint instead of all rows."""
         call_count = 0
 
-        def fake_sync(conn, client):
+        def fake_sync(conn: sqlite3.Connection, client: object) -> SyncResult:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                from frmj.execution.sync import SyncResult
-
                 return SyncResult(rows_ingested=50, rows_skipped=0, last_oanda_id="50")
             raise KeyboardInterrupt
 
@@ -374,7 +370,7 @@ class TestSyncWatch:
         """A sync exception is printed to stderr and the loop keeps running."""
         call_count = 0
 
-        def fake_sync(conn, client):
+        def fake_sync(conn: sqlite3.Connection, client: object) -> SyncResult:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -403,12 +399,10 @@ class TestSyncWatch:
 
         call_count = 0
 
-        def fake_sync(conn, client):
+        def fake_sync(conn: sqlite3.Connection, client: object) -> SyncResult:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                from frmj.execution.sync import SyncResult
-
                 return SyncResult(rows_ingested=0, rows_skipped=0, last_oanda_id="100")
             raise KeyboardInterrupt
 
