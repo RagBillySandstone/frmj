@@ -113,7 +113,7 @@ Shows the active account name, type (practice / live), Oanda account ID, and cur
 
 ## Usage
 
-`frmj sync`, `positions`, `trade`, and `close` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command without switching the active account; the output then begins by naming it.
+`frmj sync`, `positions`, `trade`, and `close` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command without switching the active account; the output then begins by naming it. `journal` also accepts `--account NAME`, but without the `-a` short form, which there means `--all-accounts`.
 
 ### `frmj sync`
 
@@ -243,7 +243,7 @@ Output includes: win rate, average P/L, total P/L, total financing, and best/wor
 
 ### `frmj journal`
 
-Display recent transactions with any attached notes and tags. Auto-syncs before displaying. Only the active account's transactions are shown unless `--all-accounts` is given.
+Display recent transactions with any attached notes and tags. Auto-syncs before displaying. Only the active account's transactions are shown unless `--account NAME` or `--all-accounts` is given (not both).
 
 ```sh
 frmj journal                          # last 20 transactions
@@ -253,6 +253,7 @@ frmj journal --type ORDER_FILL        # filter by transaction type
 frmj journal --since 2026-04-01       # on or after a date
 frmj journal --with-notes             # only transactions with notes
 frmj journal --tag breakout           # only transactions tagged 'breakout'
+frmj journal --account prop-1         # another account's transactions, without switching
 frmj journal --all-accounts           # include every account, not just the active one
 ```
 
