@@ -73,7 +73,8 @@ class FakeFullClient:
     is set to True when ``place_market_order`` is called, letting tests
     assert that dry-run skips order placement.
 
-    ``tp_should_fail`` / ``sl_should_fail`` cause the attach methods to raise,
+    ``tp_should_fail`` / ``sl_should_fail`` / ``trail_should_fail`` cause the
+    attach methods to raise,
     simulating a network error after the fill.
     """
 
@@ -83,6 +84,9 @@ class FakeFullClient:
     sl_attached: str | None = None  # price string passed to attach_stop_loss
     tp_should_fail: bool = False
     sl_should_fail: bool = False
+    # Distance string passed to attach_trailing_stop.
+    trail_attached: str | None = None
+    trail_should_fail: bool = False
     sync_rows: list[TransactionRow] = field(default_factory=list)
     sync_should_fail: bool = False
 
@@ -151,6 +155,7 @@ class FakeFullClient:
         price: Decimal,
         take_profit_price: Decimal | None = None,
         stop_loss_price: Decimal | None = None,
+        trailing_stop_distance: Decimal | None = None,
     ) -> LimitOrderResult:
         if self.limit_fail_count > 0:
             self.limit_fail_count -= 1
@@ -162,6 +167,7 @@ class FakeFullClient:
                 "price": price,
                 "take_profit_price": take_profit_price,
                 "stop_loss_price": stop_loss_price,
+                "trailing_stop_distance": trailing_stop_distance,
             }
         )
         fill = None
@@ -185,6 +191,12 @@ class FakeFullClient:
             raise RuntimeError("SL order rejected by Oanda")
         self.sl_attached = str(price)
         return "100002"
+
+    def attach_trailing_stop(self, trade_id: str, distance: Decimal) -> str:
+        if self.trail_should_fail:
+            raise RuntimeError("Trailing stop rejected by Oanda")
+        self.trail_attached = str(distance)
+        return "100003"
 
     open_trades: list[OpenTrade] = field(default_factory=list)
     close_should_fail: bool = False

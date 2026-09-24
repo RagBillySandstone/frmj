@@ -285,6 +285,8 @@ class PostFillResult:
     sl_error: str | None
     sync_rows_ingested: int
     sync_error: str | None
+    trail_transaction_id: str | None = None
+    trail_error: str | None = None
 
 
 def execute_post_fill(
@@ -293,23 +295,31 @@ def execute_post_fill(
     fill: OrderFill,
     tp_price: Decimal | None,
     sl_price: Decimal | None,
+    trail_distance: Decimal | None = None,
 ) -> PostFillResult:
-    """Attach TP/SL to a filled trade, sync the fill into the local DB, and
-    persist the trade plan.
+    """Attach TP/SL (and optionally a trailing stop) to a filled trade, sync
+    the fill into the local DB, and persist the trade plan.
+
+    *trail_distance* is the trailing stop's distance in price units, or
+    ``None`` for no trailing stop.
 
     ``missing_trade_id`` is set when Oanda didn't return a trade ID and at
-    least one of *tp_price*/*sl_price* was requested (so TP/SL could not be
-    attached at all). TP/SL attach failures and sync failures are captured in
-    the result fields rather than raised.
+    least one exit order was requested (so none could be attached at all).
+    Attach failures and sync failures are captured in the result fields
+    rather than raised.
     """
     missing_trade_id = False
     tp_transaction_id: str | None = None
     tp_error: str | None = None
     sl_transaction_id: str | None = None
     sl_error: str | None = None
+    trail_transaction_id: str | None = None
+    trail_error: str | None = None
 
     if fill.trade_id is None:
-        missing_trade_id = tp_price is not None or sl_price is not None
+        missing_trade_id = any(
+            level is not None for level in (tp_price, sl_price, trail_distance)
+        )
     else:
         if tp_price is not None:
             try:
@@ -321,6 +331,15 @@ def execute_post_fill(
                 sl_transaction_id = client.attach_stop_loss(fill.trade_id, sl_price)
             except Exception as exc:
                 sl_error = str(exc)
+        # Attached independently of the fixed SL: a trade can hold both,
+        # and Oanda closes it on whichever triggers first.
+        if trail_distance is not None:
+            try:
+                trail_transaction_id = client.attach_trailing_stop(
+                    fill.trade_id, trail_distance
+                )
+            except Exception as exc:
+                trail_error = str(exc)
 
     sync_rows_ingested = 0
     sync_error: str | None = None
@@ -340,6 +359,8 @@ def execute_post_fill(
         sl_error=sl_error,
         sync_rows_ingested=sync_rows_ingested,
         sync_error=sync_error,
+        trail_transaction_id=trail_transaction_id,
+        trail_error=trail_error,
     )
 
 
@@ -370,7 +391,8 @@ def execute_post_limit(
     trade plan.
 
     Unlike ``execute_post_fill`` there is no TP/SL attach step: the limit
-    order carried TP/SL as ``takeProfitOnFill``/``stopLossOnFill``, so Oanda
+    order carried TP/SL (and any trailing stop) as ``takeProfitOnFill``/
+    ``stopLossOnFill``/``trailingStopLossOnFill``, so Oanda
     applies them itself when the order fills — including an immediate fill.
     Attaching them again would fail against the TP/SL Oanda already set.
     """
