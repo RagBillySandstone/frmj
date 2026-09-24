@@ -120,6 +120,7 @@ def _parse_account_summary(payload: dict[str, Any]) -> AccountSummary:
         margin_used=Decimal(acct.get("marginUsed", "0")),
         margin_available=Decimal(acct["marginAvailable"]),
         open_trade_count=int(acct["openTradeCount"]),
+        margin_closeout_percent=Decimal(acct.get("marginCloseoutPercent", "0")),
     )
 
 

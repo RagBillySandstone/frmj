@@ -1605,6 +1605,7 @@ class TestTradeMultiAccount:
                 margin_used=s.margin_used,
                 margin_available=margin_available,
                 open_trade_count=s.open_trade_count,
+                margin_closeout_percent=s.margin_closeout_percent,
             )
 
         fake.get_account_summary = _summary  # type: ignore[method-assign]

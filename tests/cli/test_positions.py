@@ -291,6 +291,9 @@ class TestPositionsPendingOrders:
         assert "market: ask 1.10010" in result.output
         assert "no TP/SL set" in result.output
         assert "Margin Available" in result.output
+        # Oanda's fraction 0.0558 is shown as a percent.
+        assert "Margin Closeout" in result.output
+        assert "5.58%" in result.output
 
     def test_short_order_shows_bid_and_tpsl(
         self, pos_db: Path, monkeypatch: pytest.MonkeyPatch

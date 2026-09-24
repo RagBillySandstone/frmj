@@ -353,6 +353,8 @@ def _display_account_summary(summary: AccountSummary) -> None:
         ("Position Value", f"${summary.position_value:,.2f}"),
         ("Margin Used", f"${summary.margin_used:,.2f}"),
         ("Margin Available", f"${summary.margin_available:,.2f}"),
+        # Oanda reports a fraction; 100% means margin closeout begins.
+        ("Margin Closeout", f"{summary.margin_closeout_percent * 100:.2f}%"),
     ]
     label_width = max(len(label) for label, _ in rows)
     for label, value in rows:

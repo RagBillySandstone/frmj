@@ -86,6 +86,10 @@ class AccountSummary:
 
     ``open_trade_count`` is the total number of open tickets across all
     instruments, per Oanda's own count. We use it as the risk model's N.
+
+    ``margin_closeout_percent`` is Oanda's margin closeout ratio as a
+    fraction: at ``1`` or above the account is in margin closeout and Oanda
+    starts closing positions. The Oanda web platform shows it as a percent.
     """
 
     nav: Decimal
@@ -96,6 +100,7 @@ class AccountSummary:
     margin_used: Decimal
     margin_available: Decimal
     open_trade_count: int
+    margin_closeout_percent: Decimal
 
 
 @dataclass(frozen=True, slots=True)

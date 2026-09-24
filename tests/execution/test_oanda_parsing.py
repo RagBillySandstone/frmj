@@ -47,6 +47,7 @@ def _account_payload(
     margin_used: str = "2200.00",
     margin_available: str = "5000.00",
     open_trade_count: int = 2,
+    margin_closeout_percent: str = "0.10000",
 ) -> dict:
     return {
         "account": {
@@ -58,6 +59,7 @@ def _account_payload(
             "marginUsed": margin_used,
             "marginAvailable": margin_available,
             "openTradeCount": open_trade_count,
+            "marginCloseoutPercent": margin_closeout_percent,
         }
     }
 
@@ -102,6 +104,17 @@ class TestParseAccountSummary:
     def test_parses_margin_available(self) -> None:
         result = _parse_account_summary(_account_payload(margin_available="5000.00"))
         assert result.margin_available == Decimal("5000.00")
+
+    def test_parses_margin_closeout_percent(self) -> None:
+        result = _parse_account_summary(
+            _account_payload(margin_closeout_percent="0.05580")
+        )
+        assert result.margin_closeout_percent == Decimal("0.05580")
+
+    def test_missing_margin_closeout_percent_defaults_to_zero(self) -> None:
+        payload = _account_payload()
+        del payload["account"]["marginCloseoutPercent"]
+        assert _parse_account_summary(payload).margin_closeout_percent == 0
 
     def test_parses_open_trade_count(self) -> None:
         result = _parse_account_summary(_account_payload(open_trade_count=3))

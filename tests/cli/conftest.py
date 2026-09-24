@@ -101,6 +101,7 @@ class FakeFullClient:
             margin_used=Decimal("2000.00"),
             margin_available=Decimal("8000.00"),
             open_trade_count=2,
+            margin_closeout_percent=Decimal("0.0558"),
         )
 
     def get_open_tickets_on_instrument(self, instrument: str) -> int:
