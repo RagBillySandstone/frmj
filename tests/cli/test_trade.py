@@ -1523,6 +1523,100 @@ class TestTradeAccountOption:
         runner.invoke(app, ["trade", "EUR_USD", "long"], input="50\n30\ny\ns\n")
         assert json.loads(plan_file.read_text())["account"] == "practice"
 
+    def test_saved_draft_records_oanda_id(
+        self, account_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The draft records the account's Oanda ID alongside its name, so a
+        resume can follow the account through a rename."""
+        fake = FakeFullClient()
+        fake.place_market_order = lambda i, u: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            RuntimeError("fail")
+        )
+        self._patch_client(monkeypatch, fake)
+        runner.invoke(
+            app,
+            ["trade", "EUR_USD", "long", "--account", "other"],
+            input="50\n30\ny\ns\n",
+        )
+        saved = json.loads(plan_file.read_text())
+        assert saved["account"] == "other"
+        assert saved["account_oanda_id"] == "acct-2"
+
+    @staticmethod
+    def _write_plan(plan_file: Path, account: str, oanda_id: str) -> None:
+        """Write a market-order draft for *account* / *oanda_id*."""
+        plan_file.write_text(
+            json.dumps(
+                {
+                    "instrument": "EUR_USD",
+                    "direction": "long",
+                    "units_signed": 10000,
+                    "tp_price": None,
+                    "sl_price": None,
+                    "account": account,
+                    "account_oanda_id": oanda_id,
+                }
+            )
+        )
+
+    def test_resume_follows_renamed_account(
+        self, account_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A draft saved for 'other' resumes on it after it's renamed."""
+        self._write_plan(plan_file, "other", "acct-2")
+        runner.invoke(app, ["account", "rename", "other", "renamed"])
+        fake = FakeFullClient()
+        requested = self._patch_client(monkeypatch, fake)
+        result = runner.invoke(app, ["trade", "--resume"], input="y\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert requested == ["renamed"]
+        assert "now named 'renamed'" in result.output
+        assert "Account:   renamed" in result.output
+        assert fake.order_placed
+
+    def test_resume_refuses_reused_name_on_other_account(
+        self, account_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the saved name now belongs to a different Oanda account (removed,
+        then re-added), the order must not go there."""
+        self._write_plan(plan_file, "other", "acct-gone")
+        fake = FakeFullClient()
+        requested = self._patch_client(monkeypatch, fake)
+        result = runner.invoke(app, ["trade", "--resume"], input="y\n\n\n")
+        assert result.exit_code == 1
+        assert "no longer configured" in result.output + result.stderr
+        assert requested == []
+        assert not fake.order_placed
+
+    def test_resume_prefers_saved_name_among_shared_ids(
+        self, account_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two profiles on one Oanda account: the saved name picks between them."""
+        conn = get_db(path=account_db)
+        add_account(conn, "other-alias", "acct-2", is_practice=True)
+        conn.close()
+        self._write_plan(plan_file, "other", "acct-2")
+        requested = self._patch_client(monkeypatch, FakeFullClient())
+        result = runner.invoke(app, ["trade", "--resume"], input="y\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert requested == ["other"]
+
+    def test_resume_ambiguous_shared_id_exits_1(
+        self, account_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Saved name gone and several profiles share the ID: refuse to guess."""
+        conn = get_db(path=account_db)
+        add_account(conn, "other-alias", "acct-2", is_practice=True)
+        conn.close()
+        self._write_plan(plan_file, "old-name", "acct-2")
+        fake = FakeFullClient()
+        requested = self._patch_client(monkeypatch, fake)
+        result = runner.invoke(app, ["trade", "--resume"], input="y\n\n\n")
+        assert result.exit_code == 1
+        assert "other, other-alias" in result.output + result.stderr
+        assert requested == []
+        assert not fake.order_placed
+
     def test_resume_targets_saved_account(
         self, account_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

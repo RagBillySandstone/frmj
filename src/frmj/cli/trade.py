@@ -9,7 +9,12 @@ import httpx
 import typer
 
 from frmj import services
-from frmj.accounts import is_live_mode, list_group_members, resolve_account
+from frmj.accounts import (
+    is_live_mode,
+    list_accounts,
+    list_group_members,
+    resolve_account,
+)
 from frmj.app import (
     clear_draft_plan,
     get_client,
@@ -62,6 +67,56 @@ def _complete_multi_opposite(ctx: typer.Context, incomplete: str) -> list[str]:
     finally:
         conn.close()
     return [m.name for m in members if m.name.startswith(incomplete)]
+
+
+def _resolve_draft_account(conn: sqlite3.Connection, plan: dict) -> str | None:
+    """Return the profile name a resumed draft should be placed on.
+
+    Drafts record both the profile name and its Oanda account ID.  The ID is
+    what identifies the account: a profile can be renamed after the draft is
+    saved, and a removed profile's name can be reused for a *different* Oanda
+    account, which must never receive this order.  So the draft is matched by
+    ID, preferring the saved name when it still belongs to that ID.
+
+    Drafts saved before the ID was recorded fall back to the saved name, or
+    to the active account (``None``) when they predate recording an account
+    at all.
+
+    Raises ``ValueError`` with a user-facing message when no profile, or
+    more than one, has the saved ID.
+    """
+    saved_name: str | None = plan.get("account")
+    oanda_id: str | None = plan.get("account_oanda_id")
+    if oanda_id is None:
+        return saved_name
+
+    # Step 1: every profile pointing at the saved Oanda account.
+    matches = [a for a in list_accounts(conn) if a.oanda_id == oanda_id]
+
+    # Step 2: the saved name still refers to the same account — the usual case.
+    if any(a.name == saved_name for a in matches):
+        return saved_name
+
+    # Step 3: renamed since the draft was saved — follow the ID.
+    if len(matches) == 1:
+        typer.echo(
+            f"Note: the plan was saved for account '{saved_name}', "
+            f"now named '{matches[0].name}'."
+        )
+        return matches[0].name
+
+    # Step 4: removed, or ambiguous — refuse rather than guess.
+    if not matches:
+        raise ValueError(
+            f"The saved plan is for account '{saved_name}' (Oanda ID {oanda_id}), "
+            "which is no longer configured. Add it back with "
+            "'frmj account add NAME', or plan a new trade."
+        )
+    names = ", ".join(sorted(a.name for a in matches))
+    raise ValueError(
+        f"The saved plan is for Oanda account {oanda_id}, which several profiles "
+        f"share ({names}). Remove the duplicates or plan a new trade."
+    )
 
 
 @app.command()
@@ -208,9 +263,8 @@ def trade(
         raise typer.Exit(1)
 
     # A resumed plan is placed on the account it was planned for, which may
-    # not be the active account any more (or ever, with --account). Plans
-    # saved before the draft recorded an account have no "account" key and
-    # fall back to the active account, as they always did.
+    # not be the active account any more (or ever, with --account), and may
+    # have been renamed since — _resolve_draft_account finds it by Oanda ID.
     plan: dict | None = None
     if resume:
         plan = load_draft_plan()
@@ -221,9 +275,15 @@ def trade(
                 err=True,
             )
             raise typer.Exit(1)
-        account = plan.get("account")
 
     conn = get_db()
+    if plan is not None:
+        try:
+            account = _resolve_draft_account(conn, plan)
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            conn.close()
+            raise typer.Exit(1)
     try:
         client = get_client(conn, account)
     except RuntimeError as exc:
@@ -523,6 +583,10 @@ def trade(
                     ),
                     "account": (
                         target_account.name if target_account is not None else None
+                    ),
+                    # The ID survives a rename; see _resolve_draft_account.
+                    "account_oanda_id": (
+                        target_account.oanda_id if target_account is not None else None
                     ),
                 }
             )
