@@ -43,9 +43,7 @@ frmj --help
 
 ---
 
-## Configuration
-
-### First-time setup
+## Quick start
 
 FRoMaJ uses named account profiles. Add accounts once, then switch between them freely without re-entering credentials.
 
@@ -69,372 +67,35 @@ frmj config check
 frmj config check --connectivity   # also calls the Oanda API to verify credentials
 ```
 
-### API tokens
-
-Oanda issues one API token per environment (practice vs live), not per account. Tokens are stored by environment in the OS keychain:
-
-```sh
-frmj account set-token practice    # store practice token (prompted, never echoed)
-frmj account set-token live        # store live token (prompted, never echoed)
-frmj account set-token             # defaults to the active account's environment type
-```
-
-Backed by GNOME Keyring / KWallet on Linux, Keychain on macOS, Credential Locker on Windows.
-
-### Switching between accounts
-
-```sh
-frmj account use practice    # activate the 'practice' profile
-frmj account use funded      # activate the 'funded' profile
-frmj account current         # show which account is active
-frmj account list            # show all configured accounts
-```
-
-### Execution mode (practice vs. live)
-
-Account selection and execution mode are kept separate as an additional safety gate. Switching to a live account does not automatically enable live order placement — you must also enable live mode explicitly:
-
-```sh
-frmj mode practice           # disable live order placement (safe default)
-frmj mode live               # enable live order placement (requires confirmation)
-```
-
-`frmj mode live` displays the active account name and requires typing `ENABLE LIVE` exactly before proceeding. This prevents accidental live trades when testing new workflows.
-
-### Status at a glance
-
-```sh
-frmj status
-```
-
-Shows the active account name, type (practice / live), Oanda account ID, and current execution mode.
-
 ---
 
-## Usage
+## Commands
 
-`frmj sync`, `positions`, `trade`, `close`, and `journal` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command without switching the active account; the output then begins by naming it.
-
-### `frmj sync`
-
-Pull transactions from Oanda into the local database.
-
-```sh
-frmj sync               # incremental (only new transactions since last sync)
-frmj sync --cold        # full history re-fetch (safe to re-run; duplicates are skipped)
-frmj sync --watch       # poll for new transactions continuously (Ctrl+C to stop)
-frmj sync --watch --interval 30   # poll every 30 seconds (default: 60)
-frmj sync --csv history.csv       # import an Oanda Hub CSV export instead of hitting the API
-frmj sync --account funded        # sync a non-active account
-```
-
-`--csv` imports a transaction-history export from the Oanda account hub (Reports → Transaction History → Export to csv). Set the export dialog's Timezone to UTC before downloading — any other timezone is rejected. Useful for backfilling history the REST API can no longer return (old accounts truncate `/transactions`) and for cross-checking an API sync against the account's own records; duplicate rows are skipped the same way `--cold` re-runs are. Cannot be combined with `--cold` or `--watch`. The CSV itself carries no account ID, so rows are filed under the active account, or under `--account NAME` when given.
-
-### `frmj positions`
-
-Show all open trades with live P/L, margin, TP/SL levels, and an estimated daily financing charge (in home currency, colored green/red — not the raw annualized rate), plus an account summary footer. The footer includes Oanda's margin closeout percent; at 100% Oanda begins closing positions.
-
-Pending entry orders (limit, stop, and market-if-touched — e.g. from `frmj trade --limit`) are listed in their own section below the open trades, with their price, units, time in force, TP/SL, and the current market price on the side they would fill against (ask for a long, bid for a short). Cancelling a pending order is done in Oanda's own interface for now.
-
-```sh
-frmj positions
-```
-
-### `frmj financing`
-
-Show current long/short financing rates for every tradable FX pair (Oanda's own "daily financing rates" — annualized percentages, republished daily). Pairs are grouped Majors / Minors / Exotics, alphabetical within each group; metals (XAU, XAG, ...) are excluded since the major/minor/exotic taxonomy doesn't apply to them.
-
-```sh
-frmj financing
-```
-
-A negative rate means you pay to hold that side overnight; a positive rate means you're paid.
-
-Each live fetch also records that day's rates locally, since Oanda's API only exposes the current rate (no historical endpoint). Use `--date` to look up a previously recorded snapshot instead of fetching live:
-
-```sh
-frmj financing --date 2026-04-01
-```
-
-Only dates `frmj financing` was actually run on have data — there's no way to backfill earlier dates. Use `--quiet` to fetch and record silently (no output on success; errors still print and exit 1) for an unattended daily cron job:
-
-```sh
-frmj financing --quiet
-```
-
-```cron
-0 0 * * * /path/to/frmj financing --quiet
-```
-
-### `frmj trade`
-
-Interactive trade planning and execution flow.
-
-```sh
-frmj trade EUR_USD long
-frmj trade USD_JPY short
-frmj trade AUD_USD long --dry-run    # show plan only; no order placed
-frmj trade --resume                  # execute a previously saved draft plan
-frmj trade EUR_USD long --multi my-props   # fan the same trade out to a saved account group
-frmj trade EUR_USD long --account funded   # trade a non-active account
-frmj trade EUR_USD long --limit      # place a GTC limit entry order instead of a market order
-```
-
-The flow:
-
-1. Fetches live account state (NAV, available margin, open trade count) and live price.
-2. Runs the risk model to determine capital to deploy and enforce trade limits.
-3. Computes position size (units, margin required, pip value).
-4. Displays the trade plan: NAV, open trades, capital at risk, units, margin, pip value, and entry price.
-5. Prompts for take-profit and stop-loss (pips or `%` return-on-margin).
-6. Displays exit prices, projected P/L, and R:R ratio.
-7. Confirms before placing the order (`y` / `n` / `e` to re-enter TP/SL).
-8. Places a market order (or a limit order with `--limit`, see below); on failure, prompts to retry, save the draft, or abort.
-9. Attaches TP/SL to the open trade on Oanda (a limit order carries them instead).
-10. Syncs the fill into the local journal.
-11. Prompts for an optional note and tags.
-
-**TP/SL input formats:**
-
-| Input | Meaning |
+| Command | What it does |
 |---|---|
-| `50` or `50p` | 50 pips |
-| `5%` | 5% return on margin used |
+| [`frmj status`](docs/configuration.md#status-at-a-glance) | Active account, its type, and the execution mode |
+| [`frmj sync`](docs/commands.md#frmj-sync) | Pull transactions from Oanda (or an Oanda Hub CSV) into the local database |
+| [`frmj positions`](docs/commands.md#frmj-positions) | Open trades and pending orders with live P/L, TP/SL, financing, and an account summary |
+| [`frmj financing`](docs/commands.md#frmj-financing) | Current long/short financing rates, recorded daily for later lookup |
+| [`frmj trade`](docs/commands.md#frmj-trade) | Interactive risk-checked sizing, TP/SL planning, and order placement |
+| [`frmj close`](docs/commands.md#frmj-close) | Close all open tickets for an instrument |
+| [`frmj stats`](docs/commands.md#frmj-stats) | Performance statistics from the local journal |
+| [`frmj journal`](docs/commands.md#frmj-journal) | Recent transactions with their notes and tags |
+| [`frmj export`](docs/commands.md#frmj-export) | Export transactions to CSV or JSON |
+| [`frmj note`](docs/commands.md#frmj-note) / [`tag`](docs/commands.md#frmj-tag) | Annotate a transaction |
+| [`frmj account`](docs/commands.md#frmj-account) | Manage account profiles, API tokens, and [account groups](docs/commands.md#frmj-account-group) |
+| [`frmj mode`](docs/commands.md#frmj-mode) | Enable or disable live order placement |
+| [`frmj config`](docs/commands.md#frmj-config) | Get, set, and validate configuration |
 
-If the account being traded (the active account, or `--account NAME`) is a live account and live mode is not enabled, the `trade` command exits with a clear error before placing any order.
-
-If the order placement request times out or fails, the plan can be saved (`s`) and resumed later with `frmj trade --resume`. The saved plan records the account it was planned for, and `--resume` places the order on that account even if the active account has since changed. `--account` cannot be combined with `--resume` or `--multi`.
-
-**`--limit`** (`-l`) places a GTC limit entry order instead of a market order. After the risk check, the current bid/ask is shown and you're prompted for the entry:
-
-| Input | Meaning |
-|---|---|
-| `15` or `15p` | 15 pips better than the market — below the ask for a long, above the bid for a short |
-| `@1.0950` | the limit price itself |
-| `0.5%` | 0.5% of the current price (a percent of *price*, not of margin as for TP/SL) |
-
-A price that would fill immediately (at or above the ask for a long, at or below the bid for a short) is rejected and re-prompted. TP/SL, R:R, and financing in the plan are computed at the limit price; the unit count is sized at current conversion rates. TP/SL are sent with the order and Oanda applies them when it fills, so there is no separate attach step. The entry's note, tags, and TP/SL plan are stored against the pending order and move to its fill on the next `frmj sync` after it fills. If Oanda fills the order the moment it arrives (the market crossed the price first), it is reported as filled and journaled on the fill directly. A saved draft remembers the limit price, so `--resume` places it as a limit order again. `--limit` cannot be combined with `--resume` or `--multi`.
-
-**`--multi GROUP`** places the same trade on every account in a saved group (see `frmj account group` below) instead of just the active account. Risk, sizing, and correlation are evaluated independently per account (each has its own NAV and open positions); the instrument and TP/SL choice are shared, and a single confirmation covers the whole group. Not supported together with `--resume`.
-
-**`--opposite ACCOUNT`** (repeatable), only with `--multi`, names accounts within the group that take the *other* side of the trade — short when the dialog's direction is long, long when short. TP/SL are mirrored automatically (the same pips/%RoM target applied to the opposite direction naturally lands on the mirrored price). Every named account must already be a member of the group.
-
-### `frmj close`
-
-Close all open tickets for an instrument.
-
-```sh
-frmj close EUR_USD
-```
-
-Shows each ticket's current P/L, prompts for confirmation, then runs an incremental sync after closing.
-
-### `frmj stats`
-
-Show trade performance statistics from the local journal. Auto-syncs before displaying.
-
-```sh
-frmj stats
-```
-
-Output includes: win rate, average P/L, total P/L, total financing, and best/worst trade; breakdowns by direction (long/short), instrument, instrument & direction (omitted when every pair was only traded one way), weekday (fixed UTC+10 AEST, no DST), hour (local timezone), and tag; and financing paid/earned by instrument. The weekday and hour tables show each bucket twice: by close time and by open time.
+`frmj sync`, `positions`, `trade`, `close`, and `journal` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command.
 
 ![Example frmj stats output](docs/frmj_stats.png)
 
-### `frmj journal`
+## Documentation
 
-Display recent transactions with any attached notes and tags. Auto-syncs before displaying. Only the active account's transactions are shown unless `--account NAME` or `--all-accounts` is given (not both).
-
-```sh
-frmj journal                          # last 20 transactions
-frmj journal --number 50              # last 50 transactions
-frmj journal --instrument EUR_USD     # filter by instrument
-frmj journal --type ORDER_FILL        # filter by transaction type
-frmj journal --since 2026-04-01       # on or after a date
-frmj journal --with-notes             # only transactions with notes
-frmj journal --tag breakout           # only transactions tagged 'breakout'
-frmj journal --account prop-1         # another account's transactions, without switching
-frmj journal --all-accounts           # include every account (-A), not just the active one
-```
-
-### `frmj export`
-
-Export transactions to CSV or JSON for external analysis.
-
-```sh
-frmj export                                  # CSV to stdout
-frmj export --format json                    # JSON to stdout
-frmj export --output trades.csv              # write to file
-frmj export --instrument EUR_USD --since 2026-01-01 --include-notes
-```
-
-Supports the same `--instrument`, `--type`, and `--since` filters as `journal`.
-
-### `frmj note`
-
-Attach a free-text note to any transaction by its Oanda transaction ID.
-
-```sh
-frmj note 12345 "Entered on 4H breakout, tight spread"
-```
-
-Run `frmj sync` first if the transaction is not yet in the local database.
-
-### `frmj tag`
-
-Attach one or more short labels to a transaction.
-
-```sh
-frmj tag 12345 breakout london-open
-```
-
-Tags are normalised to lowercase. Only letters, digits, hyphens, and underscores are allowed.
-
-### `frmj account`
-
-Manage named Oanda account profiles.
-
-```sh
-frmj account add NAME              # add a new account profile (prompts for Oanda ID and type)
-frmj account list                  # list all configured accounts
-frmj account use NAME              # set NAME as the active account
-frmj account current               # show the currently active account
-frmj account remove NAME           # remove an account profile
-frmj account set-token practice    # store or update the practice API token
-frmj account set-token live        # store or update the live API token
-```
-
-#### `frmj account group`
-
-Named, reusable sets of accounts, used by `frmj trade --multi GROUP` to place the same trade on several accounts at once. A group may freely mix practice and live accounts.
-
-```sh
-frmj account group add my-props alpha    # add 'alpha' to group 'my-props' (creates the group if new)
-frmj account group add my-props beta
-frmj account group remove my-props beta  # remove one member
-frmj account group list                  # list all groups and their members
-frmj account group show my-props         # show one group's members
-frmj account group delete my-props       # delete the group entirely
-```
-
-### `frmj mode`
-
-Control whether live order placement is enabled. This is independent of account selection and acts as an additional confirmation gate.
-
-```sh
-frmj mode practice    # disable live order placement (safe default)
-frmj mode live        # enable live order placement (requires typing "ENABLE LIVE")
-```
-
-### `frmj config`
-
-```sh
-frmj config set max_open_trades 6  # set a config key
-frmj config get max_open_trades    # read one key
-frmj config get                    # show all keys + token status
-frmj config unset risk_strategy    # remove a key (resets to default)
-frmj config check                  # validate all config, report issues
-frmj config check --connectivity   # also verify credentials against the API
-```
-
-### Risk model (`domain/risk.py`)
-
-Three sizing strategies are supported:
-
-**`remaining_margin_fraction`** (default) — the primary strategy. With `M` max trades and `N` currently open, the next trade deploys `1 / (M + 1 - N)` of available margin. This produces an invariant: over `M` filled trades, each consumes exactly `1/(M+1)` of the original margin, leaving a permanent `1/(M+1)` buffer as breathing room for margin calls. No parameter needed beyond `max_open_trades`.
-
-**`percent_of_equity`** — a fixed fraction of total account equity, regardless of open trades. Set `percent_of_equity` config key.
-
-**`fixed_dollar`** — a fixed dollar amount per trade. Set `fixed_dollar` config key.
-
-All strategies respect `safety_reserve_pct`: that fraction of equity is subtracted from available margin before any formula is applied.
-
-**Pending entry orders** (limit, stop, market-if-touched) are treated as if they had already filled, for market and limit trades alike: each one counts toward `N` and the `max_open_trades` cap, its estimated margin at current prices is subtracted from available margin before sizing, and it counts for the `scale_in` and correlation checks. Oanda sets aside no margin for a pending order, so without this a new trade could leave too little margin for it to fill. The trade plan shows them next to open trades, e.g. `Open trades: 2 / 6 (+1 pending)`.
-
-
----
-
-## Environment Variables
-
-| Variable | Required | Description |
-|---|---|---|
-| `OANDA_API_TOKEN_PRACTICE` | No | API token for practice accounts. Takes priority over the OS keychain. |
-| `OANDA_API_TOKEN` | No | API token for live accounts; also used as a fallback for practice accounts. |
-| `FRMJ_DB_PATH` | No | Path to the SQLite file. Defaults to `~/.local/share/frmj/frmj.db`. |
-
-### Config table keys (set with `frmj config set`)
-
-Account IDs and active account selection are managed via `frmj account`, not `frmj config set`. The following keys are valid:
-
-| Key | Required | Default | Description |
-|---|---|---|---|
-| `max_open_trades` | Yes | — | Maximum concurrent open tickets (e.g. `6`) |
-| `risk_strategy` | No | `remaining_margin_fraction` | Sizing strategy (see Risk Model) |
-| `blocking_mode` | No | `hard_block` | `hard_block` or `warning_only` at the trade cap |
-| `scale_in` | No | `never` | `never`, `warn`, or `allow` for same-instrument adds (an open ticket or pending order on the instrument) |
-| `correlation_blocking_mode` | No | `warning_only` | `hard_block` or `warning_only` for correlated open positions or pending orders |
-| `safety_reserve_pct` | No | `0` | Fraction of equity to never deploy, e.g. `0.10` for 10% |
-| `percent_of_equity` | Conditional | — | Required when `risk_strategy = percent_of_equity` |
-| `fixed_dollar` | Conditional | — | Required when `risk_strategy = fixed_dollar` |
-
-
----
-
-## Architecture
-
-```
-src/frmj/
-├── cli.py              # Typer CLI — prompts/output, thin shell over services + app layer
-├── services.py         # Multi-step flows (trade planning, post-fill, positions, close) — no Typer dependency
-├── app.py              # Wiring: DB factory, client factory, config helpers, keychain
-├── accounts.py         # Pure SQLite CRUD for named account profiles and live-mode flag
-├── domain/
-│   ├── risk.py         # Pure risk model: trade cap, scale-in policy, sizing decision
-│   ├── sizing.py       # Pure unit sizing: capital → units respecting margin formula
-│   └── pricing.py      # Pure exit pricing: TP/SL pips or %RoM → prices, P/L, R:R
-├── execution/
-│   ├── oanda/
-│   │   ├── client.py   # OandaClient — httpx wrapper for Oanda v3 REST API
-│   │   ├── parsing.py  # Pure functions: Oanda API dicts → dataclasses
-│   │   └── models.py   # Dataclasses shared by client.py and parsing.py
-│   └── sync.py         # Ingestion: Oanda rows → SQLite, cursor management
-└── persistence/
-    └── schema.py       # SQLite DDL and ensure_schema()
-```
-
-### Layer separation
-
-The three domain modules (`risk`, `sizing`, `pricing`) are **pure functions with no I/O**. They accept data objects and return data objects. No database, no HTTP, no environment variables, no clocks. This makes them trivially testable and reusable from any future interface (GUI, REST API, back-testing harness).
-
-The execution layer (`oanda`, `sync`) handles all network and database I/O. It feeds structured data into the domain layer and writes results to SQLite.
-
-`accounts.py` is pure SQLite CRUD — no I/O beyond the database connection. All keychain access and environment-variable resolution happens in `app.py`.
-
-`app.py` is the only place that reads environment variables, touches the filesystem, or accesses the OS keychain. The CLI commands call `app.py` to obtain wired-up dependencies, then pass them into `services.py` and the domain layer.
-
-`services.py` holds multi-step operations that combine several Oanda API calls and/or domain calls into one unit — fetching the market data needed to plan a trade, evaluating risk and correlation, attaching TP/SL and syncing after a fill, fetching the data behind `positions`, and closing tickets for `close`. It takes an already-open connection and client as arguments and has no Typer dependency, so it's reusable from any future non-CLI interface. Prompting, confirmation, and terminal output stay in `cli.py`.
-
-`plan_account_sizing()` is the one per-account planning step — risk check, correlation check, and unit sizing — shared by both `trade()` (called once) and the `--multi` group flow (called once per account, against a shared `InstrumentContext` but each account's own `AccountContext`), so the two commands can't drift out of sync on that logic.
-
-### Database schema
-
-SQLite at `~/.local/share/frmj/frmj.db` (or `$FRMJ_DB_PATH`). WAL mode. Foreign keys enforced.
-
-| Table | Purpose |
-|---|---|
-| `accounts` | Named Oanda account profiles (name, account ID, practice flag). Active account and live-mode flag are stored in `config`. |
-| `transactions` | Append-only Oanda event ledger. Stores full raw JSON alongside parsed index columns. |
-| `notes` | Free-text notes attached to transactions. |
-| `tags` | Short labels attached to transactions; used in journal filters and stats breakdowns. |
-| `trade_plans` | Intended TP/SL prices recorded at order time; shown in `journal` alongside fills. For a limit order the plan (and any notes/tags) sits on the pending order's transaction until sync moves it to the fill. |
-| `sync_cursors` | One row per account; tracks the last ingested Oanda transaction ID for incremental sync. |
-| `config` | Flat key/value store for all runtime configuration, including `active_account` and `live_mode`. |
-
-Transactions are never updated or deleted — Oanda is the system of record. Corrective events arrive as new rows. The full raw JSON payload is preserved in every row so new columns can be added via migration without re-fetching from the API.
-
-### Migration from earlier versions
-
-If you have an existing database using the old flat-config account system (`practice_account_id`, `account_id`, `practice_mode` keys), FRoMaJ will auto-migrate on first run: it reads those keys, creates corresponding named account profiles (`"practice"` and/or `"live"`), and removes the old keys. No manual action required.
+- [Command reference](docs/commands.md) — every command and option in detail
+- [Configuration](docs/configuration.md) — API tokens, execution mode, environment variables, config keys, and the risk model
+- [Architecture](docs/architecture.md) — module layout, layer separation, and database schema
 
 ---
 
