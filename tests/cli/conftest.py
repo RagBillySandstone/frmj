@@ -13,7 +13,9 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 
+import click
 import pytest
+import typer
 
 from frmj.accounts import add_account, set_active_account
 from frmj.app import get_db
@@ -242,6 +244,18 @@ def _open_trade(
         stop_loss_price=Decimal(sl_price) if sl_price else None,
         open_time="2026-04-25T14:30:00.000000Z",
     )
+
+
+def _completion_ctx(params: dict[str, object]) -> typer.Context:
+    """Return a real ``typer.Context`` carrying *params*.
+
+    Stands in for the context a shell-completion callback receives: the
+    completers only read ``ctx.params`` (the options already typed on the
+    command line), so a bare context around a dummy command is enough.
+    """
+    ctx = typer.Context(click.Command("test"))
+    ctx.params = dict(params)
+    return ctx
 
 
 def _pending_order(

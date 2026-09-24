@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from click.testing import Result
@@ -13,12 +12,12 @@ from frmj.app import get_db, set_config
 from frmj.cli import app
 from frmj.cli._completion import _complete_open_instrument
 
-from .conftest import FakeFullClient, _open_trade, _row
+from .conftest import FakeFullClient, _completion_ctx, _open_trade, _row
 
 runner = CliRunner()
 
 # Completion context with no --account on the command line.
-_CTX = SimpleNamespace(params={})
+_CTX = _completion_ctx({})
 
 
 class TestCloseCommand:
@@ -253,7 +252,7 @@ class TestCloseCommand:
             return fake
 
         monkeypatch.setattr("frmj.cli._completion.get_client", _get_client)
-        ctx = SimpleNamespace(params={"account": "other"})
+        ctx = _completion_ctx({"account": "other"})
         assert _complete_open_instrument(ctx, "") == ["EUR_USD"]
         assert requested == ["other"]
 

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
 
 from frmj.cli import app
 from frmj.cli._completion import _complete_account_group, _complete_group_member
+
+from .conftest import _completion_ctx
 
 runner = CliRunner()
 
@@ -422,14 +423,14 @@ class TestAccountGroupCommands:
         monkeypatch.setattr("frmj.app.keyring.set_password", lambda s, u, p: None)
         runner.invoke(app, ["account", "add", "funded"], input="live-001\nlive\n")
         runner.invoke(app, ["account", "group", "add", "g1", "practice"])
-        ctx = SimpleNamespace(params={"group_name": "g1"})
+        ctx = _completion_ctx({"group_name": "g1"})
         assert _complete_group_member(ctx, "") == ["practice"]
         assert _complete_group_member(ctx, "fun") == []
 
     def test_complete_group_member_unknown_group_returns_empty(
         self, db_path: Path
     ) -> None:
-        ctx = SimpleNamespace(params={"group_name": "ghost"})
+        ctx = _completion_ctx({"group_name": "ghost"})
         assert _complete_group_member(ctx, "") == []
 
     def test_list_empty_shows_message(self, db_path: Path) -> None:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -15,7 +14,7 @@ from frmj.cli.config import (
     _complete_config_value,
 )
 
-from .conftest import FakeFullClient
+from .conftest import FakeFullClient, _completion_ctx
 
 runner = CliRunner()
 
@@ -74,18 +73,18 @@ class TestConfigCommands:
 
     def test_complete_config_value_suggests_enum_settings(self) -> None:
         """Tab completion on VALUE suggests the enum settings for the typed key."""
-        ctx = SimpleNamespace(params={"key": "blocking_mode"})
+        ctx = _completion_ctx({"key": "blocking_mode"})
         assert _complete_config_value(ctx, "") == ["hard_block", "warning_only"]
         assert _complete_config_value(ctx, "hard") == ["hard_block"]
 
     def test_complete_config_value_empty_for_freeform_key(self) -> None:
         """Keys with no fixed set of settings (e.g. numeric ones) get no suggestions."""
-        ctx = SimpleNamespace(params={"key": "max_open_trades"})
+        ctx = _completion_ctx({"key": "max_open_trades"})
         assert _complete_config_value(ctx, "") == []
 
     def test_complete_config_value_empty_before_key_is_typed(self) -> None:
         """With no key parsed yet, there is nothing to suggest for VALUE."""
-        ctx = SimpleNamespace(params={})
+        ctx = _completion_ctx({})
         assert _complete_config_value(ctx, "") == []
 
     def test_config_get_all_shows_all_keys(self, db_path: Path) -> None:

@@ -178,16 +178,17 @@ class TestTagCommand:
     def test_attach_tags_swallows_insert_errors(self, tag_db: Path) -> None:
         """A DB error on one tag insert is swallowed and skipped, not raised."""
 
-        class ExplodingConn:
-            def execute(self, sql: str, params: tuple[object, ...] = ()) -> object:
+        class ExplodingConn(sqlite3.Connection):
+            """A real connection whose every statement fails."""
+
+            def execute(self, sql: str, parameters: object = (), /) -> sqlite3.Cursor:
                 raise sqlite3.OperationalError("boom")
 
-            def commit(self) -> None:
-                pass
-
-        attached = _attach_tags(
-            ExplodingConn(), transaction_id=1, raw_tags=["breakout"]
-        )
+        conn = sqlite3.connect(":memory:", factory=ExplodingConn)
+        try:
+            attached = _attach_tags(conn, transaction_id=1, raw_tags=["breakout"])
+        finally:
+            conn.close()
         assert attached == 0
 
     def test_journal_shows_tags(
