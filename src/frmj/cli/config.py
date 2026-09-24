@@ -68,7 +68,9 @@ def _complete_config_value(ctx: typer.Context, incomplete: str) -> list[str]:
 @config_app.command("set")
 def config_set(
     key: str = typer.Argument(
-        ..., help="Config key, e.g. account_id", autocompletion=_complete_config_key
+        ...,
+        help="Config key, e.g. max_open_trades",
+        autocompletion=_complete_config_key,
     ),
     value: str = typer.Argument(
         ..., help="Config value", autocompletion=_complete_config_value
@@ -126,7 +128,7 @@ def config_get(
 def config_unset(
     key: str = typer.Argument(
         ...,
-        help="Config key to remove, e.g. account_id",
+        help="Config key to remove, e.g. risk_strategy",
         autocompletion=_complete_config_key,
     ),
 ) -> None:
@@ -202,7 +204,7 @@ def config_check(
         False,
         "--connectivity",
         "-c",
-        help="Also verify the token and account_id are accepted by Oanda.",
+        help="Also verify the active account's ID and token are accepted by Oanda.",
     ),
 ) -> None:
     """Validate configuration and report any issues."""
