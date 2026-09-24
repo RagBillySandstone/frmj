@@ -190,8 +190,8 @@ frmj account add NAME              # add a new account profile (prompts for Oand
 frmj account list                  # list all configured accounts
 frmj account use NAME              # set NAME as the active account
 frmj account current               # show the currently active account
-frmj account rename OLD NEW        # rename a profile (keeps its Oanda ID, and stays active if it was)
-frmj account remove NAME           # remove an account profile (not the active one; its token is kept)
+frmj account rename OLD NEW        # rename a profile (keeps its Oanda ID, groups, and active status)
+frmj account remove NAME           # remove a profile and its group memberships (not the active one; its token is kept)
 frmj account set-token practice    # store or update the practice API token
 frmj account set-token live        # store or update the live API token
 ```
