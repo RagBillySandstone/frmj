@@ -83,7 +83,7 @@ frmj config check --connectivity   # also calls the Oanda API to verify credenti
 | [`frmj sync`](docs/commands.md#frmj-sync) | Pull transactions from Oanda (or an Oanda Hub CSV) into the local database |
 | [`frmj positions`](docs/commands.md#frmj-positions) | Open trades and pending orders with live P/L, TP/SL, financing, and an account summary |
 | [`frmj financing`](docs/commands.md#frmj-financing) | Current long/short financing rates, recorded daily for later lookup |
-| [`frmj trade`](docs/commands.md#frmj-trade) | Interactive risk-checked sizing, TP/SL planning, and order placement |
+| [`frmj trade`](docs/commands.md#frmj-trade) | Interactive risk-checked sizing, TP/SL and trailing-stop planning, and order placement |
 | [`frmj close`](docs/commands.md#frmj-close) | Close all open tickets for an instrument |
 | [`frmj stats`](docs/commands.md#frmj-stats) | Performance statistics from the local journal |
 | [`frmj journal`](docs/commands.md#frmj-journal) | Recent transactions with their notes and tags |

@@ -21,9 +21,11 @@ frmj sync --account funded        # sync a non-active account
 
 ## `frmj positions`
 
-Show all open trades with live P/L, margin, TP/SL levels, and an estimated daily financing charge (in home currency, colored green/red — not the raw annualized rate), plus an account summary footer. The footer includes Oanda's margin closeout percent; at 100% Oanda begins closing positions.
+Show all open trades with live P/L, margin, TP/SL levels, any trailing stop, and an estimated daily financing charge (in home currency, colored green/red — not the raw annualized rate), plus an account summary footer. The footer includes Oanda's margin closeout percent; at 100% Oanda begins closing positions.
 
-Pending entry orders (limit, stop, and market-if-touched — e.g. from `frmj trade --limit`) are listed in their own section below the open trades, with their price, units, time in force, TP/SL, and the current market price on the side they would fill against (ask for a long, bid for a short). Cancelling a pending order is done in Oanda's own interface for now.
+A trailing stop shows its current trigger price, the P/L if it triggers there, and the distance it trails by in price units: `Trail: 1.10150 (+$10.00) [0.00200 behind]`. The trigger moves as the trade goes your way, so a positive figure means the stop has locked in profit.
+
+Pending entry orders (limit, stop, and market-if-touched — e.g. from `frmj trade --limit`) are listed in their own section below the open trades, with their price, units, time in force, TP/SL and any trailing stop, and the current market price on the side they would fill against (ask for a long, bid for a short). Cancelling a pending order is done in Oanda's own interface for now.
 
 ```sh
 frmj positions
@@ -67,6 +69,7 @@ frmj trade --resume                  # execute a previously saved draft plan
 frmj trade EUR_USD long --multi my-props   # fan the same trade out to a saved account group
 frmj trade EUR_USD long --account funded   # trade a non-active account
 frmj trade EUR_USD long --limit      # place a GTC limit entry order instead of a market order
+frmj trade EUR_USD long --trail      # also set a trailing stop-loss
 ```
 
 The flow:
@@ -75,11 +78,11 @@ The flow:
 2. Runs the risk model to determine capital to deploy and enforce [trade limits](configuration.md#trade-limits-and-correlation): the open-trade cap, scale-in policy, and correlated-position check.
 3. Computes position size (units, margin required, pip value).
 4. Displays the trade plan: NAV, open trades, capital at risk, units, margin, pip value, and entry price.
-5. Prompts for take-profit and stop-loss (pips or `%` return-on-margin).
+5. Prompts for take-profit and stop-loss (pips or `%` return-on-margin), and a trailing stop with `--trail`.
 6. Displays exit prices, projected P/L, and R:R ratio.
-7. Confirms before placing the order (`y` / `n` / `e` to re-enter TP/SL).
+7. Confirms before placing the order (`y` / `n` / `e` to re-enter TP/SL and any trailing stop).
 8. Places a market order (or a limit order with `--limit`, see below); on failure, prompts to retry, save the draft, or abort.
-9. Attaches TP/SL to the open trade on Oanda (a limit order carries them instead).
+9. Attaches TP/SL and any trailing stop to the open trade on Oanda (a limit order carries them instead).
 10. Syncs the fill into the local journal.
 11. Prompts for an optional note and tags.
 
@@ -103,6 +106,16 @@ If the order placement request times out or fails, the plan can be saved (`s`) a
 | `0.5%` | 0.5% of the current price (a percent of *price*, not of margin as for TP/SL) |
 
 A price that would fill immediately (at or above the ask for a long, at or below the bid for a short) is rejected and re-prompted. TP/SL, R:R, and financing in the plan are computed at the limit price; the unit count is sized at current conversion rates. TP/SL are sent with the order and Oanda applies them when it fills, so there is no separate attach step. The entry's note, tags, and TP/SL plan are stored against the pending order and move to its fill on the next `frmj sync` after it fills. If Oanda fills the order the moment it arrives (the market crossed the price first), it is reported as filled and journaled on the fill directly. A saved draft remembers the limit price, so `--resume` places it as a limit order again. `--limit` cannot be combined with `--resume` or `--multi`.
+
+**`--trail`** (`-t`) adds a trailing stop-loss prompt after the stop-loss one, in pips (`20` or `20p`; Enter skips). Oanda keeps the stop that far behind the price and moves it only in the trade's favour. It trails the side of the book the trade would close at (the bid for a long, the ask for a short), so it starts one spread further from entry than a fixed stop-loss of the same pips. The plan's Trail row shows where it starts and the loss there, spread included:
+
+```
+  SL: 1.09010  →  $-909.09  (-45.5% RoM)
+  Trail: 20.0p  →  starts at 1.09790  →  $-200.00  (-10.0% RoM, incl. spread)
+  R:R  2.27
+```
+
+A fixed stop-loss and a trailing stop can be set together; Oanda closes the trade on whichever triggers first, and R:R is measured against the tighter of the two. A distance outside the instrument's allowed trailing-stop range is rejected and re-prompted. On a market order the trailing stop is attached after the fill, like TP/SL; a limit order carries it and Oanda sets it when the order fills. The distance is saved in the trade plan (shown by `frmj journal`) and in a saved draft. It works with `--limit` and `--multi` (the same distance on every account, `--opposite` ones included) but cannot be combined with `--resume`, which uses the saved draft's trailing stop.
 
 **`--multi GROUP`** places the same trade on every account in a saved group (see [`frmj account group`](#frmj-account-group) below) instead of just the active account. Risk, sizing, and correlation are evaluated independently per account (each has its own NAV and open positions); the instrument and TP/SL choice are shared, and a single confirmation covers the whole group. Not supported together with `--resume`.
 

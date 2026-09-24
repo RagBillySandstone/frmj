@@ -29,3 +29,7 @@ Unlike the REST API's ORDER_FILL transactions, the Oanda Hub CSV export never st
 ### 13. `trade --limit` follow-ups: GTD expiry and `--multi`
 
 `trade --limit` v1 is GTC-only and single-account. Two extensions were deferred: an `--expires` option for GTD orders (Oanda's `timeInForce: GTD` + `gtdTime`), and `--limit` with `--multi`, which needs the limit price chosen once and mirrored for `--opposite` accounts (a long's "15 pips below ask" becomes a short's "15 pips above bid").
+
+### 14. `frmj trail` — add or change a trailing stop on an open trade
+
+`trade --trail` only sets a trailing stop when the trade is placed. Add `frmj trail TRADE_ID PIPS` to add, change, or remove (`PIPS` = `off`) one on an already-open trade via `PUT /accounts/{id}/trades/{tradeID}/orders` with `trailingStopLoss: {distance}` (or `null` to remove). Reuse `compute_trailing_stop` for the pips→distance conversion and bounds check, confirm first, then sync.
