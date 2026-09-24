@@ -251,12 +251,13 @@ def journal(
     all_accounts: bool = typer.Option(
         False,
         "--all-accounts",
-        "-a",
+        "-A",
         help="Show transactions from every account, not just the active one.",
     ),
     account_name: str | None = typer.Option(
         None,
         "--account",
+        "-a",
         help="Use this account instead of the active one (see 'frmj account list').",
         autocompletion=_complete_account_name,
         show_default=False,

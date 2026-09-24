@@ -880,7 +880,7 @@ class TestJournalAccountScope:
         assert "222" in result.output
         assert "111" not in result.output
 
-    @pytest.mark.parametrize("flag", ["--all-accounts", "-a"])
+    @pytest.mark.parametrize("flag", ["--all-accounts", "-A"])
     def test_all_accounts_flag_shows_every_account(
         self, scope_db: Path, flag: str
     ) -> None:
@@ -927,9 +927,12 @@ class TestJournalAccountScope:
         ids = [ln.split()[0] for ln in result.output.splitlines() if ln.startswith("#")]
         assert ids[-1] == "#999"
 
-    def test_account_option_shows_only_named_account(self, scope_db: Path) -> None:
+    @pytest.mark.parametrize("flag", ["--account", "-a"])
+    def test_account_option_shows_only_named_account(
+        self, scope_db: Path, flag: str
+    ) -> None:
         """--account overrides the active account without switching it."""
-        result = runner.invoke(app, ["journal", "--account", "other"])
+        result = runner.invoke(app, ["journal", flag, "other"])
         assert result.exit_code == 0, result.output
         assert "222" in result.output
         assert "111" not in result.output
