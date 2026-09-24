@@ -15,12 +15,14 @@ src/frmj/
 ├── domain/
 │   ├── risk.py         # Pure risk model: trade cap, scale-in policy, sizing decision
 │   ├── sizing.py       # Pure unit sizing: capital → units respecting margin formula
-│   └── pricing.py      # Pure exit pricing: TP/SL pips or %RoM → prices, P/L, R:R
+│   ├── pricing.py      # Pure exit pricing: TP/SL pips or %RoM → prices, P/L, R:R
+│   └── analytics.py    # Pure trade statistics behind `frmj stats`
 ├── execution/
 │   ├── oanda/
 │   │   ├── client.py   # OandaClient — httpx wrapper for Oanda v3 REST API
 │   │   ├── parsing.py  # Pure functions: Oanda API dicts → dataclasses
 │   │   └── models.py   # Dataclasses shared by client.py and parsing.py
+│   ├── csv_import.py   # Parser for Oanda Hub transaction-history CSV exports (`sync --csv`)
 │   └── sync.py         # Ingestion: Oanda rows → SQLite, cursor management
 └── persistence/
     └── schema.py       # SQLite DDL and ensure_schema()
@@ -28,7 +30,7 @@ src/frmj/
 
 ## Layer separation
 
-The three domain modules (`risk`, `sizing`, `pricing`) are **pure functions with no I/O**. They accept data objects and return data objects. No database, no HTTP, no environment variables, no clocks. This makes them trivially testable and reusable from any future interface (GUI, REST API, back-testing harness).
+The four domain modules (`risk`, `sizing`, `pricing`, `analytics`) are **pure functions with no I/O**. They accept data objects and return data objects. No database, no HTTP, no environment variables, no clocks. This makes them trivially testable and reusable from any future interface (GUI, REST API, back-testing harness).
 
 The execution layer (`oanda`, `sync`) handles all network and database I/O. It feeds structured data into the domain layer and writes results to SQLite.
 
@@ -42,15 +44,17 @@ The execution layer (`oanda`, `sync`) handles all network and database I/O. It f
 
 ## Database schema
 
-SQLite at `~/.local/share/frmj/frmj.db` (or `$FRMJ_DB_PATH`). WAL mode. Foreign keys enforced.
+SQLite at the platform default path (see [`FRMJ_DB_PATH`](configuration.md#environment-variables)) or `$FRMJ_DB_PATH`. WAL mode. Foreign keys enforced.
 
 | Table | Purpose |
 |---|---|
 | `accounts` | Named Oanda account profiles (name, account ID, practice flag). Active account and live-mode flag are stored in `config`. |
+| `account_groups` | Named sets of accounts for `trade --multi`; one row per group membership. |
 | `transactions` | Append-only Oanda event ledger. Stores full raw JSON alongside parsed index columns. |
 | `notes` | Free-text notes attached to transactions. |
 | `tags` | Short labels attached to transactions; used in journal filters and stats breakdowns. |
 | `trade_plans` | Intended TP/SL prices recorded at order time; shown in `journal` alongside fills. For a limit order the plan (and any notes/tags) sits on the pending order's transaction until sync moves it to the fill. |
+| `financing_rate_snapshots` | Daily captures of Oanda's long/short financing rates, recorded by each live `frmj financing` run; read back by `financing --date`. |
 | `sync_cursors` | One row per account; tracks the last ingested Oanda transaction ID for incremental sync. |
 | `config` | Flat key/value store for all runtime configuration, including `active_account` and `live_mode`. |
 

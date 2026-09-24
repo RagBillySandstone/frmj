@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md)
 
-`frmj sync`, `positions`, `trade`, `close`, and `journal` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command without switching the active account; the output then begins by naming it.
+`frmj sync`, `positions`, `trade`, `close`, `journal`, and `stats` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command without switching the active account; the output then begins by naming it. `journal` and `stats` also accept `--all-accounts` (`-A`) to cover every account at once.
 
 ## `frmj sync`
 
@@ -72,7 +72,7 @@ frmj trade EUR_USD long --limit      # place a GTC limit entry order instead of 
 The flow:
 
 1. Fetches live account state (NAV, available margin, open trade count) and live price.
-2. Runs the risk model to determine capital to deploy and enforce trade limits.
+2. Runs the risk model to determine capital to deploy and enforce [trade limits](configuration.md#trade-limits-and-correlation): the open-trade cap, scale-in policy, and correlated-position check.
 3. Computes position size (units, margin required, pip value).
 4. Displays the trade plan: NAV, open trades, capital at risk, units, margin, pip value, and entry price.
 5. Prompts for take-profit and stop-loss (pips or `%` return-on-margin).
@@ -120,10 +120,12 @@ Shows each ticket's current P/L, prompts for confirmation, then runs an incremen
 
 ## `frmj stats`
 
-Show trade performance statistics from the local journal. Auto-syncs before displaying.
+Show trade performance statistics from the local journal. Auto-syncs before displaying. Only the active account's trades are counted unless `--account NAME` or `--all-accounts` is given (not both); the report begins with `Account: NAME` or `Accounts: all` so combined figures can't be mistaken for one account's.
 
 ```sh
-frmj stats
+frmj stats                    # active account
+frmj stats --account prop-1   # another account (-a), without switching
+frmj stats --all-accounts     # every account combined (-A)
 ```
 
 Output includes: win rate, average P/L, total P/L, total financing, and best/worst trade; breakdowns by direction (long/short), instrument, instrument & direction (omitted when every pair was only traded one way), weekday (fixed UTC+10 AEST, no DST), hour (local timezone), and tag; and financing paid/earned by instrument. The weekday and hour tables show each bucket twice: by close time and by open time.
@@ -157,7 +159,7 @@ frmj export --output trades.csv              # write to file
 frmj export --instrument EUR_USD --since 2026-01-01 --include-notes
 ```
 
-Supports the same `--instrument`, `--type`, and `--since` filters as `journal`.
+Supports the same `--instrument`, `--type`, and `--since` filters as `journal`. Unlike `journal`, export always includes every account in the local database (the `account_id` column tells them apart) and does not sync first — run `frmj sync` beforehand for up-to-date data.
 
 ## `frmj note`
 
@@ -167,7 +169,7 @@ Attach a free-text note to any transaction by its Oanda transaction ID.
 frmj note 12345 "Entered on 4H breakout, tight spread"
 ```
 
-Run `frmj sync` first if the transaction is not yet in the local database.
+Run `frmj sync` first if the transaction is not yet in the local database. Oanda transaction IDs are only unique within one account, so `note` and `tag` look the ID up in the active account; to annotate another account's transaction, switch to it first with `frmj account use NAME`.
 
 ## `frmj tag`
 
@@ -177,7 +179,7 @@ Attach one or more short labels to a transaction.
 frmj tag 12345 breakout london-open
 ```
 
-Tags are normalised to lowercase. Only letters, digits, hyphens, and underscores are allowed.
+Tags are normalised to lowercase. Only letters, digits, hyphens, and underscores are allowed. Like `note`, `tag` works on the active account's transactions.
 
 ## `frmj account`
 
@@ -188,10 +190,13 @@ frmj account add NAME              # add a new account profile (prompts for Oand
 frmj account list                  # list all configured accounts
 frmj account use NAME              # set NAME as the active account
 frmj account current               # show the currently active account
-frmj account remove NAME           # remove an account profile
+frmj account rename OLD NEW        # rename a profile (keeps its Oanda ID, and stays active if it was)
+frmj account remove NAME           # remove an account profile (not the active one; its token is kept)
 frmj account set-token practice    # store or update the practice API token
 frmj account set-token live        # store or update the live API token
 ```
+
+API tokens belong to an environment (practice or live), not to one account — see [API tokens](configuration.md#api-tokens).
 
 ### `frmj account group`
 
@@ -224,4 +229,8 @@ frmj config get                    # show all keys + token status
 frmj config unset risk_strategy    # remove a key (resets to default)
 frmj config check                  # validate all config, report issues
 frmj config check --connectivity   # also verify credentials against the API
+frmj config set-token              # store the API token for the active account's environment
+frmj config unset-token            # remove the API token for the active account's environment
 ```
+
+The keys and their meanings are listed under [Config table keys](configuration.md#config-table-keys-set-with-frmj-config-set).

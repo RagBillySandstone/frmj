@@ -41,6 +41,12 @@ source .venv/bin/activate
 frmj --help
 ```
 
+Optionally enable tab completion (account names, instruments, tags, config keys, ...) for your shell, then restart it:
+
+```sh
+frmj --install-completion
+```
+
 ---
 
 ## Quick start
@@ -59,7 +65,7 @@ frmj account set-token live        # store live token in OS keychain (prompted, 
 # Activate whichever account you want to work with
 frmj account use practice
 
-# Shared risk config
+# Risk settings (shared by all accounts)
 frmj config set max_open_trades 6
 
 # Check everything is wired up
@@ -83,18 +89,18 @@ frmj config check --connectivity   # also calls the Oanda API to verify credenti
 | [`frmj journal`](docs/commands.md#frmj-journal) | Recent transactions with their notes and tags |
 | [`frmj export`](docs/commands.md#frmj-export) | Export transactions to CSV or JSON |
 | [`frmj note`](docs/commands.md#frmj-note) / [`tag`](docs/commands.md#frmj-tag) | Annotate a transaction |
-| [`frmj account`](docs/commands.md#frmj-account) | Manage account profiles, API tokens, and [account groups](docs/commands.md#frmj-account-group) |
+| [`frmj account`](docs/commands.md#frmj-account) | Add, rename, and remove account profiles; API tokens; [account groups](docs/commands.md#frmj-account-group) |
 | [`frmj mode`](docs/commands.md#frmj-mode) | Enable or disable live order placement |
-| [`frmj config`](docs/commands.md#frmj-config) | Get, set, and validate configuration |
+| [`frmj config`](docs/commands.md#frmj-config) | Get, set, and validate configuration and risk settings |
 
-`frmj sync`, `positions`, `trade`, `close`, and `journal` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command.
+`frmj sync`, `positions`, `trade`, `close`, `journal`, and `stats` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command; `journal` and `stats` also take `--all-accounts` (`-A`).
 
 ![Example frmj stats output](docs/frmj_stats.png)
 
 ## Documentation
 
 - [Command reference](docs/commands.md) — every command and option in detail
-- [Configuration](docs/configuration.md) — API tokens, execution mode, environment variables, config keys, and the risk model
+- [Configuration](docs/configuration.md) — API tokens, execution mode, environment variables, config keys, the risk model, and trade limits
 - [Architecture](docs/architecture.md) — module layout, layer separation, and database schema
 
 ---
