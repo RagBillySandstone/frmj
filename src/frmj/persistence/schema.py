@@ -164,18 +164,22 @@ CREATE TABLE IF NOT EXISTS sync_cursors (
 
 
 -- -------------------------------------------------------------------------
--- Trade plans — intended TP/SL captured at entry time
+-- Trade plans — intended TP/SL/trailing stop captured at entry time
 -- -------------------------------------------------------------------------
 -- One row per ORDER_FILL.  Stores the prices the trader intended when they
 -- placed the order so the journal and stats layer can compare intent with
 -- outcome.  tp_price / sl_price are NULL when the user did not specify that
 -- side.  Prices are stored as TEXT Decimal strings (same pattern as raw_json
--- field values) to preserve exact representation.
+-- field values) to preserve exact representation.  trail_pips is the
+-- trailing stop's distance in pips (NULL for none) — a distance, not a
+-- price, since a trailing stop's price moves.  Databases created before it
+-- existed gain the column in _add_missing_columns.
 CREATE TABLE IF NOT EXISTS trade_plans (
     id              INTEGER PRIMARY KEY,
     transaction_id  INTEGER NOT NULL UNIQUE REFERENCES transactions(id),
     tp_price        TEXT,
     sl_price        TEXT,
+    trail_pips      TEXT,
     created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
@@ -339,3 +343,27 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     # executescript issues an implicit COMMIT before running, which is fine
     # here since DDL statements are auto-committed in SQLite anyway.
     conn.executescript(_DDL)
+    _add_missing_columns(conn)
+
+
+# Columns added to existing tables after their first release, as
+# (table, column, type). CREATE TABLE IF NOT EXISTS never alters a table that
+# already exists, so databases created before a column was added need it
+# added here. The DDL above already includes each one for new databases.
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("trade_plans", "trail_pips", "TEXT"),
+)
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Add any ``_ADDED_COLUMNS`` entry missing from an existing table.
+
+    Idempotent: a column already present is skipped, so this is safe on
+    every startup, like the rest of ``ensure_schema``.
+    """
+    for table, column, col_type in _ADDED_COLUMNS:
+        # PRAGMA table_info rows are (cid, name, type, notnull, dflt, pk).
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+    conn.commit()

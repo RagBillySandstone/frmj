@@ -450,6 +450,23 @@ class TestJournalCommand:
         assert "TP 1.10550" in result.output
         assert "SL 1.09750" in result.output
 
+    def test_plan_shows_trailing_stop(self, journal_db: Path) -> None:
+        conn = sqlite3.connect(str(journal_db))
+        txn_id = conn.execute(
+            "SELECT id FROM transactions WHERE oanda_id = '1001'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO trade_plans (transaction_id, sl_price, trail_pips) "
+            "VALUES (?, ?, ?)",
+            (txn_id, "1.09750", "20.0"),
+        )
+        conn.commit()
+        conn.close()
+
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        assert "SL 1.09750  Trail 20.0p" in result.output
+
     def test_plan_not_shown_when_absent(self, journal_db: Path) -> None:
         """Transactions without a plan must not show a 'Plan:' line."""
         result = runner.invoke(app, ["journal"])

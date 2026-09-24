@@ -239,18 +239,20 @@ def _save_trade_plan(
     account_id: str,
     tp_price: Decimal | None,
     sl_price: Decimal | None,
+    trail_pips: Decimal | None,
 ) -> None:
-    """Persist the intended TP/SL for a fill transaction if either side was set.
+    """Persist the intended TP/SL/trailing stop for a fill transaction if any
+    was set.
 
     For a limit order that hasn't filled yet, *fill_oanda_id* is the
     LIMIT_ORDER transaction that created it; sync moves the plan to the
     ORDER_FILL once the order fills.
 
-    Silent no-op when neither TP nor SL was specified, or when the fill
+    Silent no-op when no exit was specified, or when the fill
     transaction is not yet in the local DB (post-fill sync may have failed).
     Uses INSERT OR IGNORE so a duplicate call (e.g. from a retry) is harmless.
     """
-    if tp_price is None and sl_price is None:
+    if tp_price is None and sl_price is None and trail_pips is None:
         return
     row = conn.execute(
         "SELECT id FROM transactions WHERE oanda_id = ? AND account_id = ?",
@@ -260,10 +262,11 @@ def _save_trade_plan(
         return
     tp_str = str(tp_price) if tp_price is not None else None
     sl_str = str(sl_price) if sl_price is not None else None
+    trail_str = str(trail_pips) if trail_pips is not None else None
     conn.execute(
-        "INSERT OR IGNORE INTO trade_plans (transaction_id, tp_price, sl_price) "
-        "VALUES (?, ?, ?)",
-        (row["id"], tp_str, sl_str),
+        "INSERT OR IGNORE INTO trade_plans "
+        "(transaction_id, tp_price, sl_price, trail_pips) VALUES (?, ?, ?, ?)",
+        (row["id"], tp_str, sl_str, trail_str),
     )
     conn.commit()
 
@@ -296,12 +299,14 @@ def execute_post_fill(
     tp_price: Decimal | None,
     sl_price: Decimal | None,
     trail_distance: Decimal | None = None,
+    trail_pips: Decimal | None = None,
 ) -> PostFillResult:
     """Attach TP/SL (and optionally a trailing stop) to a filled trade, sync
     the fill into the local DB, and persist the trade plan.
 
     *trail_distance* is the trailing stop's distance in price units, or
-    ``None`` for no trailing stop.
+    ``None`` for no trailing stop; *trail_pips* is the same distance in pips,
+    for the trade plan.
 
     ``missing_trade_id`` is set when Oanda didn't return a trade ID and at
     least one exit order was requested (so none could be attached at all).
@@ -349,7 +354,9 @@ def execute_post_fill(
     except Exception as exc:
         sync_error = str(exc)
 
-    _save_trade_plan(conn, fill.transaction_id, client.account_id, tp_price, sl_price)
+    _save_trade_plan(
+        conn, fill.transaction_id, client.account_id, tp_price, sl_price, trail_pips
+    )
 
     return PostFillResult(
         missing_trade_id=missing_trade_id,
@@ -386,6 +393,7 @@ def execute_post_limit(
     result: LimitOrderResult,
     tp_price: Decimal | None,
     sl_price: Decimal | None,
+    trail_pips: Decimal | None = None,
 ) -> PostLimitResult:
     """Sync a just-placed limit order into the local DB and persist its
     trade plan.
@@ -409,7 +417,9 @@ def execute_post_limit(
     except Exception as exc:
         sync_error = str(exc)
 
-    _save_trade_plan(conn, journal_oanda_id, client.account_id, tp_price, sl_price)
+    _save_trade_plan(
+        conn, journal_oanda_id, client.account_id, tp_price, sl_price, trail_pips
+    )
 
     return PostLimitResult(
         journal_oanda_id=journal_oanda_id,

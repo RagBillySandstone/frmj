@@ -121,6 +121,26 @@ class TestEnsureSchema:
         """Calling ensure_schema a second time on an initialised DB must not raise."""
         ensure_schema(db)  # db fixture already called it once
 
+    def test_adds_trail_pips_to_pre_existing_trade_plans(self) -> None:
+        """A trade_plans table created before trail_pips existed gains the
+        column, keeping its rows; a second run is a no-op."""
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE trade_plans (id INTEGER PRIMARY KEY, "
+            "transaction_id INTEGER NOT NULL UNIQUE, tp_price TEXT, "
+            "sl_price TEXT, created_at TEXT NOT NULL DEFAULT '')"
+        )
+        conn.execute(
+            "INSERT INTO trade_plans (transaction_id, tp_price) VALUES (1, '1.1')"
+        )
+        ensure_schema(conn)
+        ensure_schema(conn)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(trade_plans)")}
+        assert "trail_pips" in columns
+        row = conn.execute("SELECT tp_price, trail_pips FROM trade_plans").fetchone()
+        assert row == ("1.1", None)
+        conn.close()
+
     def test_foreign_keys_enabled(self, db: sqlite3.Connection) -> None:
         """PRAGMA foreign_keys must be 1 (ON) for the connection."""
         row = db.execute("PRAGMA foreign_keys").fetchone()

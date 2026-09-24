@@ -397,7 +397,8 @@ def journal(
             _display_transaction(txn, label)
             if txn["type"] == "ORDER_FILL":
                 plan = conn.execute(
-                    "SELECT tp_price, sl_price FROM trade_plans WHERE transaction_id = ?",
+                    "SELECT tp_price, sl_price, trail_pips FROM trade_plans "
+                    "WHERE transaction_id = ?",
                     (txn["id"],),
                 ).fetchone()
                 if plan:
@@ -406,6 +407,8 @@ def journal(
                         parts.append(f"TP {plan['tp_price']}")
                     if plan["sl_price"]:
                         parts.append(f"SL {plan['sl_price']}")
+                    if plan["trail_pips"]:
+                        parts.append(f"Trail {plan['trail_pips']}p")
                     if parts:
                         typer.echo(f"    Plan: {'  '.join(parts)}")
             notes = conn.execute(

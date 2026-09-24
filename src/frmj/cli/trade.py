@@ -700,7 +700,9 @@ def _report_limit_order(
     if trail_pips is not None:
         typer.echo(f"Trailing stop {trail_pips:.1f} pips {when}")
 
-    post = services.execute_post_limit(conn, client, result, tp_price, sl_price)
+    post = services.execute_post_limit(
+        conn, client, result, tp_price, sl_price, trail_pips
+    )
     if post.sync_error is not None:
         typer.echo(
             f"[sync] Warning: post-order sync failed — {post.sync_error}", err=True
@@ -729,7 +731,7 @@ def _report_market_fill(
 
     # --- Attach TP/SL, post-fill sync, and save the trade plan ---------------
     post_fill = services.execute_post_fill(
-        conn, client, fill, tp_price, sl_price, trail_distance
+        conn, client, fill, tp_price, sl_price, trail_distance, trail_pips
     )
 
     if post_fill.missing_trade_id:

@@ -1279,6 +1279,47 @@ class TestTradeTrail:
         assert fake.trail_attached is None
         assert "Trailing stop 20.0 pips will be set when it fills" in result.output
 
+    def _seed_txn(self, db: Path, oanda_id: str, txn_type: str) -> None:
+        """Insert a transaction as if the post-order sync had brought it in."""
+        conn = get_db(path=db)
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+            "VALUES (?, 'acct-1', ?, '2026-04-29T12:00:00Z', '{}')",
+            (oanda_id, txn_type),
+        )
+        conn.commit()
+        conn.close()
+
+    def _plan_trail(self, db: Path, oanda_id: str) -> str | None:
+        conn = get_db(path=db)
+        row = conn.execute(
+            "SELECT trail_pips FROM trade_plans "
+            "JOIN transactions ON trade_plans.transaction_id = transactions.id "
+            "WHERE transactions.oanda_id = ?",
+            (oanda_id,),
+        ).fetchone()
+        conn.close()
+        return row["trail_pips"] if row else None
+
+    def test_trail_saved_in_trade_plan_after_fill(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A trail-only plan (no TP/SL) still gets a trade_plans row."""
+        self._seed_txn(trade_db, "99999", "ORDER_FILL")
+        fake = FakeFullClient()
+        result = self._invoke(monkeypatch, fake, "\n\n20\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert self._plan_trail(trade_db, "99999") == "20.0"
+
+    def test_trail_saved_in_limit_order_plan(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_txn(trade_db, "88888", "LIMIT_ORDER")
+        fake = FakeFullClient()
+        result = self._invoke(monkeypatch, fake, "15\n\n\n20\ny\n\n\n", "--limit")
+        assert result.exit_code == 0, result.output
+        assert self._plan_trail(trade_db, "88888") == "20.0"
+
     def test_trail_rejected_with_resume(
         self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
