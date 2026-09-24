@@ -279,6 +279,7 @@ def trade(
             direction_str,
             dry_run,
             opposite_names,
+            trail,
         )
         return
     elif opposite:

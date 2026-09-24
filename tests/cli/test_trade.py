@@ -2549,3 +2549,92 @@ class TestTradeMultiOpposite:
         # its entry — mirrored around each account's own entry price.
         assert Decimal(alpha.tp_attached) > Decimal("1.10010")
         assert Decimal(beta.tp_attached) < Decimal("1.09990")
+
+
+class TestTradeMultiTrail:
+    """``trade ... --multi GROUP --trail``: one trail distance on every account."""
+
+    @pytest.fixture()
+    def multi_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """DB with two practice accounts ('alpha', 'beta') in group 'grp'."""
+        path = tmp_path / "multi_trail_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        add_account(conn, "alpha", "alpha-acct", is_practice=True)
+        add_account(conn, "beta", "beta-acct", is_practice=True)
+        add_group_member(conn, "grp", "alpha")
+        add_group_member(conn, "grp", "beta")
+        set_config(conn, "max_open_trades", "5")
+        conn.close()
+        return path
+
+    def _invoke(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fakes: dict[str, FakeFullClient],
+        inputs: str,
+        *extra: str,
+    ) -> Result:
+        monkeypatch.setattr(
+            "frmj.cli._trade_multi.get_client_for_account",
+            lambda account: fakes[account.name],
+        )
+        args = ["trade", "EUR_USD", "long", "--multi", "grp", "--trail", *extra]
+        return runner.invoke(app, args, input=inputs)
+
+    def test_dry_run_mirrors_trail_for_opposite_account(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Alpha's long trail starts below the bid, beta's short above the ask."""
+        fakes = {
+            "alpha": FakeFullClient(account_id="alpha-acct"),
+            "beta": FakeFullClient(account_id="beta-acct"),
+        }
+        result = self._invoke(
+            monkeypatch, fakes, "\n\n20\n", "--opposite", "beta", "--dry-run"
+        )
+        assert result.exit_code == 0, result.output
+        assert "starts at 1.09790" in result.output
+        assert "starts at 1.10210" in result.output
+
+    def test_trail_attached_on_every_account(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fakes = {
+            "alpha": FakeFullClient(account_id="alpha-acct"),
+            "beta": FakeFullClient(account_id="beta-acct"),
+        }
+        # TP/SL skip, trail 20, confirm, note/tags skip
+        result = self._invoke(monkeypatch, fakes, "\n\n20\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert fakes["alpha"].trail_attached == "0.00200"
+        assert fakes["beta"].trail_attached == "0.00200"
+        assert "[alpha] Trailing stop set at 20.0 pips" in result.output
+        assert "[beta] Trailing stop set at 20.0 pips" in result.output
+
+    def test_edit_reprompts_trail(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fakes = {
+            "alpha": FakeFullClient(account_id="alpha-acct"),
+            "beta": FakeFullClient(account_id="beta-acct"),
+        }
+        result = self._invoke(monkeypatch, fakes, "\n\n20\ne\n\n\n30\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert fakes["alpha"].trail_attached == "0.00300"
+        assert fakes["beta"].trail_attached == "0.00300"
+
+    def test_trail_failure_on_one_account_warns_unprotected(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fakes = {
+            "alpha": FakeFullClient(account_id="alpha-acct"),
+            "beta": FakeFullClient(account_id="beta-acct", trail_should_fail=True),
+        }
+        result = self._invoke(monkeypatch, fakes, "\n\n20\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        output = result.output + result.stderr
+        assert "[alpha] Trailing stop set" in output
+        assert "Warning [beta]: failed to attach trailing stop" in output
+        assert "[beta] Position is unprotected" in output

@@ -6,12 +6,15 @@ independently per account (each has its own NAV and open positions), while
 the instrument, TP/SL choice, and final confirmation are shared. Direction
 is shared too, except for accounts named with ``--opposite``, which take the
 other side of the same trade with mirrored TP/SL — see ``_AccountPlan``.
+A ``--trail`` trailing stop is shared the same way: one pip distance,
+applied to every account (a distance needs no mirroring).
 """
 
 from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from decimal import Decimal
 
 import httpx
 import typer
@@ -20,9 +23,20 @@ from frmj import services
 from frmj.accounts import AccountRecord, is_live_mode
 from frmj.app import get_client_for_account, get_risk_config
 from frmj.cli._display import _daily_financing_home, _pl_str
-from frmj.cli._trade_helpers import _display_exits, _prompt_tpsl
+from frmj.cli._trade_helpers import (
+    _display_exits,
+    _display_trail,
+    _prompt_tpsl,
+    _prompt_trailing_stop,
+)
 from frmj.cli.journal import _attach_tags
-from frmj.domain.pricing import ExitLevels, compute_exit_levels, pip_value_home
+from frmj.domain.pricing import (
+    ExitLevels,
+    TrailingStopLevels,
+    compute_exit_levels,
+    compute_trailing_stop,
+    pip_value_home,
+)
 from frmj.domain.risk import (
     CorrelatedPositionForbidden,
     MaxTradesExceeded,
@@ -76,6 +90,7 @@ def _trade_multi_account(
     direction_str: str,
     dry_run: bool,
     opposite: frozenset[str] = frozenset(),
+    trail: bool = False,
 ) -> None:
     """Plan and execute the same trade across every account in *accounts*.
 
@@ -92,6 +107,9 @@ def _trade_multi_account(
     favorable/adverse price movement from direction, applying the same TP/SL
     spec with the flipped direction mirrors the exit prices automatically —
     no separate mirroring math is needed.
+
+    With *trail*, one trailing-stop distance (in pips) is prompted for and
+    attached on every account after its fill.
     """
     try:
         risk_config = get_risk_config(conn)
@@ -236,6 +254,54 @@ def _trade_multi_account(
     tp_spec = _prompt_tpsl("Take-profit")
     sl_spec = _prompt_tpsl("Stop-loss  ")
 
+    def _prompt_trail_pips(label: str = "Trailing stop") -> Decimal | None:
+        """Prompt once for the shared trail; return its pips, or None.
+
+        Validated against the first account's plan. The distance limits
+        depend only on the instrument, so a distance valid for one account
+        is valid for all; each account's own trigger and loss are computed
+        in ``_compute_all_trails``.
+        """
+        first = plans[0]
+        levels = _prompt_trailing_stop(
+            entry_price=quote.entry_price(first.direction),
+            units=first.units_calc.units,
+            direction=first.direction,
+            spec=spec,
+            quote=quote,
+            margin_used=first.units_calc.margin_used,
+            label=label,
+        )
+        return levels.distance_pips if levels is not None else None
+
+    trail_pips = _prompt_trail_pips() if trail else None
+
+    def _compute_all_trails() -> list[TrailingStopLevels | None]:
+        if trail_pips is None:
+            return [None] * len(plans)
+        return [
+            compute_trailing_stop(
+                pips=trail_pips,
+                entry_price=quote.entry_price(plan.direction),
+                units=plan.units_calc.units,
+                direction=plan.direction,
+                spec=spec,
+                quote=quote,
+                margin_used=plan.units_calc.margin_used,
+            )
+            for plan in plans
+        ]
+
+    def _display_all(
+        exits_list: list[ExitLevels], trails: list[TrailingStopLevels | None]
+    ) -> None:
+        for plan, exits, trail_levels in zip(plans, exits_list, trails):
+            typer.echo(f"{plan.account.name}:")
+            _display_exits(exits, plan.units_calc.margin_used)
+            if trail_levels is not None:
+                _display_trail(trail_levels)
+        typer.echo("")
+
     def _compute_all_exits() -> list[ExitLevels]:
         return [
             compute_exit_levels(
@@ -252,10 +318,8 @@ def _trade_multi_account(
         ]
 
     exits_list = _compute_all_exits()
-    for plan, exits in zip(plans, exits_list):
-        typer.echo(f"{plan.account.name}:")
-        _display_exits(exits, plan.units_calc.margin_used)
-    typer.echo("")
+    trails = _compute_all_trails()
+    _display_all(exits_list, trails)
 
     if dry_run:
         typer.echo("[DRY RUN] Plan complete. No orders placed.")
@@ -278,11 +342,11 @@ def _trade_multi_account(
         if answer == "e":
             tp_spec = _prompt_tpsl("Take-profit (new)")
             sl_spec = _prompt_tpsl("Stop-loss   (new)")
+            if trail:
+                trail_pips = _prompt_trail_pips("Trailing stop (new)")
             exits_list = _compute_all_exits()
-            for plan, exits in zip(plans, exits_list):
-                typer.echo(f"{plan.account.name}:")
-                _display_exits(exits, plan.units_calc.margin_used)
-            typer.echo("")
+            trails = _compute_all_trails()
+            _display_all(exits_list, trails)
 
     # --- Live mode gate: check every target account before placing anything ---
     blocked = [
@@ -307,7 +371,7 @@ def _trade_multi_account(
     # chooses retry-this-account or skip-this-account; the rest of the group
     # proceeds regardless.
     results: list[tuple[_AccountPlan, OrderFill | None]] = []
-    for plan, exits in zip(plans, exits_list):
+    for plan, exits, trail_levels in zip(plans, exits_list, trails):
         units_signed = (
             plan.units_calc.units
             if plan.direction is Direction.LONG
@@ -346,13 +410,20 @@ def _trade_multi_account(
         )
 
         post_fill = services.execute_post_fill(
-            conn, plan.client, fill, exits.take_profit_price, exits.stop_loss_price
+            conn,
+            plan.client,
+            fill,
+            exits.take_profit_price,
+            exits.stop_loss_price,
+            trail_levels.distance if trail_levels is not None else None,
+            trail_pips,
         )
 
         if post_fill.missing_trade_id:
             typer.echo(
                 f"Warning [{plan.account.name}]: Oanda did not return a trade ID "
-                "— cannot attach TP/SL. Set them manually in the Oanda interface.",
+                "— cannot attach exit orders. Set them manually in the Oanda "
+                "interface.",
                 err=True,
             )
         if exits.take_profit_price is not None and not post_fill.missing_trade_id:
@@ -383,6 +454,25 @@ def _trade_multi_account(
                 typer.echo(
                     f"[{plan.account.name}] Stop-loss set at "
                     f"{exits.stop_loss_price} — order #{post_fill.sl_transaction_id}"
+                )
+        if trail_pips is not None and not post_fill.missing_trade_id:
+            if post_fill.trail_error is not None:
+                typer.echo(
+                    f"Warning [{plan.account.name}]: failed to attach "
+                    f"trailing stop — {post_fill.trail_error}",
+                    err=True,
+                )
+                # Only unprotected when the fixed SL didn't go on either.
+                if exits.stop_loss_price is None or post_fill.sl_error is not None:
+                    typer.echo(
+                        f"  [{plan.account.name}] Position is unprotected "
+                        "— set a stop in Oanda immediately.",
+                        err=True,
+                    )
+            else:
+                typer.echo(
+                    f"[{plan.account.name}] Trailing stop set at {trail_pips:.1f} "
+                    f"pips — order #{post_fill.trail_transaction_id}"
                 )
 
         if post_fill.sync_error is not None:
