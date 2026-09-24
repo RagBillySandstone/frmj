@@ -404,13 +404,16 @@ class OandaClient:
         price: Decimal,
         take_profit_price: Decimal | None = None,
         stop_loss_price: Decimal | None = None,
+        trailing_stop_distance: Decimal | None = None,
     ) -> LimitOrderResult:
         """Place a GTC limit entry order, with TP/SL set to apply on fill.
 
         ``units_signed`` follows Oanda's sign convention (positive = long).
         TP/SL go in the order body as ``takeProfitOnFill`` /
         ``stopLossOnFill``: Oanda attaches them the moment the order fills,
-        so there is no attach-after-fill step and no unprotected window.
+        so there is no attach-after-fill step and no unprotected window. A
+        trailing stop likewise rides as ``trailingStopLossOnFill``, given as
+        a price-unit *distance* rather than a price.
         Prices must already be rounded to the instrument's display precision;
         Oanda rejects extra decimals.
 
@@ -424,7 +427,7 @@ class OandaClient:
                 ``orderCreateTransaction``.
             httpx.HTTPStatusError: on 4xx/5xx, including a rejected order.
         """
-        # Build the order body; TP/SL are optional and only sent when set.
+        # Build the order body; TP/SL/trail are optional and only sent when set.
         order: dict[str, Any] = {
             "type": "LIMIT",
             "instrument": instrument,
@@ -437,6 +440,8 @@ class OandaClient:
             order["takeProfitOnFill"] = {"price": str(take_profit_price)}
         if stop_loss_price is not None:
             order["stopLossOnFill"] = {"price": str(stop_loss_price)}
+        if trailing_stop_distance is not None:
+            order["trailingStopLossOnFill"] = {"distance": str(trailing_stop_distance)}
 
         resp = self._http.post(
             f"{self._base_url}/accounts/{self.account_id}/orders",
@@ -470,7 +475,7 @@ class OandaClient:
         Returns the ``orderCreateTransaction.id`` from Oanda's response.
         Raises ``httpx.HTTPStatusError`` on 4xx / 5xx responses.
         """
-        return self._attach_exit_order("TAKE_PROFIT", trade_id, price)
+        return self._attach_exit_order("TAKE_PROFIT", trade_id, {"price": str(price)})
 
     def attach_stop_loss(self, trade_id: str, price: Decimal) -> str:
         """Attach a GTC stop-loss order to an existing open trade.
@@ -478,7 +483,22 @@ class OandaClient:
         Returns the ``orderCreateTransaction.id`` from Oanda's response.
         Raises ``httpx.HTTPStatusError`` on 4xx / 5xx responses.
         """
-        return self._attach_exit_order("STOP_LOSS", trade_id, price)
+        return self._attach_exit_order("STOP_LOSS", trade_id, {"price": str(price)})
+
+    def attach_trailing_stop(self, trade_id: str, distance: Decimal) -> str:
+        """Attach a GTC trailing stop-loss order to an existing open trade.
+
+        *distance* is in price units (not pips) and must already be rounded
+        to the instrument's display precision. Oanda keeps the trigger that
+        far behind the bid (long) or ask (short) and only moves it in the
+        trade's favour.
+
+        Returns the ``orderCreateTransaction.id`` from Oanda's response.
+        Raises ``httpx.HTTPStatusError`` on 4xx / 5xx responses.
+        """
+        return self._attach_exit_order(
+            "TRAILING_STOP_LOSS", trade_id, {"distance": str(distance)}
+        )
 
     def close(self) -> None:
         """Release the underlying httpx connection pool."""
@@ -498,12 +518,15 @@ class OandaClient:
         self,
         order_type: str,
         trade_id: str,
-        price: Decimal,
+        level: dict[str, str],
     ) -> str:
-        """POST a TAKE_PROFIT or STOP_LOSS order linked to *trade_id*.
+        """POST a TAKE_PROFIT, STOP_LOSS, or TRAILING_STOP_LOSS order linked
+        to *trade_id*.
 
-        Both order types share identical request/response shapes; the only
-        difference is the ``type`` field.  GTC (good-till-cancelled) is the
+        The order types share identical request/response shapes apart from
+        the ``type`` field and how the exit level is given: *level* is
+        ``{"price": ...}`` for TP/SL and ``{"distance": ...}`` for a
+        trailing stop.  GTC (good-till-cancelled) is the
         only time-in-force that makes sense for exit orders on an open trade —
         DAY orders would expire at session end, leaving the position unprotected.
         """
@@ -513,7 +536,7 @@ class OandaClient:
                 "order": {
                     "type": order_type,
                     "tradeID": trade_id,
-                    "price": str(price),
+                    **level,
                     "timeInForce": "GTC",
                 }
             },

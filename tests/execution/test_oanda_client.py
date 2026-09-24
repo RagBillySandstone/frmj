@@ -466,6 +466,19 @@ class TestPlaceLimitOrder:
         order = http.calls[0].kwargs["json"]["order"]
         assert "takeProfitOnFill" not in order
         assert "stopLossOnFill" not in order
+        assert "trailingStopLossOnFill" not in order
+
+    def test_trailing_stop_rides_on_fill_as_distance(self) -> None:
+        client = _make_client(self._RESTING)
+        client.place_limit_order(
+            "EUR_USD",
+            10_000,
+            Decimal("1.09850"),
+            trailing_stop_distance=Decimal("0.00200"),
+        )
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        order = http.calls[0].kwargs["json"]["order"]
+        assert order["trailingStopLossOnFill"] == {"distance": "0.00200"}
 
     def test_resting_order_returns_order_id_without_fill(self) -> None:
         client = _make_client(self._RESTING)
@@ -651,6 +664,24 @@ class TestAttachExitOrders:
         http: _FakeHttp = client._http  # type: ignore[assignment]
         order = http.calls[0].kwargs["json"]["order"]
         assert order["type"] == "STOP_LOSS"
+
+    def test_attach_trailing_stop_sends_distance_not_price(self) -> None:
+        """A trailing stop is set by distance; sending a price would be
+        rejected by Oanda."""
+        response = {"orderCreateTransaction": {"id": "60003"}}
+        client = _make_client(response)
+        txn_id = client.attach_trailing_stop("501", Decimal("0.00200"))
+        assert txn_id == "60003"
+
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        assert http.calls[0].kwargs["json"] == {
+            "order": {
+                "type": "TRAILING_STOP_LOSS",
+                "tradeID": "501",
+                "distance": "0.00200",
+                "timeInForce": "GTC",
+            }
+        }
 
     def test_raises_runtime_error_when_transaction_missing(self) -> None:
         """An undocumented response shape (no orderCreateTransaction) must
