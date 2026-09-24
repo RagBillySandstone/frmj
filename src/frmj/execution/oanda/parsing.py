@@ -64,12 +64,13 @@ def _parse_open_trade(trade: dict[str, Any]) -> OpenTrade:
     ``currentUnits`` is signed (positive=long, negative=short); we normalise to
     a direction string + positive unit count so callers never have to check sign.
 
-    ``takeProfitOrder`` and ``stopLossOrder`` are optional keys — absent when no
-    exit order is attached.
+    ``takeProfitOrder``, ``stopLossOrder``, and ``trailingStopLossOrder`` are
+    optional keys — absent when no exit order is attached.
     """
     units_raw = int(Decimal(trade["currentUnits"]))
     tp_order = trade.get("takeProfitOrder")
     sl_order = trade.get("stopLossOrder")
+    trail_order = trade.get("trailingStopLossOrder")
     return OpenTrade(
         trade_id=str(trade["id"]),
         instrument=trade["instrument"],
@@ -81,6 +82,15 @@ def _parse_open_trade(trade: dict[str, Any]) -> OpenTrade:
         take_profit_price=Decimal(tp_order["price"]) if tp_order else None,
         stop_loss_price=Decimal(sl_order["price"]) if sl_order else None,
         open_time=trade["openTime"],
+        # Oanda omits trailingStopValue briefly while it computes it.
+        trailing_stop_price=(
+            Decimal(trail_order["trailingStopValue"])
+            if trail_order and trail_order.get("trailingStopValue")
+            else None
+        ),
+        trailing_stop_distance=(
+            Decimal(trail_order["distance"]) if trail_order else None
+        ),
     )
 
 
@@ -94,6 +104,7 @@ def _parse_pending_order(order: dict[str, Any]) -> PendingOrder:
     units_raw = int(Decimal(order["units"]))
     tp_on_fill = order.get("takeProfitOnFill")
     sl_on_fill = order.get("stopLossOnFill")
+    trail_on_fill = order.get("trailingStopLossOnFill")
     return PendingOrder(
         order_id=str(order["id"]),
         order_type=order["type"],
@@ -105,6 +116,9 @@ def _parse_pending_order(order: dict[str, Any]) -> PendingOrder:
         create_time=order["createTime"],
         take_profit_price=Decimal(tp_on_fill["price"]) if tp_on_fill else None,
         stop_loss_price=Decimal(sl_on_fill["price"]) if sl_on_fill else None,
+        trailing_stop_distance=(
+            Decimal(trail_on_fill["distance"]) if trail_on_fill else None
+        ),
     )
 
 

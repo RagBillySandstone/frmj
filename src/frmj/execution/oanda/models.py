@@ -55,7 +55,11 @@ class OpenTrade:
     direction is carried separately so callers never have to check sign.
 
     ``take_profit_price`` and ``stop_loss_price`` are ``None`` when no
-    corresponding order is attached to the trade.
+    corresponding order is attached to the trade. Likewise for a trailing
+    stop: ``trailing_stop_price`` is its current trigger price (Oanda's
+    ``trailingStopValue``, which moves as the trade goes its way) and
+    ``trailing_stop_distance`` how far behind the price it trails, in
+    price units.
 
     ``open_time`` is the ISO-8601 timestamp from Oanda verbatim; the display
     layer trims it to seconds.
@@ -71,6 +75,8 @@ class OpenTrade:
     take_profit_price: Decimal | None
     stop_loss_price: Decimal | None
     open_time: str
+    trailing_stop_price: Decimal | None = None
+    trailing_stop_distance: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,7 +179,9 @@ class PendingOrder:
     ``direction`` is ``"LONG"`` or ``"SHORT"`` and ``units`` is always
     positive, matching ``OpenTrade``. ``take_profit_price`` and
     ``stop_loss_price`` come from the order's ``takeProfitOnFill`` /
-    ``stopLossOnFill`` and are ``None`` when not set.
+    ``stopLossOnFill`` and are ``None`` when not set;
+    ``trailing_stop_distance`` (price units) likewise comes from
+    ``trailingStopLossOnFill``.
     """
 
     order_id: str
@@ -186,6 +194,7 @@ class PendingOrder:
     create_time: str
     take_profit_price: Decimal | None
     stop_loss_price: Decimal | None
+    trailing_stop_distance: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)

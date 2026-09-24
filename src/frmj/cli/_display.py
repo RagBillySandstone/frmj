@@ -269,6 +269,19 @@ def _display_open_trade(
             sl_pl = _projected_pl_at_price(trade, trade.stop_loss_price, quote_to_home)
             sl_str += f" ({_pl_str(sl_pl)})"
         exits_parts.append(sl_str)
+    if trade.trailing_stop_distance is not None:
+        # The trigger price moves, so show where it is now and the P/L
+        # there, plus the fixed distance it trails by (in price units).
+        trail_str = "Trail:"
+        if trade.trailing_stop_price is not None:
+            trail_str += f" {trade.trailing_stop_price}"
+            if quote_to_home is not None:
+                trail_pl = _projected_pl_at_price(
+                    trade, trade.trailing_stop_price, quote_to_home
+                )
+                trail_str += f" ({_pl_str(trail_pl)})"
+        trail_str += f" [{trade.trailing_stop_distance} behind]"
+        exits_parts.append(trail_str)
     exits_str = "  ".join(exits_parts) if exits_parts else "no TP/SL set"
 
     financing_str = ""
@@ -337,7 +350,13 @@ def _display_pending_order(
         parts.append(f"TP: {order.take_profit_price}")
     if order.stop_loss_price is not None:
         parts.append(f"SL: {order.stop_loss_price}")
-    if order.take_profit_price is None and order.stop_loss_price is None:
+    if order.trailing_stop_distance is not None:
+        parts.append(f"Trail: {order.trailing_stop_distance} behind")
+    if (
+        order.take_profit_price is None
+        and order.stop_loss_price is None
+        and order.trailing_stop_distance is None
+    ):
         parts.append("no TP/SL set")
     typer.echo("         " + "  ".join(parts))
     typer.echo("")

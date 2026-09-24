@@ -543,6 +543,7 @@ class TestGetPendingOrders:
                     "createTime": "2026-09-22T10:00:00.000000000Z",
                     "takeProfitOnFill": {"price": "1.09650"},
                     "stopLossOnFill": {"price": "1.10450"},
+                    "trailingStopLossOnFill": {"distance": "0.00200"},
                 },
                 {
                     "id": "4001",
@@ -575,6 +576,7 @@ class TestGetPendingOrders:
         assert order.price == Decimal("1.10150")
         assert order.take_profit_price == Decimal("1.09650")
         assert order.stop_loss_price == Decimal("1.10450")
+        assert order.trailing_stop_distance == Decimal("0.00200")
 
     def test_order_without_tpsl_has_none(self) -> None:
         response = {
@@ -594,6 +596,7 @@ class TestGetPendingOrders:
         assert orders[0].direction == "LONG"
         assert orders[0].take_profit_price is None
         assert orders[0].stop_loss_price is None
+        assert orders[0].trailing_stop_distance is None
 
     def test_empty_when_no_orders(self) -> None:
         assert _make_client({"orders": []}).get_pending_orders() == []

@@ -345,6 +345,30 @@ class TestParseOpenTrade:
         assert result.take_profit_price is None
         assert result.stop_loss_price is None
 
+    def test_parses_trailing_stop(self) -> None:
+        payload = _open_trade_payload()
+        payload["trailingStopLossOrder"] = {
+            "id": "6371",
+            "distance": "0.00200",
+            "trailingStopValue": "1.09912",
+        }
+        result = _parse_open_trade(payload)
+        assert result.trailing_stop_distance == Decimal("0.00200")
+        assert result.trailing_stop_price == Decimal("1.09912")
+
+    def test_trailing_stop_without_value_yet(self) -> None:
+        """Distance is known even before Oanda reports the trigger price."""
+        payload = _open_trade_payload()
+        payload["trailingStopLossOrder"] = {"id": "6371", "distance": "0.00200"}
+        result = _parse_open_trade(payload)
+        assert result.trailing_stop_distance == Decimal("0.00200")
+        assert result.trailing_stop_price is None
+
+    def test_trailing_stop_none_when_absent(self) -> None:
+        result = _parse_open_trade(_open_trade_payload())
+        assert result.trailing_stop_distance is None
+        assert result.trailing_stop_price is None
+
     def test_returns_open_trade_dataclass(self) -> None:
         result = _parse_open_trade(_open_trade_payload())
         assert isinstance(result, OpenTrade)

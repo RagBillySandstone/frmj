@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -108,6 +109,44 @@ class TestPositionsCommand:
         )
         assert "TP: 1.10550 (+$50.00)" in result.output
         assert "SL: 1.09750 ($-30.00)" in result.output
+
+    def test_shows_trailing_stop_with_dollar_amount(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The trail shows its current trigger, the P/L there, and its distance.
+
+        The trigger 1.10150 is 10 pips above the 1.10050 entry on a
+        10,000-unit long: +$10.00 locked in.
+        """
+        trade = replace(
+            _open_trade(sl_price=None, tp_price=None),
+            trailing_stop_price=Decimal("1.10150"),
+            trailing_stop_distance=Decimal("0.00200"),
+        )
+        result = self._invoke(monkeypatch, [trade])
+        assert result.exit_code == 0, result.output
+        assert "Trail: 1.10150 (+$10.00) [0.00200 behind]" in result.output
+        assert "no TP/SL set" not in result.output
+
+    def test_trailing_stop_without_trigger_shows_distance(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        trade = replace(_open_trade(), trailing_stop_distance=Decimal("0.00200"))
+        result = self._invoke(monkeypatch, [trade])
+        assert "Trail: [0.00200 behind]" in result.output
+
+    def test_pending_order_shows_trail_on_fill(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        order = replace(_pending_order(), trailing_stop_distance=Decimal("0.00200"))
+        fake = FakeFullClient(pending_orders=[order])
+        monkeypatch.setattr(
+            "frmj.cli.positions.get_client", lambda conn, account_name=None: fake
+        )
+        result = runner.invoke(app, ["positions"])
+        assert result.exit_code == 0, result.output
+        assert "Trail: 0.00200 behind" in result.output
+        assert "no TP/SL set" not in result.output
 
     def test_shows_daily_financing_charge(
         self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
