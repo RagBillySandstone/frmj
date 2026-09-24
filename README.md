@@ -115,4 +115,4 @@ uv run mypy
 
 Tests live in `tests/` and mirror the `src/` layout. The domain tests (`tests/domain/`) use no fixtures or mocks — pure data in, pure data out. The execution tests use lightweight test doubles that satisfy `ClientProtocol` via structural typing (no inheritance required).
 
-`mypy` currently type-checks `src/frmj` only; `tests/` isn't included yet (see TODO.md).
+`mypy` type-checks both `src/frmj` and `tests/` with the same strict settings.

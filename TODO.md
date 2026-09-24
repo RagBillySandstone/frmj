@@ -18,10 +18,6 @@ Items are grouped by priority. Within each group, order reflects logical build s
 
 Currently `frmj note` only appends. For cases where a note has a typo or needs updating, add an `--edit` flag that opens the most recent note on the given transaction in `$EDITOR` (or prompts inline if the env var is unset).
 
-### 10. Extend mypy coverage to tests/
-
-`mypy` currently only type-checks `src/frmj` (see pyproject.toml `[tool.mypy]`). Running it over `tests/` today surfaces ~200 errors, mostly from two sources: helper methods like `TestCloseCommand._invoke()` annotated `-> object` instead of `click.testing.Result`, and fake objects (`SimpleNamespace` standing in for `typer.Context`, hand-rolled fakes standing in for `sqlite3.Connection`) that satisfy call sites structurally but not nominally. Fixing the return-type annotations is mechanical; the fakes would need `Protocol` types to type-check cleanly without abandoning the structural-typing test style described in the Development section of README.md.
-
 ### 11. CSV-imported closing fills have no open-time link
 
 Unlike the REST API's ORDER_FILL transactions, the Oanda Hub CSV export never states which trade a closing fill closed (no `tradesClosed`/`tradeReduced` equivalent — see `execution/csv_import.py`'s module docstring). `frmj stats`'s open-time lookup already degrades gracefully to a NULL open_time for these rows rather than crashing, but any CSV-imported closed trade will always show a blank open time and can't be bucketed by holding duration. No known fix without a second data source (e.g. cross-referencing the CSV's own MARKET_ORDER open rows by instrument/time proximity), so this is tracked rather than blocking.
