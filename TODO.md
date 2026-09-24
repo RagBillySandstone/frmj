@@ -33,3 +33,8 @@ Unlike the REST API's ORDER_FILL transactions, the Oanda Hub CSV export never st
 ### 13. `trade --limit` follow-ups: GTD expiry and `--multi`
 
 `trade --limit` v1 is GTC-only and single-account. Two extensions were deferred: an `--expires` option for GTD orders (Oanda's `timeInForce: GTD` + `gtdTime`), and `--limit` with `--multi`, which needs the limit price chosen once and mirrored for `--opposite` accounts (a long's "15 pips below ask" becomes a short's "15 pips above bid").
+
+### 14. Bug: renaming or removing an account that belongs to a group crashes
+
+`account_groups.account_name` references `accounts(name)` with no `ON UPDATE`/`ON DELETE` action, and foreign keys are enforced, so `rename_account` and `remove_account` raise `sqlite3.IntegrityError: FOREIGN KEY constraint failed` for any account in a group. Neither CLI command catches it, so `frmj account rename` / `remove` exit with a traceback. Fix by updating (rename) or deleting (remove) the account's `account_groups` rows in the same transaction — or refusing removal while the account is still grouped — and add tests for both.
+
