@@ -132,7 +132,7 @@ frmj sync --account funded        # sync a non-active account
 
 ### `frmj positions`
 
-Show all open trades with live P/L, margin, TP/SL levels, and an estimated daily financing charge (in home currency, colored green/red — not the raw annualized rate), plus an account summary footer.
+Show all open trades with live P/L, margin, TP/SL levels, and an estimated daily financing charge (in home currency, colored green/red — not the raw annualized rate), plus an account summary footer. The footer includes Oanda's margin closeout percent; at 100% Oanda begins closing positions.
 
 Pending entry orders (limit, stop, and market-if-touched — e.g. from `frmj trade --limit`) are listed in their own section below the open trades, with their price, units, time in force, TP/SL, and the current market price on the side they would fill against (ask for a long, bid for a short). Cancelling a pending order is done in Oanda's own interface for now.
 
