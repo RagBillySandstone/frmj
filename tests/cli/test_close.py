@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from click.testing import Result
 from typer.testing import CliRunner
 
 from frmj.app import get_db, set_config
@@ -36,7 +37,7 @@ class TestCloseCommand:
         monkeypatch: pytest.MonkeyPatch,
         fake: FakeFullClient,
         inputs: str = "",
-    ) -> object:
+    ) -> Result:
         monkeypatch.setattr(
             "frmj.cli.close.get_client", lambda conn, account_name=None: fake
         )

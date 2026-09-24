@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from click.testing import Result
 from typer.testing import CliRunner
 
 from frmj.accounts import (
@@ -163,7 +164,7 @@ class TestTradeExecute:
         monkeypatch: pytest.MonkeyPatch,
         fake: FakeFullClient,
         inputs: str,
-    ) -> object:
+    ) -> Result:
         monkeypatch.setattr(
             "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
         )
@@ -863,7 +864,7 @@ class TestTradeLimit:
         inputs: str,
         *extra: str,
         direction: str = "long",
-    ) -> object:
+    ) -> Result:
         monkeypatch.setattr(
             "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
         )
@@ -1140,7 +1141,7 @@ class TestTradeFailureAndRetry:
         *,
         fail_count: int = 1,
         use_timeout: bool = False,
-    ) -> object:
+    ) -> Result:
         """Invoke ``frmj trade EUR_USD long`` where place_market_order fails
         *fail_count* times before succeeding.  *action_input* is the retry
         prompt response (r/s/a).
@@ -1711,7 +1712,7 @@ class TestTradeMultiAccount:
         fakes: dict[str, FakeFullClient],
         inputs: str,
         args: list[str] | None = None,
-    ) -> object:
+    ) -> Result:
         monkeypatch.setattr(
             "frmj.cli._trade_multi.get_client_for_account",
             lambda account: fakes[account.name],
@@ -2205,7 +2206,7 @@ class TestTradeMultiOpposite:
         fakes: dict[str, FakeFullClient],
         inputs: str,
         args: list[str],
-    ) -> object:
+    ) -> Result:
         monkeypatch.setattr(
             "frmj.cli._trade_multi.get_client_for_account",
             lambda account: fakes[account.name],

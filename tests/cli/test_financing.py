@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from click.testing import Result
 from typer.testing import CliRunner
 
 from frmj.app import get_db, set_config
@@ -81,7 +82,7 @@ class TestFinancingCommand:
         self,
         monkeypatch: pytest.MonkeyPatch,
         rates: list[FinancingRate],
-    ) -> object:
+    ) -> Result:
         fake = FakeFullClient(financing_rates=rates)
         monkeypatch.setattr("frmj.cli.financing.get_client", lambda conn: fake)
         return runner.invoke(app, ["financing"])

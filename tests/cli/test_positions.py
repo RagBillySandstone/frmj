@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from click.testing import Result
 from typer.testing import CliRunner
 
 from frmj.app import get_db, set_config
@@ -35,7 +36,7 @@ class TestPositionsCommand:
         self,
         monkeypatch: pytest.MonkeyPatch,
         trades: list[OpenTrade],
-    ) -> object:
+    ) -> Result:
         fake = FakeFullClient(open_trades=trades)
         monkeypatch.setattr(
             "frmj.cli.positions.get_client", lambda conn, account_name=None: fake
@@ -271,7 +272,7 @@ class TestPositionsPendingOrders:
         conn.close()
         return path
 
-    def _invoke(self, monkeypatch: pytest.MonkeyPatch, fake: FakeFullClient) -> object:
+    def _invoke(self, monkeypatch: pytest.MonkeyPatch, fake: FakeFullClient) -> Result:
         monkeypatch.setattr(
             "frmj.cli.positions.get_client", lambda conn, account_name=None: fake
         )
