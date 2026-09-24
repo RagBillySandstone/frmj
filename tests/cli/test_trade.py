@@ -1119,6 +1119,174 @@ class TestTradeLimit:
         )
 
 
+class TestTradeTrail:
+    """``trade --trail`` adds a trailing stop-loss to the plan and the order.
+
+    FakeFullClient quotes EUR_USD at bid 1.09990 / ask 1.10010 (2-pip
+    spread), so a 20-pip trail on a long starts at 1.09790: 20 pips below
+    the bid, 22 pips below the ask it entered at.
+    """
+
+    @pytest.fixture()
+    def trade_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "trade_trail_test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        set_config(conn, "account_id", "acct-1")
+        set_config(conn, "max_open_trades", "5")
+        conn.close()
+        return path
+
+    def _invoke(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeFullClient,
+        inputs: str,
+        *extra: str,
+    ) -> Result:
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
+        return runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--trail", *extra], input=inputs
+        )
+
+    def test_dry_run_shows_trail_row_including_spread(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        # TP skip, SL skip, trail=20
+        result = self._invoke(monkeypatch, fake, "\n\n20\n", "--dry-run")
+        assert result.exit_code == 0, result.output
+        assert "Trail: 20.0p" in result.output
+        assert "starts at 1.09790" in result.output
+        assert "incl. spread" in result.output
+        assert fake.order_placed is False
+
+    def test_rr_uses_tighter_of_sl_and_trail(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """TP 50 pips vs. a 100-pip SL and a 20-pip trail (22 pips with the
+        spread): the trail is tighter, so R:R = 50 / 22."""
+        fake = FakeFullClient()
+        result = self._invoke(monkeypatch, fake, "50\n100\n20\n", "--dry-run")
+        assert result.exit_code == 0, result.output
+        assert "R:R  2.27" in result.output
+
+    def test_trail_attached_after_market_fill(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        # TP 50, SL 30, trail 20, confirm, note skip, tags skip
+        result = self._invoke(monkeypatch, fake, "50\n30\n20\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert fake.trail_attached == "0.00200"
+        assert fake.sl_attached is not None
+        assert "Trailing stop set at 20.0 pips" in result.output
+
+    def test_skipping_trail_attaches_none(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        result = self._invoke(monkeypatch, fake, "\n30\n\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert fake.trail_attached is None
+        assert "Trailing stop set" not in result.output
+
+    def test_no_trail_prompt_without_flag(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+        )
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="\n\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "Trailing stop" not in result.output
+
+    def test_invalid_trail_reprompts(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        # "abc" and "-5" are rejected before 20 is accepted.
+        result = self._invoke(monkeypatch, fake, "\n\nabc\n-5\n20\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert result.output.count("Invalid input") == 2
+        assert fake.trail_attached == "0.00200"
+
+    def test_trail_below_instrument_minimum_reprompts(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        spec = InstrumentSpec(
+            name="EUR_USD",
+            pip_location=-4,
+            margin_rate=Decimal("0.02"),
+            min_units=1,
+            units_increment=1,
+            display_precision=5,
+            min_trailing_stop_distance=Decimal("0.00050"),
+        )
+        monkeypatch.setattr(fake, "get_instrument", lambda name: spec)
+        result = self._invoke(monkeypatch, fake, "\n\n3\n5\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert "at least 5.0 pips" in result.output
+        assert fake.trail_attached == "0.00050"
+
+    def test_edit_reprompts_trail(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        # First pass trail 20; edit to TP 50, SL 30, trail 25; confirm.
+        inputs = "50\n30\n20\ne\n50\n30\n25\ny\n\n\n"
+        result = self._invoke(monkeypatch, fake, inputs)
+        assert result.exit_code == 0, result.output
+        assert "Trailing stop (new)" in result.output
+        assert fake.trail_attached == "0.00250"
+
+    def test_trail_failure_without_sl_warns_unprotected(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(trail_should_fail=True)
+        result = self._invoke(monkeypatch, fake, "\n\n20\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        output = result.output + result.stderr
+        assert "failed to attach trailing stop" in output
+        assert "unprotected" in output
+
+    def test_trail_failure_with_sl_set_is_not_unprotected(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient(trail_should_fail=True)
+        result = self._invoke(monkeypatch, fake, "\n30\n20\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        output = result.output + result.stderr
+        assert "failed to attach trailing stop" in output
+        assert "unprotected" not in output
+
+    def test_limit_order_carries_trail_on_fill(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeFullClient()
+        # limit 15 pips, TP skip, SL skip, trail 20, confirm, note/tags skip
+        result = self._invoke(monkeypatch, fake, "15\n\n\n20\ny\n\n\n", "--limit")
+        assert result.exit_code == 0, result.output
+        assert fake.limit_orders[0]["trailing_stop_distance"] == Decimal("0.00200")
+        # Nothing is attached after placement; Oanda sets it on fill.
+        assert fake.trail_attached is None
+        assert "Trailing stop 20.0 pips will be set when it fills" in result.output
+
+    def test_trail_rejected_with_resume(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = runner.invoke(app, ["trade", "--resume", "--trail"])
+        assert result.exit_code == 1
+        assert "--trail is not used with --resume" in result.output + result.stderr
+
+
 class TestTradeFailureAndRetry:
     """Tests for the retry loop triggered when place_market_order raises."""
 

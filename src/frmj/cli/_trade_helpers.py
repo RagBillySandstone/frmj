@@ -1,5 +1,6 @@
 """TP/SL prompt, parsing, and display helpers shared by ``trade.py`` and
-``_trade_multi.py``, plus the limit-entry prompt used by ``trade --limit``.
+``_trade_multi.py``, plus the limit-entry prompt used by ``trade --limit``
+and the trailing-stop prompt and display used by ``trade --trail``.
 """
 
 from __future__ import annotations
@@ -15,7 +16,10 @@ from frmj.domain.pricing import (
     LimitEntrySpec,
     TPSLKind,
     TPSLSpec,
+    TrailingStopLevels,
     compute_limit_price,
+    compute_trailing_stop,
+    planned_loss_home,
 )
 from frmj.domain.sizing import Direction, InstrumentSpec, PriceQuote
 
@@ -103,6 +107,74 @@ def _parse_limit_entry(raw: str) -> LimitEntrySpec:
         return LimitEntrySpec(kind=LimitEntryKind.PIPS, value=Decimal(raw.rstrip("p")))
     except InvalidOperation:
         raise ValueError(f"{raw!r} is not a number") from None
+
+
+def _prompt_trailing_stop(
+    *,
+    entry_price: Decimal,
+    units: int,
+    direction: Direction,
+    spec: InstrumentSpec,
+    quote: PriceQuote,
+    margin_used: Decimal,
+    label: str = "Trailing stop",
+) -> TrailingStopLevels | None:
+    """Prompt for a trailing stop in pips; return its levels, or None to skip.
+
+    Accepts ``20`` or ``20p``. Re-prompts on anything that isn't a positive
+    number or that ``compute_trailing_stop`` rejects (e.g. a distance below
+    the instrument's minimum), showing the reason.
+    """
+    while True:
+        raw = typer.prompt(f"{label} (pips, Enter to skip)", default="").strip()
+        if not raw:
+            return None
+        try:
+            # Strip an optional trailing 'p', as the TP/SL prompts do.
+            pips = Decimal(raw.rstrip("p"))
+        except InvalidOperation:
+            typer.echo(f"  Invalid input: {raw!r} is not a number. Try '20' (pips).")
+            continue
+        try:
+            return compute_trailing_stop(
+                pips=pips,
+                entry_price=entry_price,
+                units=units,
+                direction=direction,
+                spec=spec,
+                quote=quote,
+                margin_used=margin_used,
+            )
+        except ValueError as exc:
+            typer.echo(f"  Invalid input: {exc}.")
+
+
+def _display_trail(trail: TrailingStopLevels) -> None:
+    """Print a trailing stop's row of the exit table, and any warnings.
+
+    The loss shown is at the initial trigger, which sits behind the bid
+    (long) / ask (short), so it includes the spread.
+    """
+    typer.echo(
+        f"  Trail: {trail.distance_pips:.1f}p"
+        f"  →  starts at {trail.initial_trigger_price}"
+        f"  →  {_pl_str(trail.projected_loss_home)}"
+        f"  ({trail.return_on_margin * 100:+.1f}% RoM, incl. spread)"
+    )
+    for warn in trail.warnings:
+        typer.echo(f"  ! {warn}", err=True)
+
+
+def _display_risk_reward(exits: ExitLevels, trail: TrailingStopLevels | None) -> None:
+    """Print the plan's R:R, measured against the tighter of SL and trail.
+
+    Prints nothing without both a take-profit and some stop.
+    """
+    loss = planned_loss_home(exits, trail)
+    if exits.projected_profit_home is None or loss is None or loss == 0:
+        return
+    rr = abs(exits.projected_profit_home / loss)
+    typer.echo(f"  R:R  {rr:.2f}")
 
 
 def _display_exits(exits: ExitLevels, margin_used: Decimal) -> None:

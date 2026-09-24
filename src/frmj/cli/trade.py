@@ -33,13 +33,21 @@ from frmj.cli._completion import (
 from frmj.cli._display import _color_financing_pct, _daily_financing_home, _pl_str
 from frmj.cli._trade_helpers import (
     _display_exits,
+    _display_risk_reward,
+    _display_trail,
     _prompt_limit_price,
     _prompt_retry_save_abort,
     _prompt_tpsl,
+    _prompt_trailing_stop,
 )
 from frmj.cli._trade_multi import _trade_multi_account
 from frmj.cli.journal import _attach_tags
-from frmj.domain.pricing import compute_exit_levels, pip_size, pip_value_home
+from frmj.domain.pricing import (
+    TrailingStopLevels,
+    compute_exit_levels,
+    pip_size,
+    pip_value_home,
+)
 from frmj.domain.risk import (
     CorrelatedPositionForbidden,
     MaxTradesExceeded,
@@ -177,6 +185,14 @@ def trade(
         "Prompts for the entry as pips better than the market, @price, or a "
         "percent of the current price.",
     ),
+    trail: bool = typer.Option(
+        False,
+        "--trail",
+        "-t",
+        help="Also prompt for a trailing stop-loss (in pips), which Oanda "
+        "moves behind the price as the trade goes your way. Can be combined "
+        "with a fixed stop-loss; whichever triggers first closes the trade.",
+    ),
 ) -> None:
     """Plan and (optionally) execute a trade."""
     # --- Validate argument combinations --------------------------------------
@@ -200,6 +216,13 @@ def trade(
             typer.echo(
                 "Error: --limit is not used with --resume "
                 "(the saved plan records its order type).",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if trail:
+            typer.echo(
+                "Error: --trail is not used with --resume "
+                "(the saved plan records its trailing stop).",
                 err=True,
             )
             raise typer.Exit(1)
@@ -300,6 +323,10 @@ def trade(
     sl_price: Decimal | None
     # Set only for a limit order; None means a market order.
     limit_price: Decimal | None = None
+    # Set only with a trailing stop: the order distance (price units) and
+    # the same distance in pips, for display and the trade plan.
+    trail_distance: Decimal | None = None
+    trail_pips: Decimal | None = None
 
     if resume:
         # --- Resume path: skip planning; confirm the draft loaded above ------
@@ -459,9 +486,19 @@ def trade(
             )
         typer.echo("")
 
-        # TP/SL prompts
+        # TP/SL prompts, then the trailing stop when --trail was given.
         tp_spec = _prompt_tpsl("Take-profit")
         sl_spec = _prompt_tpsl("Stop-loss  ")
+        trail_levels: TrailingStopLevels | None = None
+        if trail:
+            trail_levels = _prompt_trailing_stop(
+                entry_price=entry_price,
+                units=units_calc.units,
+                direction=direction,
+                spec=spec,
+                quote=quote,
+                margin_used=units_calc.margin_used,
+            )
 
         # Exit levels
         exits = compute_exit_levels(
@@ -476,14 +513,9 @@ def trade(
         )
 
         _display_exits(exits, units_calc.margin_used)
-
-        if (
-            exits.projected_profit_home is not None
-            and exits.projected_loss_home is not None
-        ):
-            if exits.projected_loss_home != 0:
-                rr = abs(exits.projected_profit_home / exits.projected_loss_home)
-                typer.echo(f"  R:R  {rr:.2f}")
+        if trail_levels is not None:
+            _display_trail(trail_levels)
+        _display_risk_reward(exits, trail_levels)
         typer.echo("")
 
         # Dry-run exit
@@ -504,6 +536,16 @@ def trade(
             if answer == "e":
                 tp_spec = _prompt_tpsl("Take-profit (new)")
                 sl_spec = _prompt_tpsl("Stop-loss   (new)")
+                if trail:
+                    trail_levels = _prompt_trailing_stop(
+                        entry_price=entry_price,
+                        units=units_calc.units,
+                        direction=direction,
+                        spec=spec,
+                        quote=quote,
+                        margin_used=units_calc.margin_used,
+                        label="Trailing stop (new)",
+                    )
                 exits = compute_exit_levels(
                     entry_price=entry_price,
                     units=units_calc.units,
@@ -515,12 +557,18 @@ def trade(
                     stop_loss=sl_spec,
                 )
                 _display_exits(exits, units_calc.margin_used)
+                if trail_levels is not None:
+                    _display_trail(trail_levels)
+                _display_risk_reward(exits, trail_levels)
 
         units_signed = (
             units_calc.units if direction is Direction.LONG else -units_calc.units
         )
         tp_price = exits.take_profit_price
         sl_price = exits.stop_loss_price
+        if trail_levels is not None:
+            trail_distance = trail_levels.distance
+            trail_pips = trail_levels.distance_pips
 
     # =========================================================================
     # Shared post-planning section: place order, attach TP/SL, sync, note
@@ -551,7 +599,12 @@ def trade(
         try:
             if limit_price is not None:
                 limit_result = client.place_limit_order(
-                    instrument, units_signed, limit_price, tp_price, sl_price
+                    instrument,
+                    units_signed,
+                    limit_price,
+                    tp_price,
+                    sl_price,
+                    trailing_stop_distance=trail_distance,
                 )
             else:
                 fill = client.place_market_order(instrument, units_signed)
@@ -601,11 +654,13 @@ def trade(
 
     if limit_result is not None:
         journal_oanda_id = _report_limit_order(
-            conn, client, limit_result, limit_price, tp_price, sl_price
+            conn, client, limit_result, limit_price, tp_price, sl_price, trail_pips
         )
     else:
         assert fill is not None
-        _report_market_fill(conn, client, fill, tp_price, sl_price)
+        _report_market_fill(
+            conn, client, fill, tp_price, sl_price, trail_distance, trail_pips
+        )
         journal_oanda_id = fill.transaction_id
 
     _prompt_note_and_tags(conn, client.account_id, journal_oanda_id)
@@ -619,10 +674,12 @@ def _report_limit_order(
     limit_price: Decimal | None,
     tp_price: Decimal | None,
     sl_price: Decimal | None,
+    trail_pips: Decimal | None,
 ) -> str:
     """Report a placed limit order, sync it, and save its trade plan.
 
-    TP/SL went in the order body, so there is nothing to attach — Oanda
+    TP/SL and any trailing stop went in the order body, so there is nothing
+    to attach — Oanda
     sets them when the order fills. Returns the Oanda transaction ID the
     entry's note and tags should attach to (see ``execute_post_limit``).
     """
@@ -640,6 +697,8 @@ def _report_limit_order(
         typer.echo(f"Take-profit {tp_price} {when}")
     if sl_price is not None:
         typer.echo(f"Stop-loss {sl_price} {when}")
+    if trail_pips is not None:
+        typer.echo(f"Trailing stop {trail_pips:.1f} pips {when}")
 
     post = services.execute_post_limit(conn, client, result, tp_price, sl_price)
     if post.sync_error is not None:
@@ -655,19 +714,28 @@ def _report_market_fill(
     fill: OrderFill,
     tp_price: Decimal | None,
     sl_price: Decimal | None,
+    trail_distance: Decimal | None,
+    trail_pips: Decimal | None,
 ) -> None:
-    """Report a market fill, attach TP/SL, sync, and save the trade plan."""
+    """Report a market fill, attach TP/SL and any trailing stop, sync, and
+    save the trade plan.
+
+    *trail_distance* (price units) is what is sent to Oanda; *trail_pips* is
+    the same distance for messages.
+    """
     typer.echo(
         f"Order filled at {fill.fill_price} — transaction #{fill.transaction_id}"
     )
 
     # --- Attach TP/SL, post-fill sync, and save the trade plan ---------------
-    post_fill = services.execute_post_fill(conn, client, fill, tp_price, sl_price)
+    post_fill = services.execute_post_fill(
+        conn, client, fill, tp_price, sl_price, trail_distance
+    )
 
     if post_fill.missing_trade_id:
         typer.echo(
-            "Warning: Oanda did not return a trade ID — cannot attach TP/SL. "
-            "Set them manually in the Oanda interface.",
+            "Warning: Oanda did not return a trade ID — cannot attach exit "
+            "orders. Set them manually in the Oanda interface.",
             err=True,
         )
     if tp_price is not None and not post_fill.missing_trade_id:
@@ -692,6 +760,23 @@ def _report_market_fill(
         else:
             typer.echo(
                 f"Stop-loss set at {sl_price} — order #{post_fill.sl_transaction_id}"
+            )
+    if trail_pips is not None and not post_fill.missing_trade_id:
+        if post_fill.trail_error is not None:
+            typer.echo(
+                f"Warning: failed to attach trailing stop — {post_fill.trail_error}",
+                err=True,
+            )
+            # Only unprotected when the fixed SL didn't go on either.
+            if sl_price is None or post_fill.sl_error is not None:
+                typer.echo(
+                    "  Position is unprotected — set a stop in Oanda immediately.",
+                    err=True,
+                )
+        else:
+            typer.echo(
+                f"Trailing stop set at {trail_pips:.1f} pips — "
+                f"order #{post_fill.trail_transaction_id}"
             )
 
     if post_fill.sync_error is not None:
