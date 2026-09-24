@@ -32,6 +32,10 @@ The same "positive magnitude, direction supplies the sign" convention applies
 to limit-order entries (``LimitEntrySpec`` / ``compute_limit_price``): a pip
 or percent offset always means "this much better than the current price" —
 below the ask for a long, above the bid for a short.
+
+Trailing stops (``compute_trailing_stop``) take a positive pip distance too.
+Unlike a fixed SL they trail the closing side of the book, so their
+projected loss includes the spread.
 """
 
 from __future__ import annotations
@@ -448,3 +452,134 @@ def compute_limit_price(
             "fill immediately; place a market order instead"
         )
     return price
+
+
+# ---------------------------------------------------------------------------
+# Trailing stop-loss
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class TrailingStopLevels:
+    """A trailing stop's order distance and its projected outcome at fill.
+
+    ``distance`` is what Oanda's ``TRAILING_STOP_LOSS`` order takes: a price
+    distance (quote currency), rounded to the instrument's precision.
+    ``initial_trigger_price`` is where Oanda first places the stop, and
+    ``projected_loss_home`` / ``return_on_margin`` are the outcome if it
+    triggers there. Both loss fields are negative, like
+    ``ExitLevels.projected_loss_home``.
+    """
+
+    distance: Decimal
+    distance_pips: Decimal
+    initial_trigger_price: Decimal
+    projected_loss_home: Decimal
+    return_on_margin: Decimal
+    warnings: tuple[str, ...]
+
+
+def compute_trailing_stop(
+    *,
+    pips: Decimal,
+    entry_price: Decimal,
+    units: int,
+    direction: Direction,
+    spec: InstrumentSpec,
+    quote: PriceQuote,
+    margin_used: Decimal,
+) -> TrailingStopLevels:
+    """Compute a trailing stop's distance and its initial trigger and loss.
+
+    Oanda trails the stop behind the price a position would *close* at — the
+    bid for a long, the ask for a short — not behind the entry price. So at
+    fill the stop starts ``distance`` away from the closing side, which is
+    one spread further from entry than a fixed stop-loss of the same pips::
+
+        long:   trigger = entry - (spread + distance)
+        short:  trigger = entry + (spread + distance)
+
+    The spread is today's (``quote.ask - quote.bid``); for a limit order it
+    is assumed unchanged when the order fills. The projected loss therefore
+    includes the spread — it is the real loss if the stop triggers at once.
+
+    Raises:
+        ValueError: if *pips* is not positive, or the rounded distance is
+            outside the instrument's trailing-stop bounds (when known).
+    """
+    # --- validate and convert the user's pips to an order distance --------
+    if pips <= 0:
+        raise ValueError(f"trailing stop must be a positive pip distance; got {pips}")
+    distance = _quantize_price(pips * pip_size(spec), spec)
+    if distance <= 0:
+        raise ValueError(f"{pips} pips rounds to a zero distance on {spec.name}")
+
+    # Oanda rejects distances outside these bounds; catch it before sending.
+    # Messages give pips because that is what the user typed.
+    min_d = spec.min_trailing_stop_distance
+    max_d = spec.max_trailing_stop_distance
+    if min_d is not None and distance < min_d:
+        raise ValueError(
+            f"trailing stop must be at least {min_d / pip_size(spec):.1f} pips "
+            f"on {spec.name}"
+        )
+    if max_d is not None and distance > max_d:
+        raise ValueError(
+            f"trailing stop must be at most {max_d / pip_size(spec):.1f} pips "
+            f"on {spec.name}"
+        )
+
+    # --- initial trigger: distance behind the closing side of the book -----
+    # favor_sign is +1 for a long (stop below), -1 for a short (stop above).
+    favor_sign = Decimal(1) if direction is Direction.LONG else Decimal(-1)
+    adverse_offset = (quote.ask - quote.bid) + distance
+    trigger = _quantize_price(entry_price - favor_sign * adverse_offset, spec)
+
+    # --- projected loss at the initial trigger ----------------------------
+    loss_home = -_profit_home_for_offset(
+        favorable_offset_quote=adverse_offset, units=units, quote=quote
+    )
+    rom = loss_home / margin_used
+
+    # --- sanity warnings, same thresholds as a fixed stop-loss ------------
+    warnings: list[str] = []
+    distance_pips = distance / pip_size(spec)
+    if distance_pips > UNREALISTIC_PIP_THRESHOLD:
+        warnings.append(
+            f"trailing stop is {distance_pips:.0f} pips "
+            f"(threshold {UNREALISTIC_PIP_THRESHOLD}); check the value"
+        )
+    if -rom > UNREALISTIC_RETURN_THRESHOLD:
+        warnings.append(
+            f"trailing stop return on margin is {rom * 100:.1f}% (threshold "
+            f"-{UNREALISTIC_RETURN_THRESHOLD * 100:.0f}%); check the value"
+        )
+
+    return TrailingStopLevels(
+        distance=distance,
+        distance_pips=distance_pips,
+        initial_trigger_price=trigger,
+        projected_loss_home=loss_home,
+        return_on_margin=rom,
+        warnings=tuple(warnings),
+    )
+
+
+def planned_loss_home(
+    exits: ExitLevels, trail: TrailingStopLevels | None
+) -> Decimal | None:
+    """The loss the trade plan risks: from the tighter of SL and trail.
+
+    Oanda closes the trade on whichever stop triggers first, so the planned
+    risk is the smaller loss (the one nearer zero, since losses are
+    negative). ``None`` when the plan has no stop of either kind.
+    """
+    losses = [
+        loss
+        for loss in (
+            exits.projected_loss_home,
+            trail.projected_loss_home if trail is not None else None,
+        )
+        if loss is not None
+    ]
+    return max(losses) if losses else None

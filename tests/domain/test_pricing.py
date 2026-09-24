@@ -28,10 +28,13 @@ from frmj.domain.pricing import (
     LimitEntrySpec,
     TPSLKind,
     TPSLSpec,
+    TrailingStopLevels,
     compute_exit_levels,
     compute_limit_price,
+    compute_trailing_stop,
     pip_size,
     pip_value_home,
+    planned_loss_home,
 )
 from frmj.domain.sizing import Direction, InstrumentSpec, PriceQuote
 
@@ -659,3 +662,151 @@ class TestComputeLimitPrice:
     def test_offset_past_zero_rejected(self) -> None:
         with pytest.raises(ValueError, match="positive"):
             _limit(LimitEntryKind.PIPS, "20000", Direction.LONG)
+
+
+# ---------------------------------------------------------------------------
+# compute_trailing_stop / planned_loss_home
+# ---------------------------------------------------------------------------
+
+
+def _trail(
+    pips: str,
+    direction: Direction = Direction.LONG,
+    spec: InstrumentSpec | None = None,
+    units: int = 10_000,
+    margin_used: Decimal = Decimal("220"),
+) -> TrailingStopLevels:
+    """Trailing stop on EUR_USD at 1.10 (bid 1.0998 / ask 1.1002)."""
+    quote = _eur_usd_quote()
+    return compute_trailing_stop(
+        pips=Decimal(pips),
+        entry_price=quote.entry_price(direction),
+        units=units,
+        direction=direction,
+        spec=spec or _eur_usd_spec(),
+        quote=quote,
+        margin_used=margin_used,
+    )
+
+
+class TestComputeTrailingStop:
+    def test_distance_is_pips_in_price_units(self) -> None:
+        levels = _trail("20")
+        assert levels.distance == Decimal("0.00200")
+        assert levels.distance_pips == Decimal("20")
+
+    def test_fractional_pips_round_to_display_precision(self) -> None:
+        # 12.34 pips = 0.001234, rounded to 5 dp = 0.00123 (12.3 pips).
+        levels = _trail("12.34")
+        assert levels.distance == Decimal("0.00123")
+        assert levels.distance_pips == Decimal("12.3")
+
+    def test_long_trigger_is_distance_below_bid(self) -> None:
+        # Entry at ask 1.1002; trigger = bid 1.0998 - 0.0020 = 1.0978.
+        levels = _trail("20", Direction.LONG)
+        assert levels.initial_trigger_price == Decimal("1.09780")
+
+    def test_short_trigger_is_distance_above_ask(self) -> None:
+        # Entry at bid 1.0998; trigger = ask 1.1002 + 0.0020 = 1.1022.
+        levels = _trail("20", Direction.SHORT)
+        assert levels.initial_trigger_price == Decimal("1.10220")
+
+    def test_projected_loss_includes_spread(self) -> None:
+        # 20 pips + 4-pip spread = 0.0024 * 10,000 units * 1 = $24 loss.
+        levels = _trail("20")
+        assert levels.projected_loss_home == Decimal("-24")
+        assert levels.return_on_margin == Decimal("-24") / Decimal("220")
+
+    def test_short_loss_matches_long(self) -> None:
+        assert (
+            _trail("20", Direction.SHORT).projected_loss_home
+            == _trail("20", Direction.LONG).projected_loss_home
+        )
+
+    def test_jpy_pair_uses_its_pip_size(self) -> None:
+        quote = _usd_jpy_quote()
+        levels = compute_trailing_stop(
+            pips=Decimal("15"),
+            entry_price=quote.ask,
+            units=10_000,
+            direction=Direction.LONG,
+            spec=_usd_jpy_spec(),
+            quote=quote,
+            margin_used=Decimal("400"),
+        )
+        assert levels.distance == Decimal("0.150")
+
+    @pytest.mark.parametrize("pips", ["0", "-5"])
+    def test_non_positive_pips_rejected(self, pips: str) -> None:
+        with pytest.raises(ValueError, match="positive"):
+            _trail(pips)
+
+    def test_rounds_to_zero_rejected(self) -> None:
+        # 0.01 pips = 0.000001, below 5 dp precision.
+        with pytest.raises(ValueError, match="zero distance"):
+            _trail("0.01")
+
+    def _bounded_spec(self) -> InstrumentSpec:
+        return InstrumentSpec(
+            name="EUR_USD",
+            pip_location=-4,
+            margin_rate=Decimal("0.02"),
+            min_units=1,
+            units_increment=1,
+            display_precision=5,
+            min_trailing_stop_distance=Decimal("0.00050"),
+            max_trailing_stop_distance=Decimal("1.00000"),
+        )
+
+    def test_below_minimum_rejected_in_pips(self) -> None:
+        with pytest.raises(ValueError, match="at least 5.0 pips"):
+            _trail("4", spec=self._bounded_spec())
+
+    def test_minimum_itself_accepted(self) -> None:
+        assert _trail("5", spec=self._bounded_spec()).distance == Decimal("0.00050")
+
+    def test_above_maximum_rejected(self) -> None:
+        with pytest.raises(ValueError, match="at most 10000.0 pips"):
+            _trail("10001", spec=self._bounded_spec())
+
+    def test_unrealistic_pips_warns(self) -> None:
+        levels = _trail(str(UNREALISTIC_PIP_THRESHOLD + 1))
+        assert any("pips" in w for w in levels.warnings)
+
+    def test_unrealistic_return_warns(self) -> None:
+        # $24 loss on $20 margin is -120% RoM.
+        levels = _trail("20", margin_used=Decimal("20"))
+        assert any("return on margin" in w for w in levels.warnings)
+
+    def test_normal_trail_has_no_warnings(self) -> None:
+        assert _trail("20").warnings == ()
+
+
+class TestPlannedLossHome:
+    def _exits(self, loss: Decimal | None) -> ExitLevels:
+        return ExitLevels(
+            take_profit_price=None,
+            stop_loss_price=None,
+            projected_profit_home=None,
+            projected_loss_home=loss,
+            return_on_margin_at_tp=None,
+            return_on_margin_at_sl=None,
+            warnings=(),
+        )
+
+    def test_no_stops_is_none(self) -> None:
+        assert planned_loss_home(self._exits(None), None) is None
+
+    def test_sl_only(self) -> None:
+        assert planned_loss_home(self._exits(Decimal("-30")), None) == Decimal("-30")
+
+    def test_trail_only(self) -> None:
+        assert planned_loss_home(self._exits(None), _trail("20")) == Decimal("-24")
+
+    def test_tighter_trail_wins(self) -> None:
+        loss = planned_loss_home(self._exits(Decimal("-50")), _trail("20"))
+        assert loss == Decimal("-24")
+
+    def test_tighter_sl_wins(self) -> None:
+        loss = planned_loss_home(self._exits(Decimal("-10")), _trail("20"))
+        assert loss == Decimal("-10")
