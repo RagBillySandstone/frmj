@@ -147,6 +147,25 @@ def _complete_open_instrument(ctx: typer.Context, incomplete: str) -> list[str]:
     return sorted(i for i in instruments if i.upper().startswith(incomplete.upper()))
 
 
+def _complete_open_trade_id(ctx: typer.Context, incomplete: str) -> list[str]:
+    """Return IDs of open trades, for ``frmj trail``.
+
+    Same live query and error handling as ``_complete_open_instrument``
+    (honours a preceding ``--account``; any failure yields no completions),
+    but offers trade IDs, sorted numerically so they read oldest-first.
+    """
+    conn = get_db()
+    try:
+        client = get_client(conn, ctx.params.get("account"))
+        trade_ids = [t.trade_id for t in client.get_open_trades()]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+    matching = [i for i in trade_ids if i.startswith(incomplete)]
+    return sorted(matching, key=lambda i: (len(i), i))
+
+
 def _complete_direction(incomplete: str) -> list[str]:
     return [d for d in ("long", "short") if d.startswith(incomplete.lower())]
 

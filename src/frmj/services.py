@@ -13,8 +13,9 @@ This is the split described in TODO item 6 ("Service layer extraction"):
 ``fetch_instrument_context``/``fetch_account_context`` + ``plan_account_sizing``
 cover the market-data and risk-check steps of the trade flow,
 ``execute_post_fill`` covers the TP/SL-attach + sync + persist steps after an
-order is placed (``execute_post_limit`` is its limit-order counterpart), and ``fetch_positions_view`` / ``execute_close`` cover the
-``positions`` and ``close`` commands respectively. Order placement itself
+order is placed (``execute_post_limit`` is its limit-order counterpart), and ``fetch_positions_view`` / ``execute_close`` /
+``execute_trail`` cover the ``positions``, ``close``, and ``trail`` commands
+respectively. Order placement itself
 (with its retry/save/abort prompt) stays in ``cli.py`` because the retry
 decision is inherently interactive.
 
@@ -578,6 +579,65 @@ def execute_close(
 
     return CloseResult(
         ticket_results=ticket_results,
+        sync_rows_ingested=sync_rows_ingested,
+        sync_error=sync_error,
+    )
+
+
+# ---------------------------------------------------------------------------
+# trail command: set/remove a trailing stop on an open trade + sync
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class TrailResult:
+    """Outcome of setting or removing one trade's trailing stop, plus the
+    follow-up sync.
+
+    Exactly one of ``transaction_id`` / ``error`` is set. The sync fields
+    are only meaningful when the change succeeded — no sync runs otherwise.
+    """
+
+    transaction_id: str | None
+    error: str | None
+    sync_rows_ingested: int
+    sync_error: str | None
+
+
+def execute_trail(
+    conn: sqlite3.Connection,
+    client: OandaClient,
+    trade_id: str,
+    distance: Decimal | None,
+) -> TrailResult:
+    """Set (``distance`` in price units) or remove (``None``) the trailing
+    stop on *trade_id*, then run an incremental sync so the journal picks up
+    Oanda's order/cancel transactions immediately.
+
+    The saved trade plan is deliberately left alone: it records what was
+    intended at entry, and the synced transactions already record the change.
+    An Oanda error is returned in ``error`` rather than raised, matching
+    ``execute_close``.
+    """
+    # Send the change; any failure means there is nothing new to sync.
+    try:
+        transaction_id = client.set_trade_trailing_stop(trade_id, distance)
+    except Exception as exc:
+        return TrailResult(
+            transaction_id=None, error=str(exc), sync_rows_ingested=0, sync_error=None
+        )
+
+    # Sync is best-effort: the change on Oanda already succeeded.
+    sync_rows_ingested = 0
+    sync_error: str | None = None
+    try:
+        sync_rows_ingested = sync_incremental(conn, client).rows_ingested
+    except Exception as exc:
+        sync_error = str(exc)
+
+    return TrailResult(
+        transaction_id=transaction_id,
+        error=None,
         sync_rows_ingested=sync_rows_ingested,
         sync_error=sync_error,
     )

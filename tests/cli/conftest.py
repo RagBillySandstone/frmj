@@ -198,6 +198,15 @@ class FakeFullClient:
         self.trail_attached = str(distance)
         return "100003"
 
+    # Calls to set_trade_trailing_stop, as (trade_id, distance-or-None).
+    trail_changes: list[tuple[str, Decimal | None]] = field(default_factory=list)
+
+    def set_trade_trailing_stop(self, trade_id: str, distance: Decimal | None) -> str:
+        if self.trail_should_fail:
+            raise RuntimeError("Trailing stop rejected by Oanda")
+        self.trail_changes.append((trade_id, distance))
+        return "100004" if distance is not None else "100005"
+
     open_trades: list[OpenTrade] = field(default_factory=list)
     close_should_fail: bool = False
     closed_trade_ids: list[str] = field(default_factory=list)
@@ -243,6 +252,8 @@ def _open_trade(
     margin_used: str = "220.10",
     tp_price: str | None = "1.10550",
     sl_price: str | None = "1.09750",
+    trail_distance: str | None = None,
+    trail_price: str | None = None,
 ) -> OpenTrade:
     return OpenTrade(
         trade_id=trade_id,
@@ -255,6 +266,8 @@ def _open_trade(
         take_profit_price=Decimal(tp_price) if tp_price else None,
         stop_loss_price=Decimal(sl_price) if sl_price else None,
         open_time="2026-04-25T14:30:00.000000Z",
+        trailing_stop_price=Decimal(trail_price) if trail_price else None,
+        trailing_stop_distance=Decimal(trail_distance) if trail_distance else None,
     )
 
 

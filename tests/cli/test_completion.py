@@ -81,6 +81,7 @@ _COMPLETION_EXEMPT: dict[tuple[str, str], str] = {
     ("financing", "date_str"): "free-form date, no fixed set of values",
     ("note", "text"): "arbitrary free text",
     ("journal", "n"): "numeric, no fixed set of values",
+    ("trail", "pips"): "numeric pip distance (or the literal 'off')",
     ("journal", "since"): "free-form date, no fixed set of values",
     ("account add", "name"): "new account name being created",
     ("account rename", "new_name"): "new account name being created",

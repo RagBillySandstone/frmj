@@ -69,6 +69,13 @@ Commands
     Runs an incremental sync after closing so the local journal reflects
     the closing transactions immediately.
 
+``frmj trail <TRADE_ID> <PIPS|off> [--account NAME]``
+    Add, change, or remove the trailing stop on an open trade.  Shows the
+    trade's current exits and where the new trail would trigger right now
+    (with the P/L from entry at that price), and prompts for confirmation.
+    TP and fixed SL are left untouched.  Syncs afterwards; the saved trade
+    plan is not changed.
+
 ``frmj tag <OANDA_ID> <TAG> [<TAG2>...]``
     Attach one or more short labels to a transaction.  Tags are normalised
     to lowercase and must be non-empty tokens (alphanumeric, hyphens, or
@@ -194,3 +201,4 @@ from frmj.cli import positions as positions  # noqa: E402
 from frmj.cli import stats as stats  # noqa: E402
 from frmj.cli import sync as sync  # noqa: E402
 from frmj.cli import trade as trade  # noqa: E402
+from frmj.cli import trail as trail  # noqa: E402
