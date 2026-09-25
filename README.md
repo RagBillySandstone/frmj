@@ -85,6 +85,7 @@ frmj config check --connectivity   # also calls the Oanda API to verify credenti
 | [`frmj financing`](docs/commands.md#frmj-financing) | Current long/short financing rates, recorded daily for later lookup |
 | [`frmj trade`](docs/commands.md#frmj-trade) | Interactive risk-checked sizing, TP/SL and trailing-stop planning, and order placement |
 | [`frmj close`](docs/commands.md#frmj-close) | Close all open tickets for an instrument |
+| [`frmj trail`](docs/commands.md#frmj-trail) | Add, change, or remove the trailing stop on an open trade |
 | [`frmj stats`](docs/commands.md#frmj-stats) | Performance statistics from the local journal |
 | [`frmj journal`](docs/commands.md#frmj-journal) | Recent transactions with their notes and tags |
 | [`frmj export`](docs/commands.md#frmj-export) | Export transactions to CSV or JSON |
@@ -93,7 +94,7 @@ frmj config check --connectivity   # also calls the Oanda API to verify credenti
 | [`frmj mode`](docs/commands.md#frmj-mode) | Enable or disable live order placement |
 | [`frmj config`](docs/commands.md#frmj-config) | Get, set, and validate configuration and risk settings |
 
-`frmj sync`, `positions`, `trade`, `close`, `journal`, and `stats` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command; `journal` and `stats` also take `--all-accounts` (`-A`).
+`frmj sync`, `positions`, `trade`, `close`, `trail`, `journal`, and `stats` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command; `journal` and `stats` also take `--all-accounts` (`-A`).
 
 ![Example frmj stats output](docs/frmj_stats.png)
 

@@ -115,7 +115,7 @@ A price that would fill immediately (at or above the ask for a long, at or below
   R:R  2.27
 ```
 
-A fixed stop-loss and a trailing stop can be set together; Oanda closes the trade on whichever triggers first, and R:R is measured against the tighter of the two. A distance outside the instrument's allowed trailing-stop range is rejected and re-prompted. On a market order the trailing stop is attached after the fill, like TP/SL; a limit order carries it and Oanda sets it when the order fills. The distance is saved in the trade plan (shown by `frmj journal`) and in a saved draft. It works with `--limit` and `--multi` (the same distance on every account, `--opposite` ones included) but cannot be combined with `--resume`, which uses the saved draft's trailing stop.
+A fixed stop-loss and a trailing stop can be set together; Oanda closes the trade on whichever triggers first, and R:R is measured against the tighter of the two. A distance outside the instrument's allowed trailing-stop range is rejected and re-prompted. On a market order the trailing stop is attached after the fill, like TP/SL; a limit order carries it and Oanda sets it when the order fills. The distance is saved in the trade plan (shown by `frmj journal`) and in a saved draft. To add, change, or remove a trailing stop after the trade is open, use [`frmj trail`](#frmj-trail). It works with `--limit` and `--multi` (the same distance on every account, `--opposite` ones included) but cannot be combined with `--resume`, which uses the saved draft's trailing stop.
 
 **`--multi GROUP`** places the same trade on every account in a saved group (see [`frmj account group`](#frmj-account-group) below) instead of just the active account. Risk, sizing, and correlation are evaluated independently per account (each has its own NAV and open positions); the instrument and TP/SL choice are shared, and a single confirmation covers the whole group. Not supported together with `--resume`.
 
@@ -130,6 +130,20 @@ frmj close EUR_USD
 ```
 
 Shows each ticket's current P/L, prompts for confirmation, then runs an incremental sync after closing.
+
+## `frmj trail`
+
+Add, change, or remove the trailing stop on an open trade.
+
+```sh
+frmj trail 6368 15          # trail trade #6368 by 15 pips (15p also works)
+frmj trail 6368 off         # remove its trailing stop
+frmj trail 6368 15 --account funded
+```
+
+`TRADE_ID` is the ID shown by `frmj positions` (tab-completes from the account's open trades). The command shows the trade's current TP, SL, and trail, then the new trail's distance, where it would trigger right now (the pips behind the bid for a long, above the ask for a short), and the P/L from entry at that price. On a trade already in profit that P/L can be positive: the trail locks it in. A distance outside the instrument's allowed range is rejected before any prompt.
+
+After confirmation (default No) Oanda replaces any existing trail; TP and a fixed SL are left untouched. `off` removes the trail, with a warning if the trade has no fixed stop-loss. An incremental sync runs afterwards. The trade plan saved at entry (shown by `frmj journal`) keeps its original trailing stop; the change appears in the journal as Oanda's own order transactions.
 
 ## `frmj stats`
 
