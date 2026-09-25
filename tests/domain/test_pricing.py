@@ -35,6 +35,7 @@ from frmj.domain.pricing import (
     pip_size,
     pip_value_home,
     planned_loss_home,
+    trailing_stop_distance,
 )
 from frmj.domain.sizing import Direction, InstrumentSpec, PriceQuote
 
@@ -780,6 +781,26 @@ class TestComputeTrailingStop:
 
     def test_normal_trail_has_no_warnings(self) -> None:
         assert _trail("20").warnings == ()
+
+
+class TestTrailingStopDistance:
+    """The pips→distance conversion shared by ``trade --trail`` and
+    ``frmj trail``. Bounds and rounding are covered in depth through
+    ``compute_trailing_stop`` above; these pin the standalone entry point."""
+
+    def test_converts_pips_to_price_units(self) -> None:
+        assert trailing_stop_distance(Decimal("20"), _eur_usd_spec()) == Decimal(
+            "0.00200"
+        )
+
+    def test_jpy_pair_uses_its_pip_size(self) -> None:
+        assert trailing_stop_distance(Decimal("15"), _usd_jpy_spec()) == Decimal(
+            "0.150"
+        )
+
+    def test_non_positive_rejected(self) -> None:
+        with pytest.raises(ValueError, match="positive"):
+            trailing_stop_distance(Decimal("0"), _eur_usd_spec())
 
 
 class TestPlannedLossHome:

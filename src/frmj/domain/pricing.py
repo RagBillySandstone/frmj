@@ -479,6 +479,41 @@ class TrailingStopLevels:
     warnings: tuple[str, ...]
 
 
+def trailing_stop_distance(pips: Decimal, spec: InstrumentSpec) -> Decimal:
+    """Convert a trailing stop's pips to Oanda's order distance, validated.
+
+    The distance is in price units (quote currency), rounded to the
+    instrument's display precision — the form ``TRAILING_STOP_LOSS`` orders
+    take.
+
+    Raises:
+        ValueError: if *pips* is not positive, rounds to zero, or the rounded
+            distance is outside the instrument's trailing-stop bounds (when
+            known). Messages give pips because that is what the user typed.
+    """
+    # Reject non-positive input before converting it.
+    if pips <= 0:
+        raise ValueError(f"trailing stop must be a positive pip distance; got {pips}")
+    distance = _quantize_price(pips * pip_size(spec), spec)
+    if distance <= 0:
+        raise ValueError(f"{pips} pips rounds to a zero distance on {spec.name}")
+
+    # Oanda rejects distances outside these bounds; catch it before sending.
+    min_d = spec.min_trailing_stop_distance
+    max_d = spec.max_trailing_stop_distance
+    if min_d is not None and distance < min_d:
+        raise ValueError(
+            f"trailing stop must be at least {min_d / pip_size(spec):.1f} pips "
+            f"on {spec.name}"
+        )
+    if max_d is not None and distance > max_d:
+        raise ValueError(
+            f"trailing stop must be at most {max_d / pip_size(spec):.1f} pips "
+            f"on {spec.name}"
+        )
+    return distance
+
+
 def compute_trailing_stop(
     *,
     pips: Decimal,
@@ -508,26 +543,7 @@ def compute_trailing_stop(
             outside the instrument's trailing-stop bounds (when known).
     """
     # --- validate and convert the user's pips to an order distance --------
-    if pips <= 0:
-        raise ValueError(f"trailing stop must be a positive pip distance; got {pips}")
-    distance = _quantize_price(pips * pip_size(spec), spec)
-    if distance <= 0:
-        raise ValueError(f"{pips} pips rounds to a zero distance on {spec.name}")
-
-    # Oanda rejects distances outside these bounds; catch it before sending.
-    # Messages give pips because that is what the user typed.
-    min_d = spec.min_trailing_stop_distance
-    max_d = spec.max_trailing_stop_distance
-    if min_d is not None and distance < min_d:
-        raise ValueError(
-            f"trailing stop must be at least {min_d / pip_size(spec):.1f} pips "
-            f"on {spec.name}"
-        )
-    if max_d is not None and distance > max_d:
-        raise ValueError(
-            f"trailing stop must be at most {max_d / pip_size(spec):.1f} pips "
-            f"on {spec.name}"
-        )
+    distance = trailing_stop_distance(pips, spec)
 
     # --- initial trigger: distance behind the closing side of the book -----
     # favor_sign is +1 for a long (stop below), -1 for a short (stop above).
