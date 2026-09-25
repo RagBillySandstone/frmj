@@ -695,6 +695,52 @@ class TestAttachExitOrders:
 
 
 # ---------------------------------------------------------------------------
+# set_trade_trailing_stop
+# ---------------------------------------------------------------------------
+
+
+class TestSetTradeTrailingStop:
+    def test_set_puts_distance_to_trade_orders(self) -> None:
+        """Setting a trail PUTs only trailingStopLoss to the trade's /orders
+        endpoint (so TP/SL are untouched) and returns the new order's ID,
+        even when Oanda also cancelled a previous trail."""
+        response = {
+            "trailingStopLossOrderCancelTransaction": {"id": "70001"},
+            "trailingStopLossOrderTransaction": {"id": "70002"},
+        }
+        client = _make_client(response)
+        assert client.set_trade_trailing_stop("501", Decimal("0.00150")) == "70002"
+
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        assert http.calls[0].method == "PUT"
+        assert http.calls[0].url.endswith("/trades/501/orders")
+        assert http.calls[0].kwargs["json"] == {
+            "trailingStopLoss": {"distance": "0.00150", "timeInForce": "GTC"}
+        }
+
+    def test_remove_sends_null_and_returns_cancel_id(self) -> None:
+        """None cancels the trail: Oanda takes an explicit null."""
+        response = {"trailingStopLossOrderCancelTransaction": {"id": "70003"}}
+        client = _make_client(response)
+        assert client.set_trade_trailing_stop("501", None) == "70003"
+
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        assert http.calls[0].kwargs["json"] == {"trailingStopLoss": None}
+
+    def test_missing_transaction_raises(self) -> None:
+        """A 2xx without the expected transaction must not pass silently."""
+        client = _make_client({"lastTransactionID": "70004"})
+        with pytest.raises(RuntimeError, match="trailingStopLossOrderTransaction"):
+            client.set_trade_trailing_stop("501", Decimal("0.00150"))
+
+    def test_raises_on_http_error(self) -> None:
+        """Oanda rejections (bad distance, unknown trade) surface as-is."""
+        client = _make_client(_ErrorResponse(400))
+        with pytest.raises(httpx.HTTPStatusError):
+            client.set_trade_trailing_stop("501", Decimal("0.00001"))
+
+
+# ---------------------------------------------------------------------------
 # close / __enter__ / __exit__
 # ---------------------------------------------------------------------------
 

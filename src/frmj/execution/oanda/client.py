@@ -500,6 +500,48 @@ class OandaClient:
             "TRAILING_STOP_LOSS", trade_id, {"distance": str(distance)}
         )
 
+    def set_trade_trailing_stop(self, trade_id: str, distance: Decimal | None) -> str:
+        """Add, replace, or remove the trailing stop on an open trade.
+
+        Uses PUT /accounts/{id}/trades/{tradeID}/orders, which modifies a
+        trade's dependent orders in place: only the ``trailingStopLoss`` field
+        is sent, so any take-profit or fixed stop-loss is left untouched.
+        *distance* is in price units, already rounded to the instrument's
+        display precision; ``None`` sends ``trailingStopLoss: null``, which
+        cancels the existing trailing stop.
+
+        Returns the ID of the transaction that did the work: the new
+        trailing-stop order's (``trailingStopLossOrderTransaction``) when
+        setting one — Oanda also cancels any previous trail in the same call —
+        or the cancellation's (``trailingStopLossOrderCancelTransaction``)
+        when removing.
+
+        Raises ``httpx.HTTPStatusError`` on Oanda errors (e.g. a distance
+        outside the instrument's bounds, or an unknown trade ID), and
+        ``RuntimeError`` if the expected transaction is missing from an
+        otherwise successful response.
+        """
+        # A null trailingStopLoss is Oanda's documented way to cancel one.
+        trailing: dict[str, str] | None = None
+        if distance is not None:
+            trailing = {"distance": str(distance), "timeInForce": "GTC"}
+        resp = self._http.put(
+            f"{self._base_url}/accounts/{self.account_id}/trades/{trade_id}/orders",
+            json={"trailingStopLoss": trailing},
+        )
+        resp.raise_for_status()
+
+        # Pick the transaction that matches what was asked for.
+        key = (
+            "trailingStopLossOrderCancelTransaction"
+            if distance is None
+            else "trailingStopLossOrderTransaction"
+        )
+        txn = resp.json().get(key)
+        if not txn or "id" not in txn:
+            raise RuntimeError(f"No {key} in Oanda response for trade {trade_id}")
+        return str(txn["id"])
+
     def close(self) -> None:
         """Release the underlying httpx connection pool."""
         self._http.close()
