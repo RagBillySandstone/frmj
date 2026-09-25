@@ -36,6 +36,7 @@ from frmj.domain.pricing import (
     pip_value_home,
     planned_loss_home,
     trailing_stop_distance,
+    trailing_trigger_now,
 )
 from frmj.domain.sizing import Direction, InstrumentSpec, PriceQuote
 
@@ -801,6 +802,31 @@ class TestTrailingStopDistance:
     def test_non_positive_rejected(self) -> None:
         with pytest.raises(ValueError, match="positive"):
             trailing_stop_distance(Decimal("0"), _eur_usd_spec())
+
+
+class TestTrailingTriggerNow:
+    """Trigger for a trail set on an open trade: distance behind the closing
+    side (bid 1.0998 / ask 1.1002), independent of the entry price."""
+
+    def test_long_is_distance_below_bid(self) -> None:
+        trigger = trailing_trigger_now(
+            Decimal("0.00200"), Direction.LONG, _eur_usd_quote(), _eur_usd_spec()
+        )
+        assert trigger == Decimal("1.09780")
+
+    def test_short_is_distance_above_ask(self) -> None:
+        trigger = trailing_trigger_now(
+            Decimal("0.00200"), Direction.SHORT, _eur_usd_quote(), _eur_usd_spec()
+        )
+        assert trigger == Decimal("1.10220")
+
+    def test_matches_compute_trailing_stop_at_entry(self) -> None:
+        # For a trade entered right now the two must agree.
+        for direction in (Direction.LONG, Direction.SHORT):
+            levels = _trail("20", direction)
+            assert levels.initial_trigger_price == trailing_trigger_now(
+                levels.distance, direction, _eur_usd_quote(), _eur_usd_spec()
+            )
 
 
 class TestPlannedLossHome:

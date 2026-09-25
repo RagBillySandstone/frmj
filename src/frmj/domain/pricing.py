@@ -35,7 +35,9 @@ below the ask for a long, above the bid for a short.
 
 Trailing stops (``compute_trailing_stop``) take a positive pip distance too.
 Unlike a fixed SL they trail the closing side of the book, so their
-projected loss includes the spread.
+projected loss includes the spread. ``trailing_stop_distance`` and
+``trailing_trigger_now`` serve ``frmj trail``, which sets one on a trade
+that is already open.
 """
 
 from __future__ import annotations
@@ -512,6 +514,21 @@ def trailing_stop_distance(pips: Decimal, spec: InstrumentSpec) -> Decimal:
             f"on {spec.name}"
         )
     return distance
+
+
+def trailing_trigger_now(
+    distance: Decimal, direction: Direction, quote: PriceQuote, spec: InstrumentSpec
+) -> Decimal:
+    """Where a trailing stop set right now would first trigger.
+
+    Oanda places the stop *distance* behind the closing side of the book —
+    below the bid for a long, above the ask for a short — whatever the
+    trade's entry price. Used for a trail added to an already-open trade,
+    where (unlike ``compute_trailing_stop``) the entry is in the past.
+    """
+    if direction is Direction.LONG:
+        return _quantize_price(quote.bid - distance, spec)
+    return _quantize_price(quote.ask + distance, spec)
 
 
 def compute_trailing_stop(
