@@ -4,15 +4,40 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
+from typer.testing import CliRunner
 
 from frmj import services
+from frmj.app import get_db, set_config
+from frmj.cli import app
 from frmj.cli._trade_helpers import _parse_atr_multiple, _prompt_stop_loss
 from frmj.domain.pricing import TPSLKind, TPSLSpec
 
 from .conftest import FakeFullClient, _atr_candles
+
+runner = CliRunner()
+
+
+@pytest.fixture()
+def trade_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """DB with the config the trade command needs."""
+    path = tmp_path / "trade_atr.db"
+    monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+    monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+    conn = get_db(path=path)
+    set_config(conn, "account_id", "acct-1")
+    set_config(conn, "max_open_trades", "5")
+    conn.close()
+    return path
+
+
+def _use_client(monkeypatch: pytest.MonkeyPatch, fake: FakeFullClient) -> None:
+    monkeypatch.setattr(
+        "frmj.cli.trade.get_client", lambda conn, account_name=None: fake
+    )
 
 
 class TestFetchInstrumentContextAtr:
@@ -132,3 +157,132 @@ class TestPromptStopLoss:
         shown = _feed_prompts(monkeypatch, [""])
         assert _prompt_stop_loss("SL", None, Decimal("1.5")) == (None, None)
         assert "ATR" not in shown[0]
+
+
+class TestTradeAtrStopLoss:
+    """End-to-end: ``frmj trade`` with a 50-pip daily ATR on EUR_USD.
+
+    FakeFullClient quotes ask 1.10010 / bid 1.09990, so a long enters at
+    1.10010 and a short at 1.09990.
+    """
+
+    def test_header_shows_daily_atr(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _use_client(monkeypatch, FakeFullClient(candles=_atr_candles(50)))
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="\n\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "Daily ATR(14): 50.0p" in result.output
+        assert "Enter = 1.5x ATR = 75.0p" in result.output
+
+    def test_enter_sets_default_atr_stop_long(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Enter at the SL prompt = 1.5 x 50 = 75 pips below the ask."""
+        _use_client(monkeypatch, FakeFullClient(candles=_atr_candles(50)))
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="\n\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "SL: 1.09260" in result.output
+        assert "[1.5× ATR]" in result.output
+
+    def test_enter_sets_default_atr_stop_short(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """For a short the ATR stop sits 75 pips above the bid."""
+        _use_client(monkeypatch, FakeFullClient(candles=_atr_candles(50)))
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "short", "--dry-run"], input="\n\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "SL: 1.10740" in result.output
+
+    def test_dash_means_no_stop(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _use_client(monkeypatch, FakeFullClient(candles=_atr_candles(50)))
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="\n-\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "SL:" not in result.output
+
+    def test_inline_multiple(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``2x`` = 100 pips below the ask."""
+        _use_client(monkeypatch, FakeFullClient(candles=_atr_candles(50)))
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="\n2x\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "SL: 1.09010" in result.output
+        assert "[2× ATR]" in result.output
+
+    def test_manual_pips_has_no_atr_tag(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _use_client(monkeypatch, FakeFullClient(candles=_atr_candles(50)))
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="\n30\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "SL: 1.09710" in result.output
+        assert "× ATR]" not in result.output
+
+    def test_config_multiple_and_period(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """sl_atr_multiple / atr_period from config drive the default."""
+        conn = get_db(path=trade_db)
+        set_config(conn, "sl_atr_multiple", "2")
+        set_config(conn, "atr_period", "20")
+        conn.close()
+        _use_client(monkeypatch, FakeFullClient(candles=_atr_candles(50)))
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="\n\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "Daily ATR(20): 50.0p" in result.output
+        assert "SL: 1.09010" in result.output
+
+    def test_invalid_atr_config_exits_1(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = get_db(path=trade_db)
+        set_config(conn, "sl_atr_multiple", "zero")
+        conn.close()
+        _use_client(monkeypatch, FakeFullClient(candles=_atr_candles(50)))
+        result = runner.invoke(app, ["trade", "EUR_USD", "long", "--dry-run"])
+        assert result.exit_code == 1
+        assert "sl_atr_multiple" in result.output
+
+    def test_atr_unavailable_enter_skips(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No candles: the plan says so and Enter leaves the trade without SL."""
+        _use_client(monkeypatch, FakeFullClient(candles=None))
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long", "--dry-run"], input="\n\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "Daily ATR(14): unavailable" in result.output
+        assert "SL:" not in result.output
+
+    def test_edit_reprompts_with_atr_default(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``e`` at the confirm prompt re-offers the ATR default for the SL."""
+        fake = FakeFullClient(candles=_atr_candles(50))
+        _use_client(monkeypatch, fake)
+        # Plan with a 30-pip SL, edit to the ATR default, then decline.
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long"], input="\n30\ne\n\n\nn\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "SL: 1.09710" in result.output
+        assert "SL: 1.09260" in result.output
+        assert not fake.order_placed

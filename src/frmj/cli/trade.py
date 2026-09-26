@@ -17,6 +17,7 @@ from frmj.accounts import (
 )
 from frmj.app import (
     clear_draft_plan,
+    get_atr_config,
     get_client,
     get_db,
     get_risk_config,
@@ -32,11 +33,13 @@ from frmj.cli._completion import (
 )
 from frmj.cli._display import _color_financing_pct, _daily_financing_home, _pl_str
 from frmj.cli._trade_helpers import (
+    _display_daily_atr,
     _display_exits,
     _display_risk_reward,
     _display_trail,
     _prompt_limit_price,
     _prompt_retry_save_abort,
+    _prompt_stop_loss,
     _prompt_tpsl,
     _prompt_trailing_stop,
 )
@@ -44,6 +47,7 @@ from frmj.cli._trade_multi import _trade_multi_account
 from frmj.cli.journal import _attach_tags
 from frmj.domain.pricing import (
     TrailingStopLevels,
+    atr_pips,
     compute_exit_levels,
     pip_size,
     pip_value_home,
@@ -328,6 +332,10 @@ def trade(
     # the same distance in pips, for display and the trade plan.
     trail_distance: Decimal | None = None
     trail_pips: Decimal | None = None
+    # The instrument's daily ATR in pips when it could be fetched, and the
+    # ATR multiple the stop-loss was set from (None for a manual stop).
+    daily_atr_pips: Decimal | None = None
+    sl_atr_multiple: Decimal | None = None
 
     if resume:
         # --- Resume path: skip planning; confirm the draft loaded above ------
@@ -372,14 +380,18 @@ def trade(
         # --- Normal path: risk + sizing + TP/SL prompts + confirmation -------
         try:
             risk_config = get_risk_config(conn)
+            atr_config = get_atr_config(conn)
         except RuntimeError as exc:
             typer.echo(f"Error: {exc}", err=True)
             conn.close()
             raise typer.Exit(1)
 
-        # Fetch instrument spec/quote/financing rate and live account state.
+        # Fetch instrument spec/quote/financing rate/daily ATR and live
+        # account state.
         try:
-            instrument_ctx = services.fetch_instrument_context(client, instrument)
+            instrument_ctx = services.fetch_instrument_context(
+                client, instrument, atr_period=atr_config.period
+            )
             account_ctx = services.fetch_account_context(client, instrument)
         except Exception as exc:
             typer.echo(f"Error fetching market data: {exc}", err=True)
@@ -389,6 +401,8 @@ def trade(
         spec = instrument_ctx.spec
         quote = instrument_ctx.quote
         financing_rate = instrument_ctx.financing_rate
+        if instrument_ctx.daily_atr is not None:
+            daily_atr_pips = atr_pips(instrument_ctx.daily_atr, spec)
 
         # Risk model, correlated-position check, and unit sizing.
         try:
@@ -474,6 +488,7 @@ def trade(
             )
         else:
             typer.echo(f"  Entry:   {entry_price} ({direction_str})")
+        _display_daily_atr(atr_config.period, daily_atr_pips)
         typer.echo(f"  Unused:  ${units_calc.capital_unused:,.2f}")
         if financing_rate is not None:
             rate = (
@@ -493,9 +508,12 @@ def trade(
             )
         typer.echo("")
 
-        # TP/SL prompts, then the trailing stop when --trail was given.
+        # TP/SL prompts (the SL defaults to the ATR multiple when the ATR is
+        # known), then the trailing stop when --trail was given.
         tp_spec = _prompt_tpsl("Take-profit")
-        sl_spec = _prompt_tpsl("Stop-loss  ")
+        sl_spec, sl_atr_multiple = _prompt_stop_loss(
+            "Stop-loss  ", daily_atr_pips, atr_config.sl_multiple
+        )
         trail_levels: TrailingStopLevels | None = None
         if trail:
             trail_levels = _prompt_trailing_stop(
@@ -519,7 +537,7 @@ def trade(
             stop_loss=sl_spec,
         )
 
-        _display_exits(exits, units_calc.margin_used)
+        _display_exits(exits, units_calc.margin_used, sl_atr_multiple)
         if trail_levels is not None:
             _display_trail(trail_levels)
         _display_risk_reward(exits, trail_levels)
@@ -542,7 +560,9 @@ def trade(
                 break
             if answer == "e":
                 tp_spec = _prompt_tpsl("Take-profit (new)")
-                sl_spec = _prompt_tpsl("Stop-loss   (new)")
+                sl_spec, sl_atr_multiple = _prompt_stop_loss(
+                    "Stop-loss   (new)", daily_atr_pips, atr_config.sl_multiple
+                )
                 if trail:
                     trail_levels = _prompt_trailing_stop(
                         entry_price=entry_price,
@@ -563,7 +583,7 @@ def trade(
                     take_profit=tp_spec,
                     stop_loss=sl_spec,
                 )
-                _display_exits(exits, units_calc.margin_used)
+                _display_exits(exits, units_calc.margin_used, sl_atr_multiple)
                 if trail_levels is not None:
                     _display_trail(trail_levels)
                 _display_risk_reward(exits, trail_levels)
