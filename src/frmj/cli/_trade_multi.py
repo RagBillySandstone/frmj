@@ -7,7 +7,8 @@ the instrument, TP/SL choice, and final confirmation are shared. Direction
 is shared too, except for accounts named with ``--opposite``, which take the
 other side of the same trade with mirrored TP/SL — see ``_AccountPlan``.
 A ``--trail`` trailing stop is shared the same way: one pip distance,
-applied to every account (a distance needs no mirroring).
+applied to every account (a distance needs no mirroring). So is the
+daily-ATR default stop-loss: one ATR, from the shared instrument context.
 """
 
 from __future__ import annotations
@@ -21,11 +22,13 @@ import typer
 
 from frmj import services
 from frmj.accounts import AccountRecord, is_live_mode
-from frmj.app import get_client_for_account, get_risk_config
+from frmj.app import get_atr_config, get_client_for_account, get_risk_config
 from frmj.cli._display import _daily_financing_home, _pl_str
 from frmj.cli._trade_helpers import (
+    _display_daily_atr,
     _display_exits,
     _display_trail,
+    _prompt_stop_loss,
     _prompt_tpsl,
     _prompt_trailing_stop,
 )
@@ -33,6 +36,7 @@ from frmj.cli.journal import _attach_tags
 from frmj.domain.pricing import (
     ExitLevels,
     TrailingStopLevels,
+    atr_pips,
     compute_exit_levels,
     compute_trailing_stop,
     pip_value_home,
@@ -113,6 +117,7 @@ def _trade_multi_account(
     """
     try:
         risk_config = get_risk_config(conn)
+        atr_config = get_atr_config(conn)
     except RuntimeError as exc:
         typer.echo(f"Error: {exc}", err=True)
         conn.close()
@@ -135,7 +140,9 @@ def _trade_multi_account(
     # own order is placed.
     primary_client = clients[accounts[0].name]
     try:
-        instrument_ctx = services.fetch_instrument_context(primary_client, instrument)
+        instrument_ctx = services.fetch_instrument_context(
+            primary_client, instrument, atr_period=atr_config.period
+        )
     except Exception as exc:
         typer.echo(f"Error fetching market data: {exc}", err=True)
         conn.close()
@@ -144,6 +151,12 @@ def _trade_multi_account(
     quote = instrument_ctx.quote
     financing_rate = instrument_ctx.financing_rate
     entry_price = quote.entry_price(direction)
+    # One ATR (in pips) for the whole group: it depends only on the instrument.
+    daily_atr_pips = (
+        atr_pips(instrument_ctx.daily_atr, spec)
+        if instrument_ctx.daily_atr is not None
+        else None
+    )
 
     # --- Per-account risk model, sizing, and correlation check ----------------
     plans: list[_AccountPlan] = []
@@ -209,6 +222,7 @@ def _trade_multi_account(
     )
     typer.echo("─" * 60)
     typer.echo(f"  Entry:   {entry_price} ({direction_str})")
+    _display_daily_atr(atr_config.period, daily_atr_pips)
     if opposite:
         typer.echo(f"  Opposite ({len(opposite)} accounts): {direction.opposite.value}")
     typer.echo("")
@@ -251,8 +265,11 @@ def _trade_multi_account(
     # accounts since entry_price is shared, but for --opposite accounts
     # compute_exit_levels flips favorable/adverse for the flipped direction,
     # so the same tp_spec/sl_spec naturally produces mirrored exit prices.
+    # The ATR stop is a pip distance, so it mirrors the same way.
     tp_spec = _prompt_tpsl("Take-profit")
-    sl_spec = _prompt_tpsl("Stop-loss  ")
+    sl_spec, sl_atr_multiple = _prompt_stop_loss(
+        "Stop-loss  ", daily_atr_pips, atr_config.sl_multiple
+    )
 
     def _prompt_trail_pips(label: str = "Trailing stop") -> Decimal | None:
         """Prompt once for the shared trail; return its pips, or None.
@@ -297,7 +314,7 @@ def _trade_multi_account(
     ) -> None:
         for plan, exits, trail_levels in zip(plans, exits_list, trails):
             typer.echo(f"{plan.account.name}:")
-            _display_exits(exits, plan.units_calc.margin_used)
+            _display_exits(exits, plan.units_calc.margin_used, sl_atr_multiple)
             if trail_levels is not None:
                 _display_trail(trail_levels)
         typer.echo("")
@@ -341,7 +358,9 @@ def _trade_multi_account(
             break
         if answer == "e":
             tp_spec = _prompt_tpsl("Take-profit (new)")
-            sl_spec = _prompt_tpsl("Stop-loss   (new)")
+            sl_spec, sl_atr_multiple = _prompt_stop_loss(
+                "Stop-loss   (new)", daily_atr_pips, atr_config.sl_multiple
+            )
             if trail:
                 trail_pips = _prompt_trail_pips("Trailing stop (new)")
             exits_list = _compute_all_exits()
@@ -417,6 +436,8 @@ def _trade_multi_account(
             exits.stop_loss_price,
             trail_levels.distance if trail_levels is not None else None,
             trail_pips,
+            atr_pips=daily_atr_pips,
+            sl_atr_multiple=sl_atr_multiple,
         )
 
         if post_fill.missing_trade_id:

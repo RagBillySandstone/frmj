@@ -12,6 +12,7 @@ import pytest
 from typer.testing import CliRunner
 
 from frmj import services
+from frmj.accounts import add_account, add_group_member
 from frmj.app import get_db, set_config
 from frmj.cli import app
 from frmj.cli._trade_helpers import _parse_atr_multiple, _prompt_stop_loss
@@ -406,3 +407,87 @@ class TestTradeAtrDraft:
             "atr_pips": "50.0",
             "sl_atr_multiple": "1.5",
         }
+
+
+class TestTradeMultiAtr:
+    """``--multi``: one ATR default for the group, mirrored for --opposite."""
+
+    @pytest.fixture()
+    def multi_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Two practice accounts ('alpha', 'beta') in group 'grp'."""
+        path = tmp_path / "multi_atr.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(path))
+        monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+        conn = get_db(path=path)
+        add_account(conn, "alpha", "alpha-acct", is_practice=True)
+        add_account(conn, "beta", "beta-acct", is_practice=True)
+        add_group_member(conn, "grp", "alpha")
+        add_group_member(conn, "grp", "beta")
+        set_config(conn, "max_open_trades", "5")
+        # Each account's fill, as the post-fill sync would bring it in.
+        for acct_id in ("alpha-acct", "beta-acct"):
+            conn.execute(
+                "INSERT INTO transactions (oanda_id, account_id, type, time, "
+                "raw_json) VALUES ('99999', ?, 'ORDER_FILL', "
+                "'2026-09-26T12:00:00Z', '{}')",
+                (acct_id,),
+            )
+        conn.commit()
+        conn.close()
+        return path
+
+    def test_enter_sets_mirrored_atr_stops(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Only the first account's client fetches the shared market data.
+        alpha = FakeFullClient(account_id="alpha-acct", candles=_atr_candles(50))
+        beta = FakeFullClient(account_id="beta-acct")
+        fakes = {"alpha": alpha, "beta": beta}
+        monkeypatch.setattr(
+            "frmj.cli._trade_multi.get_client_for_account",
+            lambda account: fakes[account.name],
+        )
+        # TP skip, SL = ATR default, confirm, then note/tags skip.
+        result = runner.invoke(
+            app,
+            ["trade", "EUR_USD", "long", "--multi", "grp", "--opposite", "beta"],
+            input="\n\ny\n\n\n\n\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "Daily ATR(14): 50.0p" in result.output
+        # 75 pips below alpha's long entry (ask), above beta's short (bid).
+        assert alpha.sl_attached == "1.09260"
+        assert beta.sl_attached == "1.10740"
+        assert result.output.count("[1.5× ATR]") == 2
+
+        conn = get_db(path=multi_db)
+        rows = conn.execute(
+            "SELECT t.account_id, p.sl_price, p.atr_pips, p.sl_atr_multiple "
+            "FROM trade_plans p JOIN transactions t ON p.transaction_id = t.id "
+            "ORDER BY t.account_id"
+        ).fetchall()
+        conn.close()
+        assert [tuple(r) for r in rows] == [
+            ("alpha-acct", "1.09260", "50.0", "1.5"),
+            ("beta-acct", "1.10740", "50.0", "1.5"),
+        ]
+
+    def test_atr_unavailable_keeps_old_prompt(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fakes = {
+            "alpha": FakeFullClient(account_id="alpha-acct"),
+            "beta": FakeFullClient(account_id="beta-acct"),
+        }
+        monkeypatch.setattr(
+            "frmj.cli._trade_multi.get_client_for_account",
+            lambda account: fakes[account.name],
+        )
+        result = runner.invoke(
+            app,
+            ["trade", "EUR_USD", "long", "--multi", "grp", "--dry-run"],
+            input="\n\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "Daily ATR(14): unavailable" in result.output
+        assert "SL:" not in result.output
