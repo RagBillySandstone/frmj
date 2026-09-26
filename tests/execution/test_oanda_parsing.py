@@ -24,12 +24,14 @@ from frmj.execution.oanda import (
     _compute_conversion_rate,
     _extract_bid_ask,
     _parse_account_summary,
+    _parse_candles,
     _parse_close_fill,
     _parse_instrument_spec,
     _parse_open_trade,
     _parse_order_create_txn_id,
     _resolve_financing_parents,
 )
+from frmj.domain.pricing import Candle
 from frmj.domain.sizing import InstrumentSpec
 
 
@@ -201,6 +203,39 @@ class TestParseInstrumentSpec:
 # ---------------------------------------------------------------------------
 # _extract_bid_ask
 # ---------------------------------------------------------------------------
+
+
+class TestParseCandles:
+    def test_parses_mid_hlc_and_drops_incomplete(self) -> None:
+        """Completed candles become Candles in order; the still-forming
+        current bar (complete: false) is dropped."""
+        payload = {
+            "candles": [
+                {
+                    "complete": True,
+                    "mid": {"o": "1.0800", "h": "1.0850", "l": "1.0790", "c": "1.0840"},
+                },
+                {
+                    "complete": True,
+                    "mid": {"o": "1.0840", "h": "1.0870", "l": "1.0820", "c": "1.0825"},
+                },
+                {
+                    "complete": False,
+                    "mid": {"o": "1.0825", "h": "1.0830", "l": "1.0822", "c": "1.0828"},
+                },
+            ]
+        }
+        assert _parse_candles(payload) == [
+            Candle(
+                high=Decimal("1.0850"), low=Decimal("1.0790"), close=Decimal("1.0840")
+            ),
+            Candle(
+                high=Decimal("1.0870"), low=Decimal("1.0820"), close=Decimal("1.0825")
+            ),
+        ]
+
+    def test_no_candles_key_is_empty(self) -> None:
+        assert _parse_candles({}) == []
 
 
 class TestExtractBidAsk:

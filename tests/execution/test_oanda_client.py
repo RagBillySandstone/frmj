@@ -257,6 +257,40 @@ class TestGetPrice:
 
 
 # ---------------------------------------------------------------------------
+# get_daily_candles
+# ---------------------------------------------------------------------------
+
+
+class TestGetDailyCandles:
+    def test_requests_ny_aligned_daily_mids(self) -> None:
+        """Hits the instrument candles endpoint (not account-scoped) asking
+        for daily mid candles aligned to the NY 17:00 close, and returns
+        only the completed ones."""
+        response = {
+            "candles": [
+                {"complete": True, "mid": {"h": "1.09", "l": "1.08", "c": "1.085"}},
+                {"complete": False, "mid": {"h": "1.087", "l": "1.084", "c": "1.086"}},
+            ]
+        }
+        client = _make_client(response)
+        candles = client.get_daily_candles("EUR_USD", 101)
+        assert len(candles) == 1
+        assert candles[0].close == Decimal("1.085")
+
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        call = http.calls[0]
+        assert call.method == "GET"
+        assert call.url.endswith("/v3/instruments/EUR_USD/candles")
+        assert call.kwargs["params"] == {
+            "granularity": "D",
+            "price": "M",
+            "count": 101,
+            "dailyAlignment": 17,
+            "alignmentTimezone": "America/New_York",
+        }
+
+
+# ---------------------------------------------------------------------------
 # get_open_tickets_on_instrument
 # ---------------------------------------------------------------------------
 

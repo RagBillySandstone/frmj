@@ -7,6 +7,7 @@ Endpoints implemented
   GET  /accounts/{id}/summary                  (NAV, margin, open trade count)
   GET  /accounts/{id}/instruments              (InstrumentSpec / financing rates)
   GET  /accounts/{id}/pricing                  (live bid/ask + conversions)
+  GET  /instruments/{name}/candles             (daily candles for ATR)
   GET  /accounts/{id}/trades                   (open ticket count per instrument)
   GET  /accounts/{id}/pendingOrders            (pending entry orders)
   POST /accounts/{id}/orders                   (place market / limit order)
@@ -51,6 +52,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from frmj.domain.pricing import Candle
 from frmj.domain.sizing import InstrumentSpec, PriceQuote
 
 from .models import (
@@ -67,6 +69,7 @@ from .parsing import (
     _compute_conversion_rate,
     _extract_bid_ask,
     _parse_account_summary,
+    _parse_candles,
     _parse_close_fill,
     _parse_financing_rate,
     _parse_instrument_spec,
@@ -296,6 +299,27 @@ class OandaClient:
             quote_to_home=quote_to_home,
             base_to_home=base_to_home,
         )
+
+    def get_daily_candles(self, instrument: str, count: int) -> list[Candle]:
+        """Fetch up to *count* recent daily mid-price candles, oldest first.
+
+        Days are aligned to the New York 17:00 close — the forex convention
+        charting platforms use — so an ATR computed from these matches what
+        the user sees on their daily chart. Only completed candles are
+        returned, so the result can be one shorter than *count*.
+        """
+        resp = self._http.get(
+            f"{self._base_url}/instruments/{instrument}/candles",
+            params={
+                "granularity": "D",
+                "price": "M",
+                "count": count,
+                "dailyAlignment": 17,
+                "alignmentTimezone": "America/New_York",
+            },
+        )
+        resp.raise_for_status()
+        return _parse_candles(resp.json())
 
     def get_open_tickets_on_instrument(self, instrument: str) -> int:
         """Count open trade tickets for *instrument* (for the scale-in check).

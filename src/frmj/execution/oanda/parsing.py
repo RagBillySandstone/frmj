@@ -12,6 +12,7 @@ from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 
+from frmj.domain.pricing import Candle
 from frmj.domain.sizing import InstrumentSpec
 
 from .models import (
@@ -202,6 +203,24 @@ def _parse_financing_rate(instr: dict[str, Any]) -> FinancingRate:
         long_rate=Decimal(financing["longRate"]),
         short_rate=Decimal(financing["shortRate"]),
     )
+
+
+def _parse_candles(payload: dict[str, Any]) -> list[Candle]:
+    """Parse a GET /instruments/{name}/candles mid-price response, oldest first.
+
+    Oanda includes the still-forming current bar with ``complete: false``;
+    it is dropped, since its range is only partial and would drag the ATR
+    down early in the trading day.
+    """
+    return [
+        Candle(
+            high=Decimal(c["mid"]["h"]),
+            low=Decimal(c["mid"]["l"]),
+            close=Decimal(c["mid"]["c"]),
+        )
+        for c in payload.get("candles", [])
+        if c.get("complete", False)
+    ]
 
 
 def _extract_bid_ask(payload: dict[str, Any]) -> tuple[Decimal, Decimal]:
