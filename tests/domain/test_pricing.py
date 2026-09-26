@@ -23,12 +23,14 @@ import pytest
 from frmj.domain.pricing import (
     UNREALISTIC_PIP_THRESHOLD,
     UNREALISTIC_RETURN_THRESHOLD,
+    Candle,
     ExitLevels,
     LimitEntryKind,
     LimitEntrySpec,
     TPSLKind,
     TPSLSpec,
     TrailingStopLevels,
+    atr_pips,
     compute_exit_levels,
     compute_limit_price,
     compute_trailing_stop,
@@ -37,6 +39,7 @@ from frmj.domain.pricing import (
     planned_loss_home,
     trailing_stop_distance,
     trailing_trigger_now,
+    wilder_atr,
 )
 from frmj.domain.sizing import Direction, InstrumentSpec, PriceQuote
 
@@ -857,3 +860,64 @@ class TestPlannedLossHome:
     def test_tighter_sl_wins(self) -> None:
         loss = planned_loss_home(self._exits(Decimal("-10")), _trail("20"))
         assert loss == Decimal("-10")
+
+
+# ---------------------------------------------------------------------------
+# Daily ATR
+# ---------------------------------------------------------------------------
+
+
+def _candle(high: str, low: str, close: str) -> Candle:
+    return Candle(high=Decimal(high), low=Decimal(low), close=Decimal(close))
+
+
+# Hand-checked series for ATR(3). TRs against the prior close:
+#   c1: max(11-9, |11-9|, |9-9|)     = 2
+#   c2: max(13-10, |13-10|, |10-10|) = 3
+#   c3: max(12-7, |12-12|, |7-12|)   = 5
+#   c4: max(9-8.5, |9-8|, |8.5-8|)   = 1
+# Seed = (2+3+5)/3 = 10/3; then (10/3 * 2 + 1)/3 = 23/9.
+_ATR_SERIES = [
+    _candle("10", "8", "9"),
+    _candle("11", "9", "10"),
+    _candle("13", "10", "12"),
+    _candle("12", "7", "8"),
+    _candle("9", "8.5", "9"),
+]
+
+
+class TestWilderAtr:
+    def test_seed_only_is_mean_of_first_trs(self) -> None:
+        assert wilder_atr(_ATR_SERIES[:4], 3) == Decimal(10) / 3
+
+    def test_smooths_after_seed(self) -> None:
+        expected = (Decimal(10) / 3 * 2 + 1) / 3
+        assert wilder_atr(_ATR_SERIES, 3) == expected
+        # And that is 23/9 to within Decimal's precision.
+        assert abs(expected - Decimal(23) / 9) < Decimal("1e-20")
+
+    def test_gap_uses_previous_close(self) -> None:
+        # Gap up: the bar's own range is 1, but it opened 5 above the prior
+        # close of 9, so TR = |15 - 9| = 6.
+        candles = [_candle("10", "8", "9"), _candle("15", "14", "14.5")]
+        assert wilder_atr(candles, 1) == Decimal("6")
+
+    def test_gap_down_uses_previous_close(self) -> None:
+        candles = [_candle("10", "8", "9"), _candle("5", "4", "4.5")]
+        assert wilder_atr(candles, 1) == Decimal("5")
+
+    def test_too_few_candles(self) -> None:
+        with pytest.raises(ValueError, match="at least 4 candles"):
+            wilder_atr(_ATR_SERIES[:3], 3)
+
+    def test_period_below_one(self) -> None:
+        with pytest.raises(ValueError, match="at least 1"):
+            wilder_atr(_ATR_SERIES, 0)
+
+
+class TestAtrPips:
+    def test_eur_usd(self) -> None:
+        assert atr_pips(Decimal("0.00415"), _eur_usd_spec()) == Decimal("41.5")
+
+    def test_usd_jpy(self) -> None:
+        assert atr_pips(Decimal("0.873"), _usd_jpy_spec()) == Decimal("87.3")

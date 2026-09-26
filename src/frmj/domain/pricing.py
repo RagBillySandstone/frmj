@@ -38,10 +38,15 @@ Unlike a fixed SL they trail the closing side of the book, so their
 projected loss includes the spread. ``trailing_stop_distance`` and
 ``trailing_trigger_now`` serve ``frmj trail``, which sets one on a trade
 that is already open.
+
+``wilder_atr`` measures daily volatility from completed candles; the trade
+flow turns a multiple of it into its default stop-loss distance in pips
+(``atr_pips``).
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from enum import Enum
@@ -616,3 +621,64 @@ def planned_loss_home(
         if loss is not None
     ]
     return max(losses) if losses else None
+
+
+# ---------------------------------------------------------------------------
+# Daily ATR (volatility-based stop distance)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Candle:
+    """One completed OHLC bar's range and close, in price units.
+
+    Only what true range needs: the open plays no part in it.
+    """
+
+    high: Decimal
+    low: Decimal
+    close: Decimal
+
+
+def wilder_atr(candles: Sequence[Candle], period: int) -> Decimal:
+    """Wilder's Average True Range over *candles*, oldest first.
+
+    True range is ``max(H-L, |H-prevC|, |L-prevC|)``, so the first candle
+    only supplies a previous close. The ATR is seeded with the plain mean
+    of the first *period* TRs, then smoothed bar by bar as
+    ``atr = (atr * (period-1) + tr) / period`` — the same recursion
+    TradingView and MT4 use, so the result agrees with charts once enough
+    history has been fed in for the seed's influence to decay.
+
+    Raises:
+        ValueError: if *period* is below 1 or there are fewer than
+            ``period + 1`` candles (the seed needs *period* TRs that each
+            have a previous close).
+    """
+    if period < 1:
+        raise ValueError(f"ATR period must be at least 1; got {period}")
+    if len(candles) < period + 1:
+        raise ValueError(
+            f"ATR({period}) needs at least {period + 1} candles; got {len(candles)}"
+        )
+
+    # True range of every bar after the first, each against its prior close.
+    true_ranges = [
+        max(
+            cur.high - cur.low,
+            abs(cur.high - prev.close),
+            abs(cur.low - prev.close),
+        )
+        for prev, cur in zip(candles, candles[1:])
+    ]
+
+    # Seed with the simple mean of the first `period` TRs, then smooth.
+    atr = sum(true_ranges[:period], Decimal(0)) / period
+    for tr in true_ranges[period:]:
+        atr = (atr * (period - 1) + tr) / period
+    return atr
+
+
+def atr_pips(atr: Decimal, spec: InstrumentSpec) -> Decimal:
+    """Express an ATR (price units) in pips for *spec*."""
+    return atr / pip_size(spec)
