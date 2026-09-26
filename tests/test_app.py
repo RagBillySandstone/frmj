@@ -19,6 +19,9 @@ import pytest
 
 from frmj.accounts import AccountRecord, add_account, set_active_account
 from frmj.app import (
+    DEFAULT_ATR_PERIOD,
+    DEFAULT_SL_ATR_MULTIPLE,
+    AtrConfig,
     _resolve_default_data_dir,
     clear_draft_plan,
     delete_token,
@@ -26,6 +29,7 @@ from frmj.app import (
     get_client,
     get_client_for_account,
     get_config,
+    get_atr_config,
     get_db,
     get_risk_config,
     get_token,
@@ -437,6 +441,46 @@ class TestGetRiskConfig:
         set_config(db, "max_open_trades", "6")
         cfg = get_risk_config(db)
         assert isinstance(cfg, RiskConfig)
+
+
+# ---------------------------------------------------------------------------
+# get_atr_config
+# ---------------------------------------------------------------------------
+
+
+class TestGetAtrConfig:
+    @pytest.fixture()
+    def db(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> Iterator[sqlite3.Connection]:
+        monkeypatch.setenv("FRMJ_DB_PATH", str(tmp_path / "test.db"))
+        conn = get_db()
+        yield conn
+        conn.close()
+
+    def test_defaults_when_unset(self, db: sqlite3.Connection) -> None:
+        assert get_atr_config(db) == AtrConfig(
+            period=DEFAULT_ATR_PERIOD, sl_multiple=DEFAULT_SL_ATR_MULTIPLE
+        )
+        assert DEFAULT_ATR_PERIOD == 14
+        assert DEFAULT_SL_ATR_MULTIPLE == Decimal("1.5")
+
+    def test_overrides(self, db: sqlite3.Connection) -> None:
+        set_config(db, "atr_period", "20")
+        set_config(db, "sl_atr_multiple", "2.25")
+        assert get_atr_config(db) == AtrConfig(period=20, sl_multiple=Decimal("2.25"))
+
+    @pytest.mark.parametrize("raw", ["0", "-3", "abc", "1.5"])
+    def test_invalid_period_raises(self, db: sqlite3.Connection, raw: str) -> None:
+        set_config(db, "atr_period", raw)
+        with pytest.raises(RuntimeError, match="atr_period"):
+            get_atr_config(db)
+
+    @pytest.mark.parametrize("raw", ["0", "-1", "abc", "NaN", "Infinity"])
+    def test_invalid_multiple_raises(self, db: sqlite3.Connection, raw: str) -> None:
+        set_config(db, "sl_atr_multiple", raw)
+        with pytest.raises(RuntimeError, match="sl_atr_multiple"):
+            get_atr_config(db)
 
 
 # ---------------------------------------------------------------------------

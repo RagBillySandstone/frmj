@@ -261,6 +261,32 @@ class TestConfigCheck:
         assert result.exit_code == 1
         assert "safety_reserve_pct" in result.output
 
+    def test_atr_keys_show_defaults(self, db_path: Path) -> None:
+        """Unset ATR keys are reported OK with their defaults."""
+        result = runner.invoke(app, ["config", "check"])
+        assert "atr_period" in result.output
+        assert "14 (default)" in result.output
+        assert "sl_atr_multiple" in result.output
+        assert "1.5 (default)" in result.output
+
+    def test_atr_keys_can_be_set(self, db_path: Path) -> None:
+        """Both ATR keys are accepted by ``config set``."""
+        for key, val in [("atr_period", "20"), ("sl_atr_multiple", "2")]:
+            result = runner.invoke(app, ["config", "set", key, val])
+            assert result.exit_code == 0, result.output
+
+    @pytest.mark.parametrize(
+        ("key", "val"),
+        [("atr_period", "0"), ("atr_period", "x"), ("sl_atr_multiple", "0")],
+    )
+    def test_invalid_atr_key_exits_1(self, db_path: Path, key: str, val: str) -> None:
+        """A non-positive or non-numeric ATR setting shows INVALID and exits 1."""
+        runner.invoke(app, ["config", "set", key, val])
+        result = runner.invoke(app, ["config", "check"])
+        assert result.exit_code == 1
+        assert "INVALID" in result.output
+        assert key in result.output
+
     def test_percent_of_equity_strategy_requires_field(self, db_path: Path) -> None:
         """risk_strategy=percent_of_equity without percent_of_equity → MISSING."""
         runner.invoke(app, ["config", "set", "risk_strategy", "percent_of_equity"])

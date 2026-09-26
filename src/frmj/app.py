@@ -57,7 +57,8 @@ import json
 import os
 import sqlite3
 import sys
-from decimal import Decimal
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import keyring
@@ -494,3 +495,62 @@ def get_risk_config(conn: sqlite3.Connection) -> RiskConfig:
         percent_of_equity=Decimal(pct_str) if pct_str else None,
         fixed_dollar=Decimal(fixed_str) if fixed_str else None,
     )
+
+
+# ---------------------------------------------------------------------------
+# ATR stop-loss config factory
+# ---------------------------------------------------------------------------
+
+#: Defaults for the daily-ATR stop-loss ``frmj trade`` suggests: a 1.5x
+#: multiple of the classic 14-day ATR.
+DEFAULT_ATR_PERIOD: int = 14
+DEFAULT_SL_ATR_MULTIPLE: Decimal = Decimal("1.5")
+
+
+@dataclass(frozen=True, slots=True)
+class AtrConfig:
+    """Settings for the default stop-loss: ``sl_multiple`` x daily ATR(``period``)."""
+
+    period: int
+    sl_multiple: Decimal
+
+
+def get_atr_config(conn: sqlite3.Connection) -> AtrConfig:
+    """
+    Build an ``AtrConfig`` from the ``atr_period`` / ``sl_atr_multiple`` keys.
+
+    Both are optional and fall back to ``DEFAULT_ATR_PERIOD`` and
+    ``DEFAULT_SL_ATR_MULTIPLE``.
+
+    Raises ``RuntimeError`` naming the key when a stored value isn't a
+    positive integer (period) or a positive number (multiple), so the trade
+    flow can report it like any other config error.
+    """
+    period_str = get_config(conn, "atr_period")
+    multiple_str = get_config(conn, "sl_atr_multiple")
+
+    # atr_period: a whole number of days, at least 1.
+    period = DEFAULT_ATR_PERIOD
+    if period_str:
+        try:
+            period = int(period_str)
+        except ValueError:
+            period = 0
+        if period < 1:
+            raise RuntimeError(
+                f"atr_period must be a positive integer; got {period_str!r}"
+            )
+
+    # sl_atr_multiple: any positive number, e.g. 1.5.
+    multiple = DEFAULT_SL_ATR_MULTIPLE
+    if multiple_str:
+        try:
+            multiple = Decimal(multiple_str)
+        except InvalidOperation:
+            multiple = Decimal(0)
+        if not multiple.is_finite() or multiple <= 0:
+            raise RuntimeError(
+                f"sl_atr_multiple must be a positive number; got {multiple_str!r}"
+            )
+
+    return AtrConfig(period=period, sl_multiple=multiple)

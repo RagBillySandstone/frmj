@@ -9,6 +9,8 @@ import typer
 
 from frmj.accounts import get_active_account, is_live_mode
 from frmj.app import (
+    DEFAULT_ATR_PERIOD,
+    DEFAULT_SL_ATR_MULTIPLE,
     delete_config,
     delete_token,
     get_all_config,
@@ -31,6 +33,7 @@ from frmj.domain.risk import BlockingMode, RiskStrategy, ScaleInPolicy
 #: excluded here to prevent accidental overwrites.
 VALID_CONFIG_KEYS: frozenset[str] = frozenset(
     {
+        "atr_period",
         "blocking_mode",
         "correlation_blocking_mode",
         "fixed_dollar",
@@ -39,6 +42,7 @@ VALID_CONFIG_KEYS: frozenset[str] = frozenset(
         "risk_strategy",
         "safety_reserve_pct",
         "scale_in",
+        "sl_atr_multiple",
     }
 )
 
@@ -399,6 +403,45 @@ def config_check(
                         "safety_reserve_pct",
                         "INVALID",
                         f"{sr_val!r} — must be a decimal in [0, 1)",
+                    )
+                )
+
+        # --- atr_period --------------------------------------------------------
+        ap_val = all_cfg.get("atr_period")
+        if ap_val is None:
+            checks.append(("atr_period", "OK", f"{DEFAULT_ATR_PERIOD} (default)"))
+        else:
+            try:
+                if int(ap_val) < 1:
+                    raise ValueError
+                checks.append(("atr_period", "OK", ap_val))
+            except ValueError:
+                checks.append(
+                    (
+                        "atr_period",
+                        "INVALID",
+                        f"{ap_val!r} — must be a positive integer",
+                    )
+                )
+
+        # --- sl_atr_multiple ---------------------------------------------------
+        sm_val = all_cfg.get("sl_atr_multiple")
+        if sm_val is None:
+            checks.append(
+                ("sl_atr_multiple", "OK", f"{DEFAULT_SL_ATR_MULTIPLE} (default)")
+            )
+        else:
+            try:
+                sm = Decimal(sm_val)
+                if not (sm.is_finite() and sm > 0):
+                    raise ValueError
+                checks.append(("sl_atr_multiple", "OK", sm_val))
+            except Exception:
+                checks.append(
+                    (
+                        "sl_atr_multiple",
+                        "INVALID",
+                        f"{sm_val!r} — must be a positive number",
                     )
                 )
 
