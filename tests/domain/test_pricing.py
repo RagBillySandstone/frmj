@@ -921,3 +921,8 @@ class TestAtrPips:
 
     def test_usd_jpy(self) -> None:
         assert atr_pips(Decimal("0.873"), _usd_jpy_spec()) == Decimal("87.3")
+
+    def test_rounds_to_tenth_pip(self) -> None:
+        # 0.0054/13 = 0.00041538... -> 4.1538... pips -> 4.2; a half rounds up.
+        assert atr_pips(Decimal("0.0054") / 13, _eur_usd_spec()) == Decimal("4.2")
+        assert atr_pips(Decimal("0.004155"), _eur_usd_spec()) == Decimal("41.6")

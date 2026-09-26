@@ -268,15 +268,19 @@ def _save_trade_plan(
     tp_price: Decimal | None,
     sl_price: Decimal | None,
     trail_pips: Decimal | None,
+    atr_pips: Decimal | None = None,
+    sl_atr_multiple: Decimal | None = None,
 ) -> None:
     """Persist the intended TP/SL/trailing stop for a fill transaction if any
-    was set.
+    was set, along with the daily ATR at the time and the ATR multiple the
+    stop-loss came from (each ``None`` when not applicable).
 
     For a limit order that hasn't filled yet, *fill_oanda_id* is the
     LIMIT_ORDER transaction that created it; sync moves the plan to the
     ORDER_FILL once the order fills.
 
-    Silent no-op when no exit was specified, or when the fill
+    Silent no-op when no exit was specified (the ATR alone is not a plan),
+    or when the fill
     transaction is not yet in the local DB (post-fill sync may have failed).
     Uses INSERT OR IGNORE so a duplicate call (e.g. from a retry) is harmless.
     """
@@ -291,10 +295,13 @@ def _save_trade_plan(
     tp_str = str(tp_price) if tp_price is not None else None
     sl_str = str(sl_price) if sl_price is not None else None
     trail_str = str(trail_pips) if trail_pips is not None else None
+    atr_str = str(atr_pips) if atr_pips is not None else None
+    multiple_str = str(sl_atr_multiple) if sl_atr_multiple is not None else None
     conn.execute(
         "INSERT OR IGNORE INTO trade_plans "
-        "(transaction_id, tp_price, sl_price, trail_pips) VALUES (?, ?, ?, ?)",
-        (row["id"], tp_str, sl_str, trail_str),
+        "(transaction_id, tp_price, sl_price, trail_pips, atr_pips, "
+        "sl_atr_multiple) VALUES (?, ?, ?, ?, ?, ?)",
+        (row["id"], tp_str, sl_str, trail_str, atr_str, multiple_str),
     )
     conn.commit()
 
@@ -328,6 +335,9 @@ def execute_post_fill(
     sl_price: Decimal | None,
     trail_distance: Decimal | None = None,
     trail_pips: Decimal | None = None,
+    *,
+    atr_pips: Decimal | None = None,
+    sl_atr_multiple: Decimal | None = None,
 ) -> PostFillResult:
     """Attach TP/SL (and optionally a trailing stop) to a filled trade, sync
     the fill into the local DB, and persist the trade plan.
@@ -383,7 +393,14 @@ def execute_post_fill(
         sync_error = str(exc)
 
     _save_trade_plan(
-        conn, fill.transaction_id, client.account_id, tp_price, sl_price, trail_pips
+        conn,
+        fill.transaction_id,
+        client.account_id,
+        tp_price,
+        sl_price,
+        trail_pips,
+        atr_pips,
+        sl_atr_multiple,
     )
 
     return PostFillResult(
@@ -422,6 +439,9 @@ def execute_post_limit(
     tp_price: Decimal | None,
     sl_price: Decimal | None,
     trail_pips: Decimal | None = None,
+    *,
+    atr_pips: Decimal | None = None,
+    sl_atr_multiple: Decimal | None = None,
 ) -> PostLimitResult:
     """Sync a just-placed limit order into the local DB and persist its
     trade plan.
@@ -446,7 +466,14 @@ def execute_post_limit(
         sync_error = str(exc)
 
     _save_trade_plan(
-        conn, journal_oanda_id, client.account_id, tp_price, sl_price, trail_pips
+        conn,
+        journal_oanda_id,
+        client.account_id,
+        tp_price,
+        sl_price,
+        trail_pips,
+        atr_pips,
+        sl_atr_multiple,
     )
 
     return PostLimitResult(

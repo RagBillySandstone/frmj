@@ -141,6 +141,25 @@ class TestEnsureSchema:
         assert row == ("1.1", None)
         conn.close()
 
+    def test_adds_atr_columns_to_pre_existing_trade_plans(self) -> None:
+        """A trade_plans table from before the ATR stop-loss gains atr_pips
+        and sl_atr_multiple, keeping its rows."""
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE trade_plans (id INTEGER PRIMARY KEY, "
+            "transaction_id INTEGER NOT NULL UNIQUE, tp_price TEXT, "
+            "sl_price TEXT, trail_pips TEXT, created_at TEXT NOT NULL DEFAULT '')"
+        )
+        conn.execute(
+            "INSERT INTO trade_plans (transaction_id, sl_price) VALUES (1, '1.09')"
+        )
+        ensure_schema(conn)
+        row = conn.execute(
+            "SELECT sl_price, atr_pips, sl_atr_multiple FROM trade_plans"
+        ).fetchone()
+        assert row == ("1.09", None, None)
+        conn.close()
+
     def test_foreign_keys_enabled(self, db: sqlite3.Connection) -> None:
         """PRAGMA foreign_keys must be 1 (ON) for the connection."""
         row = db.execute("PRAGMA foreign_keys").fetchone()

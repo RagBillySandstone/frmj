@@ -37,6 +37,7 @@ from frmj.cli._trade_helpers import (
     _display_exits,
     _display_risk_reward,
     _display_trail,
+    _fmt_multiple,
     _prompt_limit_price,
     _prompt_retry_save_abort,
     _prompt_stop_loss,
@@ -352,6 +353,11 @@ def trade(
         if plan.get("trail_distance"):
             trail_distance = Decimal(plan["trail_distance"])
             trail_pips = Decimal(plan["trail_pips"])
+        # ...and plans saved before the ATR stop-loss have no ATR fields.
+        if plan.get("atr_pips"):
+            daily_atr_pips = Decimal(plan["atr_pips"])
+        if plan.get("sl_atr_multiple"):
+            sl_atr_multiple = Decimal(plan["sl_atr_multiple"])
 
         typer.echo(f"Resuming saved plan: {instrument} {direction_str.upper()}")
         typer.echo("─" * 40)
@@ -364,7 +370,12 @@ def trade(
         if tp_price is not None:
             typer.echo(f"  Take-profit: {tp_price}")
         if sl_price is not None:
-            typer.echo(f"  Stop-loss:   {sl_price}")
+            atr_tag = (
+                f"  [{_fmt_multiple(sl_atr_multiple)}× ATR]"
+                if sl_atr_multiple is not None
+                else ""
+            )
+            typer.echo(f"  Stop-loss:   {sl_price}{atr_tag}")
         if trail_pips is not None:
             typer.echo(f"  Trailing stop: {trail_pips:.1f} pips")
         typer.echo("")
@@ -666,6 +677,12 @@ def trade(
                         str(trail_distance) if trail_distance is not None else None
                     ),
                     "trail_pips": str(trail_pips) if trail_pips is not None else None,
+                    "atr_pips": (
+                        str(daily_atr_pips) if daily_atr_pips is not None else None
+                    ),
+                    "sl_atr_multiple": (
+                        str(sl_atr_multiple) if sl_atr_multiple is not None else None
+                    ),
                     "account": (
                         target_account.name if target_account is not None else None
                     ),
@@ -686,12 +703,28 @@ def trade(
 
     if limit_result is not None:
         journal_oanda_id = _report_limit_order(
-            conn, client, limit_result, limit_price, tp_price, sl_price, trail_pips
+            conn,
+            client,
+            limit_result,
+            limit_price,
+            tp_price,
+            sl_price,
+            trail_pips,
+            atr_pips=daily_atr_pips,
+            sl_atr_multiple=sl_atr_multiple,
         )
     else:
         assert fill is not None
         _report_market_fill(
-            conn, client, fill, tp_price, sl_price, trail_distance, trail_pips
+            conn,
+            client,
+            fill,
+            tp_price,
+            sl_price,
+            trail_distance,
+            trail_pips,
+            atr_pips=daily_atr_pips,
+            sl_atr_multiple=sl_atr_multiple,
         )
         journal_oanda_id = fill.transaction_id
 
@@ -707,6 +740,9 @@ def _report_limit_order(
     tp_price: Decimal | None,
     sl_price: Decimal | None,
     trail_pips: Decimal | None,
+    *,
+    atr_pips: Decimal | None = None,
+    sl_atr_multiple: Decimal | None = None,
 ) -> str:
     """Report a placed limit order, sync it, and save its trade plan.
 
@@ -733,7 +769,14 @@ def _report_limit_order(
         typer.echo(f"Trailing stop {trail_pips:.1f} pips {when}")
 
     post = services.execute_post_limit(
-        conn, client, result, tp_price, sl_price, trail_pips
+        conn,
+        client,
+        result,
+        tp_price,
+        sl_price,
+        trail_pips,
+        atr_pips=atr_pips,
+        sl_atr_multiple=sl_atr_multiple,
     )
     if post.sync_error is not None:
         typer.echo(
@@ -750,12 +793,16 @@ def _report_market_fill(
     sl_price: Decimal | None,
     trail_distance: Decimal | None,
     trail_pips: Decimal | None,
+    *,
+    atr_pips: Decimal | None = None,
+    sl_atr_multiple: Decimal | None = None,
 ) -> None:
     """Report a market fill, attach TP/SL and any trailing stop, sync, and
     save the trade plan.
 
     *trail_distance* (price units) is what is sent to Oanda; *trail_pips* is
-    the same distance for messages.
+    the same distance for messages. *atr_pips* / *sl_atr_multiple* are only
+    recorded in the trade plan.
     """
     typer.echo(
         f"Order filled at {fill.fill_price} — transaction #{fill.transaction_id}"
@@ -763,7 +810,15 @@ def _report_market_fill(
 
     # --- Attach TP/SL, post-fill sync, and save the trade plan ---------------
     post_fill = services.execute_post_fill(
-        conn, client, fill, tp_price, sl_price, trail_distance, trail_pips
+        conn,
+        client,
+        fill,
+        tp_price,
+        sl_price,
+        trail_distance,
+        trail_pips,
+        atr_pips=atr_pips,
+        sl_atr_multiple=sl_atr_multiple,
     )
 
     if post_fill.missing_trade_id:

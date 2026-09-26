@@ -680,5 +680,9 @@ def wilder_atr(candles: Sequence[Candle], period: int) -> Decimal:
 
 
 def atr_pips(atr: Decimal, spec: InstrumentSpec) -> Decimal:
-    """Express an ATR (price units) in pips for *spec*."""
-    return atr / pip_size(spec)
+    """Express an ATR (price units) in pips for *spec*, to 0.1 pip.
+
+    Rounding here keeps the ATR the plan shows, the one the default stop
+    is derived from, and the one recorded in ``trade_plans`` identical.
+    """
+    return (atr / pip_size(spec)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)

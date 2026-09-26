@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
@@ -286,3 +287,122 @@ class TestTradeAtrStopLoss:
         assert "SL: 1.09710" in result.output
         assert "SL: 1.09260" in result.output
         assert not fake.order_placed
+
+
+def _seed_fill(db: Path, oanda_id: str = "99999") -> None:
+    """Insert the fill transaction as if the post-fill sync had brought it in."""
+    conn = get_db(path=db)
+    conn.execute(
+        "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+        "VALUES (?, 'acct-1', 'ORDER_FILL', '2026-09-26T12:00:00Z', '{}')",
+        (oanda_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _plan_row(db: Path, oanda_id: str = "99999") -> dict[str, Any] | None:
+    conn = get_db(path=db)
+    row = conn.execute(
+        "SELECT sl_price, atr_pips, sl_atr_multiple FROM trade_plans "
+        "JOIN transactions ON trade_plans.transaction_id = transactions.id "
+        "WHERE transactions.oanda_id = ?",
+        (oanda_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+class TestTradeAtrPlanRecord:
+    """The ATR and the stop's ATR multiple are recorded in trade_plans."""
+
+    def test_atr_stop_recorded(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_fill(trade_db)
+        fake = FakeFullClient(candles=_atr_candles(50))
+        _use_client(monkeypatch, fake)
+        # TP skip, SL = ATR default, confirm, note skip, tags skip.
+        result = runner.invoke(app, ["trade", "EUR_USD", "long"], input="\n\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert fake.sl_attached == "1.09260"
+        assert _plan_row(trade_db) == {
+            "sl_price": "1.09260",
+            "atr_pips": "50.0",
+            "sl_atr_multiple": "1.5",
+        }
+
+    def test_manual_stop_records_atr_only(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_fill(trade_db)
+        _use_client(monkeypatch, FakeFullClient(candles=_atr_candles(50)))
+        result = runner.invoke(app, ["trade", "EUR_USD", "long"], input="\n30\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert _plan_row(trade_db) == {
+            "sl_price": "1.09710",
+            "atr_pips": "50.0",
+            "sl_atr_multiple": None,
+        }
+
+    def test_no_atr_records_nulls(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_fill(trade_db)
+        _use_client(monkeypatch, FakeFullClient(candles=None))
+        result = runner.invoke(app, ["trade", "EUR_USD", "long"], input="\n30\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert _plan_row(trade_db) == {
+            "sl_price": "1.09710",
+            "atr_pips": None,
+            "sl_atr_multiple": None,
+        }
+
+    def test_no_exits_saves_no_plan(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ATR alone isn't a plan: with no stop and no TP, no row."""
+        _seed_fill(trade_db)
+        _use_client(monkeypatch, FakeFullClient(candles=_atr_candles(50)))
+        result = runner.invoke(app, ["trade", "EUR_USD", "long"], input="\n-\ny\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert _plan_row(trade_db) is None
+
+
+class TestTradeAtrDraft:
+    """A saved draft keeps the ATR fields; --resume shows and records them."""
+
+    @pytest.fixture()
+    def plan_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "saved_plan.json"
+        monkeypatch.setattr("frmj.app._DRAFT_PLAN_PATH", path)
+        return path
+
+    def test_save_then_resume(
+        self, trade_db: Path, plan_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # First attempt: the order fails and the plan is saved.
+        failing = FakeFullClient(candles=_atr_candles(50))
+
+        def _fail(instrument: str, units_signed: int) -> Any:
+            raise RuntimeError("fail")
+
+        failing.place_market_order = _fail  # type: ignore[method-assign]
+        _use_client(monkeypatch, failing)
+        result = runner.invoke(app, ["trade", "EUR_USD", "long"], input="\n\ny\ns\n")
+        assert result.exit_code == 0, result.output
+        saved = json.loads(plan_file.read_text())
+        assert saved["atr_pips"] == "50.0"
+        assert saved["sl_atr_multiple"] == "1.5"
+
+        # Resume: the stop is shown as ATR-based and recorded as such.
+        _seed_fill(trade_db)
+        _use_client(monkeypatch, FakeFullClient())
+        result = runner.invoke(app, ["trade", "--resume"], input="y\n\n\n")
+        assert result.exit_code == 0, result.output
+        assert "Stop-loss:   1.09260  [1.5× ATR]" in result.output
+        assert _plan_row(trade_db) == {
+            "sl_price": "1.09260",
+            "atr_pips": "50.0",
+            "sl_atr_multiple": "1.5",
+        }

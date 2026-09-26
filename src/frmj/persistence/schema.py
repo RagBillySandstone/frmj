@@ -172,14 +172,19 @@ CREATE TABLE IF NOT EXISTS sync_cursors (
 -- side.  Prices are stored as TEXT Decimal strings (same pattern as raw_json
 -- field values) to preserve exact representation.  trail_pips is the
 -- trailing stop's distance in pips (NULL for none) — a distance, not a
--- price, since a trailing stop's price moves.  Databases created before it
--- existed gain the column in _add_missing_columns.
+-- price, since a trailing stop's price moves.  atr_pips is the instrument's
+-- daily ATR in pips when the plan was made (NULL if it couldn't be fetched),
+-- and sl_atr_multiple the ATR multiple the stop-loss was set from (NULL for
+-- a manual stop or none).  Databases created before a column existed gain it
+-- in _add_missing_columns.
 CREATE TABLE IF NOT EXISTS trade_plans (
     id              INTEGER PRIMARY KEY,
     transaction_id  INTEGER NOT NULL UNIQUE REFERENCES transactions(id),
     tp_price        TEXT,
     sl_price        TEXT,
     trail_pips      TEXT,
+    atr_pips        TEXT,
+    sl_atr_multiple TEXT,
     created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
@@ -352,6 +357,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 # added here. The DDL above already includes each one for new databases.
 _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("trade_plans", "trail_pips", "TEXT"),
+    ("trade_plans", "atr_pips", "TEXT"),
+    ("trade_plans", "sl_atr_multiple", "TEXT"),
 )
 
 

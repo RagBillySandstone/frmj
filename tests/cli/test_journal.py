@@ -467,6 +467,25 @@ class TestJournalCommand:
         assert result.exit_code == 0, result.output
         assert "SL 1.09750  Trail 20.0p" in result.output
 
+    def test_plan_marks_atr_stop(self, journal_db: Path) -> None:
+        """An ATR-based stop shows its multiple next to the SL price."""
+        conn = sqlite3.connect(str(journal_db))
+        txn_id = conn.execute(
+            "SELECT id FROM transactions WHERE oanda_id = '1001'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO trade_plans "
+            "(transaction_id, sl_price, atr_pips, sl_atr_multiple) "
+            "VALUES (?, ?, ?, ?)",
+            (txn_id, "1.09260", "50.0", "1.5"),
+        )
+        conn.commit()
+        conn.close()
+
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        assert "SL 1.09260 (1.5× ATR)" in result.output
+
     def test_plan_not_shown_when_absent(self, journal_db: Path) -> None:
         """Transactions without a plan must not show a 'Plan:' line."""
         result = runner.invoke(app, ["journal"])
