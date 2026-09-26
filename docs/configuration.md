@@ -67,6 +67,8 @@ Account IDs and active account selection are managed via `frmj account`, not `fr
 | `scale_in` | No | `never` | `never`, `warn`, or `allow` for same-instrument adds (an open ticket or pending order on the instrument) |
 | `correlation_blocking_mode` | No | `warning_only` | `hard_block` or `warning_only` for correlated open positions or pending orders |
 | `safety_reserve_pct` | No | `0` | Fraction of equity to never deploy, e.g. `0.10` for 10% |
+| `atr_period` | No | `14` | Days in the daily ATR that `frmj trade` shows and bases its default stop-loss on |
+| `sl_atr_multiple` | No | `1.5` | Default stop-loss distance as a multiple of daily ATR (see [`frmj trade`](commands.md#frmj-trade)) |
 | `percent_of_equity` | Conditional | — | Required when `risk_strategy = percent_of_equity` |
 | `fixed_dollar` | Conditional | — | Required when `risk_strategy = fixed_dollar` |
 

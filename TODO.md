@@ -29,3 +29,7 @@ Unlike the REST API's ORDER_FILL transactions, the Oanda Hub CSV export never st
 ### 13. `trade --limit` follow-ups: GTD expiry and `--multi`
 
 `trade --limit` v1 is GTC-only and single-account. Two extensions were deferred: an `--expires` option for GTD orders (Oanda's `timeInForce: GTD` + `gtdTime`), and `--limit` with `--multi`, which needs the limit price chosen once and mirrored for `--opposite` accounts (a long's "15 pips below ask" becomes a short's "15 pips above bid").
+
+### 15. ATR-multiple take-profit (`3x` at the TP prompt)
+
+`trade` accepts `2x` / `2atr` only at the stop-loss prompt (see the ATR stop-loss in `docs/commands.md`). Allowing it at the take-profit prompt too would let a plan be set up fully in ATR terms (e.g. 1.5× ATR stop, 3× ATR target). This needs `_prompt_tpsl` to take the ATR, and a `tp_atr_multiple` in `trade_plans` and the draft, next to `sl_atr_multiple`. There should be no default: Enter still skips the TP.

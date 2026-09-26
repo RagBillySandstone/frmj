@@ -77,8 +77,8 @@ The flow:
 1. Fetches live account state (NAV, available margin, open trade count) and live price.
 2. Runs the risk model to determine capital to deploy and enforce [trade limits](configuration.md#trade-limits-and-correlation): the open-trade cap, scale-in policy, and correlated-position check.
 3. Computes position size (units, margin required, pip value).
-4. Displays the trade plan: NAV, open trades, capital at risk, units, margin, pip value, and entry price.
-5. Prompts for take-profit and stop-loss (pips or `%` return-on-margin), and a trailing stop with `--trail`.
+4. Displays the trade plan: NAV, open trades, capital at risk, units, margin, pip value, entry price, and the instrument's daily ATR.
+5. Prompts for take-profit and stop-loss (pips or `%` return-on-margin; the stop-loss defaults to a multiple of daily ATR), and a trailing stop with `--trail`.
 6. Displays exit prices, projected P/L, and R:R ratio.
 7. Confirms before placing the order (`y` / `n` / `e` to re-enter TP/SL and any trailing stop).
 8. Places a market order (or a limit order with `--limit`, see below); on failure, prompts to retry, save the draft, or abort.
@@ -92,6 +92,21 @@ The flow:
 |---|---|
 | `50` or `50p` | 50 pips |
 | `5%` | 5% return on margin used |
+| `2x` or `2atr` | 2 × daily ATR (stop-loss only) |
+| Enter | Take-profit: none. Stop-loss: the ATR default (see below) |
+| `-` or `none` | No stop-loss |
+
+**ATR stop-loss.** The plan shows the instrument's daily ATR: Wilder's ATR over completed daily mid-price candles, with days closing at 17:00 New York, as on most charting platforms. The period comes from `atr_period` (default 14). At the stop-loss prompt, Enter sets the stop `sl_atr_multiple` × ATR from entry (default 1.5), `2x` sets it at 2 × ATR, and `-` leaves the trade without a stop. The SL row is tagged with the multiple used:
+
+```
+  Daily ATR(14): 50.0p
+  ...
+Stop-loss   (pips, 10%, or 2x ATR; Enter = 1.5x ATR = 75.0p, '-' to skip):
+Exit levels:
+  SL: 1.09260  →  $-681.82  (-34.1% RoM)  [1.5× ATR]
+```
+
+If the candles can't be fetched, the plan shows `Daily ATR(14): unavailable (no default stop-loss)` and Enter skips the stop-loss as it does for take-profit. The trade plan records the ATR and the multiple, if the stop was ATR-based (`frmj journal` shows `SL 1.09260 (1.5× ATR)`). A saved draft records them too. The default applies with `--limit` and `--multi` (one ATR for the whole group, mirrored for `--opposite` accounts).
 
 If the account being traded (the active account, or `--account NAME`) is a live account and live mode is not enabled, the `trade` command exits with a clear error before placing any order.
 
