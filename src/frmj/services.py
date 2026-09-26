@@ -32,6 +32,7 @@ import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal
 
+from frmj.domain.pricing import wilder_atr
 from frmj.domain.risk import (
     RiskConfig,
     SizingDecision,
@@ -62,27 +63,41 @@ from frmj.execution.sync import sync_incremental
 # ---------------------------------------------------------------------------
 
 
+#: Minimum number of daily candles fetched for the ATR. Wilder's smoothing
+#: carries a fading memory of its seed, so ~100 bars of history are needed
+#: before the result settles to what charting platforms show.
+_ATR_MIN_HISTORY: int = 100
+
+
 @dataclass(frozen=True, slots=True)
 class InstrumentContext:
-    """Live instrument spec, quote, and financing rate for a planned trade.
+    """Live instrument spec, quote, financing rate, and daily ATR for a
+    planned trade.
 
     Independent of which account is trading — one instance is fetched and
-    shared across every account in a multi-account trade.
+    shared across every account in a multi-account trade. ``daily_atr`` is
+    in price units and is ``None`` when it wasn't requested or couldn't be
+    computed.
     """
 
     spec: InstrumentSpec
     quote: PriceQuote
     financing_rate: FinancingRate | None
+    daily_atr: Decimal | None = None
 
 
-def fetch_instrument_context(client: OandaClient, instrument: str) -> InstrumentContext:
-    """Fetch the instrument spec, live quote, and financing rate for *instrument*.
+def fetch_instrument_context(
+    client: OandaClient, instrument: str, atr_period: int | None = None
+) -> InstrumentContext:
+    """Fetch the instrument spec, live quote, and financing rate for *instrument*,
+    plus its daily ATR(*atr_period*) when a period is given.
 
     Any account's client can be used to fetch this — the data doesn't depend
-    on which account is trading. The financing-rate fetch is best-effort:
-    Oanda's instruments endpoint can fail independently of the rest, and a
-    missing financing rate only means the trade-plan display omits that one
-    line, so a failure there is swallowed rather than propagated.
+    on which account is trading. The financing-rate and ATR fetches are
+    best-effort: each can fail independently of the rest (a separate Oanda
+    endpoint, or too little candle history for a new instrument), and a
+    missing value only means the trade plan goes without it, so a failure
+    there is swallowed rather than propagated.
     """
     spec = client.get_instrument(instrument)
     quote = client.get_price(instrument)
@@ -92,7 +107,19 @@ def fetch_instrument_context(client: OandaClient, instrument: str) -> Instrument
         ]
     except Exception:
         financing_rate = None
-    return InstrumentContext(spec=spec, quote=quote, financing_rate=financing_rate)
+
+    # Daily ATR: enough completed candles for Wilder's smoothing to settle.
+    daily_atr: Decimal | None = None
+    if atr_period is not None:
+        count = max(_ATR_MIN_HISTORY, 5 * atr_period) + 1
+        try:
+            candles = client.get_daily_candles(instrument, count)
+            daily_atr = wilder_atr(candles, atr_period)
+        except Exception:
+            daily_atr = None
+    return InstrumentContext(
+        spec=spec, quote=quote, financing_rate=financing_rate, daily_atr=daily_atr
+    )
 
 
 @dataclass(frozen=True, slots=True)

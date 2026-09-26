@@ -19,6 +19,7 @@ import typer
 
 from frmj.accounts import add_account, set_active_account
 from frmj.app import get_db
+from frmj.domain.pricing import Candle
 from frmj.domain.sizing import InstrumentSpec, PriceQuote
 from frmj.execution.oanda import (
     AccountSummary,
@@ -60,6 +61,18 @@ def _row(oanda_id: str, account_id: str = "acct-1") -> TransactionRow:
     )
 
 
+def _atr_candles(range_pips: int = 50, count: int = 101) -> list[Candle]:
+    """*count* identical EUR_USD daily candles whose ATR is *range_pips* pips.
+
+    Each bar spans 1.10000 to 1.10000 + range and closes mid-range, so
+    every true range (and hence the ATR) equals the bar's own range.
+    """
+    low = Decimal("1.10000")
+    high = low + Decimal(range_pips) * Decimal("0.0001")
+    close = (low + high) / 2
+    return [Candle(high=high, low=low, close=close) for _ in range(count)]
+
+
 # ---------------------------------------------------------------------------
 # FakeFullClient — satisfies all OandaClient methods used by the trade command
 # ---------------------------------------------------------------------------
@@ -89,6 +102,11 @@ class FakeFullClient:
     trail_should_fail: bool = False
     sync_rows: list[TransactionRow] = field(default_factory=list)
     sync_should_fail: bool = False
+    # Daily candles for the ATR. None makes get_daily_candles raise, so the
+    # trade flow falls back to "ATR unavailable" (no default stop-loss).
+    candles: list[Candle] | None = None
+    # (instrument, count) of the last get_daily_candles call.
+    candles_requested: tuple[str, int] | None = None
 
     # --- ClientProtocol (for the auto-sync step) ----------------------------
     def get_transactions_since(self, from_id: str | None = None) -> list:
@@ -130,6 +148,12 @@ class FakeFullClient:
             quote_to_home=Decimal("1"),
             base_to_home=Decimal("1.10"),
         )
+
+    def get_daily_candles(self, instrument: str, count: int) -> list[Candle]:
+        self.candles_requested = (instrument, count)
+        if self.candles is None:
+            raise RuntimeError("candles endpoint unavailable")
+        return self.candles
 
     def place_market_order(self, instrument: str, units_signed: int) -> OrderFill:
         self.order_placed = True
