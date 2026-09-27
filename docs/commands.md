@@ -2,34 +2,75 @@
 
 [← Back to README](../README.md)
 
-`frmj sync`, `positions`, `trade`, `close`, `trail`, `journal`, and `stats` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command without switching the active account; the output then begins by naming it. `journal` and `stats` also accept `--all-accounts` (`-A`) to cover every account at once.
+`frmj close`, `journal`, `positions`, `stats`, `sync`, `trade`, and `trail` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command without switching the active account; the output then begins by naming it. `journal` and `stats` also accept `--all-accounts` (`-A`) to cover every account at once.
 
-## `frmj sync`
+## `frmj account`
 
-Pull transactions from Oanda into the local database.
-
-```sh
-frmj sync               # incremental (only new transactions since last sync)
-frmj sync --cold        # full history re-fetch (safe to re-run; duplicates are skipped)
-frmj sync --watch       # poll for new transactions continuously (Ctrl+C to stop)
-frmj sync --watch --interval 30   # poll every 30 seconds (default: 60)
-frmj sync --csv history.csv       # import an Oanda Hub CSV export instead of hitting the API
-frmj sync --account funded        # sync a non-active account
-```
-
-`--csv` imports a transaction-history export from the Oanda account hub (Reports → Transaction History → Export to csv). Set the export dialog's Timezone to UTC before downloading — any other timezone is rejected. Useful for backfilling history the REST API can no longer return (old accounts truncate `/transactions`) and for cross-checking an API sync against the account's own records; duplicate rows are skipped the same way `--cold` re-runs are. Cannot be combined with `--cold` or `--watch`. The CSV itself carries no account ID, so rows are filed under the active account, or under `--account NAME` when given.
-
-## `frmj positions`
-
-Show all open trades with live P/L, margin, TP/SL levels, any trailing stop, and an estimated daily financing charge (in home currency, colored green/red — not the raw annualized rate), plus an account summary footer. The footer includes Oanda's margin closeout percent; at 100% Oanda begins closing positions.
-
-A trailing stop shows its current trigger price, the P/L if it triggers there, and the distance it trails by in price units: `Trail: 1.10150 (+$10.00) [0.00200 behind]`. The trigger moves as the trade goes your way, so a positive figure means the stop has locked in profit.
-
-Pending entry orders (limit, stop, and market-if-touched — e.g. from `frmj trade --limit`) are listed in their own section below the open trades, with their price, units, time in force, TP/SL and any trailing stop, and the current market price on the side they would fill against (ask for a long, bid for a short). Cancelling a pending order is done in Oanda's own interface for now.
+Manage named Oanda account profiles.
 
 ```sh
-frmj positions
+frmj account add NAME              # add a new account profile (prompts for Oanda ID and type)
+frmj account list                  # list all configured accounts
+frmj account use NAME              # set NAME as the active account
+frmj account current               # show the currently active account
+frmj account rename OLD NEW        # rename a profile (keeps its Oanda ID, groups, and active status)
+frmj account remove NAME           # remove a profile and its group memberships (not the active one; its token is kept)
+frmj account set-token practice    # store or update the practice API token
+frmj account set-token live        # store or update the live API token
 ```
+
+API tokens belong to an environment (practice or live), not to one account — see [API tokens](configuration.md#api-tokens).
+
+### `frmj account group`
+
+Named, reusable sets of accounts, used by `frmj trade --multi GROUP` to place the same trade on several accounts at once. A group may freely mix practice and live accounts.
+
+```sh
+frmj account group add my-props alpha    # add 'alpha' to group 'my-props' (creates the group if new)
+frmj account group add my-props beta
+frmj account group remove my-props beta  # remove one member
+frmj account group list                  # list all groups and their members
+frmj account group show my-props         # show one group's members
+frmj account group delete my-props       # delete the group entirely
+```
+
+## `frmj close`
+
+Close all open tickets for an instrument.
+
+```sh
+frmj close EUR_USD
+```
+
+Shows each ticket's current P/L, prompts for confirmation, then runs an incremental sync after closing.
+
+## `frmj config`
+
+```sh
+frmj config set max_open_trades 6  # set a config key
+frmj config get max_open_trades    # read one key
+frmj config get                    # show all keys + token status
+frmj config unset risk_strategy    # remove a key (resets to default)
+frmj config check                  # validate all config, report issues
+frmj config check --connectivity   # also verify credentials against the API
+frmj config set-token              # store the API token for the active account's environment
+frmj config unset-token            # remove the API token for the active account's environment
+```
+
+The keys and their meanings are listed under [Config table keys](configuration.md#config-table-keys-set-with-frmj-config-set).
+
+## `frmj export`
+
+Export transactions to CSV or JSON for external analysis.
+
+```sh
+frmj export                                  # CSV to stdout
+frmj export --format json                    # JSON to stdout
+frmj export --output trades.csv              # write to file
+frmj export --instrument EUR_USD --since 2026-01-01 --include-notes
+```
+
+Supports the same `--instrument`, `--type`, and `--since` filters as `journal`. Unlike `journal`, export always includes every account in the local database (the `account_id` column tells them apart) and does not sync first — run `frmj sync` beforehand for up-to-date data.
 
 ## `frmj financing`
 
@@ -56,6 +97,92 @@ frmj financing --quiet
 ```cron
 0 0 * * * /path/to/frmj financing --quiet
 ```
+
+## `frmj journal`
+
+Display recent transactions with any attached notes and tags. Auto-syncs before displaying. Only the active account's transactions are shown unless `--account NAME` or `--all-accounts` is given (not both); with no active account configured, every account is shown.
+
+```sh
+frmj journal                          # last 20 transactions
+frmj journal --number 50              # last 50 transactions
+frmj journal --instrument EUR_USD     # filter by instrument
+frmj journal --type ORDER_FILL        # filter by transaction type
+frmj journal --since 2026-04-01       # on or after a date
+frmj journal --with-notes             # only transactions with notes
+frmj journal --tag breakout           # only transactions tagged 'breakout'
+frmj journal --account prop-1         # another account's transactions, without switching
+frmj journal --all-accounts           # include every account (-A), not just the active one
+```
+
+## `frmj mode`
+
+Control whether live order placement is enabled. This is independent of account selection and acts as an additional confirmation gate.
+
+```sh
+frmj mode practice    # disable live order placement (safe default)
+frmj mode live        # enable live order placement (requires typing "ENABLE LIVE")
+```
+
+## `frmj note`
+
+Attach a free-text note to any transaction by its Oanda transaction ID.
+
+```sh
+frmj note 12345 "Entered on 4H breakout, tight spread"
+```
+
+Run `frmj sync` first if the transaction is not yet in the local database. Oanda transaction IDs are only unique within one account, so `note` and `tag` look the ID up in the active account; to annotate another account's transaction, switch to it first with `frmj account use NAME`.
+
+## `frmj positions`
+
+Show all open trades with live P/L, margin, TP/SL levels, any trailing stop, and an estimated daily financing charge (in home currency, colored green/red — not the raw annualized rate), plus an account summary footer. The footer includes Oanda's margin closeout percent; at 100% Oanda begins closing positions.
+
+A trailing stop shows its current trigger price, the P/L if it triggers there, and the distance it trails by in price units: `Trail: 1.10150 (+$10.00) [0.00200 behind]`. The trigger moves as the trade goes your way, so a positive figure means the stop has locked in profit.
+
+Pending entry orders (limit, stop, and market-if-touched — e.g. from `frmj trade --limit`) are listed in their own section below the open trades, with their price, units, time in force, TP/SL and any trailing stop, and the current market price on the side they would fill against (ask for a long, bid for a short). Cancelling a pending order is done in Oanda's own interface for now.
+
+```sh
+frmj positions
+```
+
+## `frmj stats`
+
+Show trade performance statistics from the local journal. Auto-syncs before displaying. Only the active account's trades are counted unless `--account NAME` or `--all-accounts` is given (not both); with no active account configured, every account is combined. The report begins with `Account: NAME` or `Accounts: all` so combined figures can't be mistaken for one account's.
+
+```sh
+frmj stats                    # active account
+frmj stats --account prop-1   # another account (-a), without switching
+frmj stats --all-accounts     # every account combined (-A)
+```
+
+Output includes: win rate, average P/L, total P/L, total financing, and best/worst trade; breakdowns by direction (long/short), instrument, instrument & direction (omitted when every pair was only traded one way), weekday (fixed UTC+10 AEST, no DST), hour (local timezone), and tag; and financing paid/earned by instrument. The weekday and hour tables show each bucket twice: by close time and by open time.
+
+![Example frmj stats output](frmj_stats.png)
+
+## `frmj sync`
+
+Pull transactions from Oanda into the local database.
+
+```sh
+frmj sync               # incremental (only new transactions since last sync)
+frmj sync --cold        # full history re-fetch (safe to re-run; duplicates are skipped)
+frmj sync --watch       # poll for new transactions continuously (Ctrl+C to stop)
+frmj sync --watch --interval 30   # poll every 30 seconds (default: 60)
+frmj sync --csv history.csv       # import an Oanda Hub CSV export instead of hitting the API
+frmj sync --account funded        # sync a non-active account
+```
+
+`--csv` imports a transaction-history export from the Oanda account hub (Reports → Transaction History → Export to csv). Set the export dialog's Timezone to UTC before downloading — any other timezone is rejected. Useful for backfilling history the REST API can no longer return (old accounts truncate `/transactions`) and for cross-checking an API sync against the account's own records; duplicate rows are skipped the same way `--cold` re-runs are. Cannot be combined with `--cold` or `--watch`. The CSV itself carries no account ID, so rows are filed under the active account, or under `--account NAME` when given.
+
+## `frmj tag`
+
+Attach one or more short labels to a transaction.
+
+```sh
+frmj tag 12345 breakout london-open
+```
+
+Tags are normalised to lowercase. Only letters, digits, hyphens, and underscores are allowed. Like `note`, `tag` works on the active account's transactions.
 
 ## `frmj trade`
 
@@ -132,19 +259,9 @@ A price that would fill immediately (at or above the ask for a long, at or below
 
 A fixed stop-loss and a trailing stop can be set together; Oanda closes the trade on whichever triggers first, and R:R is measured against the tighter of the two. A distance outside the instrument's allowed trailing-stop range is rejected and re-prompted. On a market order the trailing stop is attached after the fill, like TP/SL; a limit order carries it and Oanda sets it when the order fills. The distance is saved in the trade plan (shown by `frmj journal`) and in a saved draft. To add, change, or remove a trailing stop after the trade is open, use [`frmj trail`](#frmj-trail). It works with either `--limit` or `--multi` (the same distance on every account, `--opposite` ones included) but cannot be combined with `--resume`, which uses the saved draft's trailing stop.
 
-**`--multi GROUP`** places the same trade on every account in a saved group (see [`frmj account group`](#frmj-account-group) below) instead of just the active account. Risk, sizing, and correlation are evaluated independently per account (each has its own NAV and open positions); the instrument and TP/SL choice are shared, and a single confirmation covers the whole group. Not supported together with `--resume`.
+**`--multi GROUP`** places the same trade on every account in a saved group (see [`frmj account group`](#frmj-account-group) above) instead of just the active account. Risk, sizing, and correlation are evaluated independently per account (each has its own NAV and open positions); the instrument and TP/SL choice are shared, and a single confirmation covers the whole group. Not supported together with `--resume`.
 
 **`--opposite ACCOUNT`** (repeatable), only with `--multi`, names accounts within the group that take the *other* side of the trade — short when the dialog's direction is long, long when short. TP/SL are mirrored automatically (the same pips/%RoM target applied to the opposite direction naturally lands on the mirrored price). Every named account must already be a member of the group.
-
-## `frmj close`
-
-Close all open tickets for an instrument.
-
-```sh
-frmj close EUR_USD
-```
-
-Shows each ticket's current P/L, prompts for confirmation, then runs an incremental sync after closing.
 
 ## `frmj trail`
 
@@ -159,120 +276,3 @@ frmj trail 6368 15 --account funded
 `TRADE_ID` is the ID shown by `frmj positions` (tab-completes from the account's open trades). The command shows the trade's current TP, SL, and trail, then the new trail's distance, where it would trigger right now (the pips behind the bid for a long, above the ask for a short), and the P/L from entry at that price. On a trade already in profit that P/L can be positive: the trail locks it in. A distance outside the instrument's allowed range is rejected before any prompt.
 
 After confirmation (default No) Oanda replaces any existing trail; TP and a fixed SL are left untouched. `off` removes the trail, with a warning if the trade has no fixed stop-loss. An incremental sync runs afterwards. The trade plan saved at entry (shown by `frmj journal`) keeps its original trailing stop; the change appears in the journal as Oanda's own order transactions.
-
-## `frmj stats`
-
-Show trade performance statistics from the local journal. Auto-syncs before displaying. Only the active account's trades are counted unless `--account NAME` or `--all-accounts` is given (not both); with no active account configured, every account is combined. The report begins with `Account: NAME` or `Accounts: all` so combined figures can't be mistaken for one account's.
-
-```sh
-frmj stats                    # active account
-frmj stats --account prop-1   # another account (-a), without switching
-frmj stats --all-accounts     # every account combined (-A)
-```
-
-Output includes: win rate, average P/L, total P/L, total financing, and best/worst trade; breakdowns by direction (long/short), instrument, instrument & direction (omitted when every pair was only traded one way), weekday (fixed UTC+10 AEST, no DST), hour (local timezone), and tag; and financing paid/earned by instrument. The weekday and hour tables show each bucket twice: by close time and by open time.
-
-![Example frmj stats output](frmj_stats.png)
-
-## `frmj journal`
-
-Display recent transactions with any attached notes and tags. Auto-syncs before displaying. Only the active account's transactions are shown unless `--account NAME` or `--all-accounts` is given (not both); with no active account configured, every account is shown.
-
-```sh
-frmj journal                          # last 20 transactions
-frmj journal --number 50              # last 50 transactions
-frmj journal --instrument EUR_USD     # filter by instrument
-frmj journal --type ORDER_FILL        # filter by transaction type
-frmj journal --since 2026-04-01       # on or after a date
-frmj journal --with-notes             # only transactions with notes
-frmj journal --tag breakout           # only transactions tagged 'breakout'
-frmj journal --account prop-1         # another account's transactions, without switching
-frmj journal --all-accounts           # include every account (-A), not just the active one
-```
-
-## `frmj export`
-
-Export transactions to CSV or JSON for external analysis.
-
-```sh
-frmj export                                  # CSV to stdout
-frmj export --format json                    # JSON to stdout
-frmj export --output trades.csv              # write to file
-frmj export --instrument EUR_USD --since 2026-01-01 --include-notes
-```
-
-Supports the same `--instrument`, `--type`, and `--since` filters as `journal`. Unlike `journal`, export always includes every account in the local database (the `account_id` column tells them apart) and does not sync first — run `frmj sync` beforehand for up-to-date data.
-
-## `frmj note`
-
-Attach a free-text note to any transaction by its Oanda transaction ID.
-
-```sh
-frmj note 12345 "Entered on 4H breakout, tight spread"
-```
-
-Run `frmj sync` first if the transaction is not yet in the local database. Oanda transaction IDs are only unique within one account, so `note` and `tag` look the ID up in the active account; to annotate another account's transaction, switch to it first with `frmj account use NAME`.
-
-## `frmj tag`
-
-Attach one or more short labels to a transaction.
-
-```sh
-frmj tag 12345 breakout london-open
-```
-
-Tags are normalised to lowercase. Only letters, digits, hyphens, and underscores are allowed. Like `note`, `tag` works on the active account's transactions.
-
-## `frmj account`
-
-Manage named Oanda account profiles.
-
-```sh
-frmj account add NAME              # add a new account profile (prompts for Oanda ID and type)
-frmj account list                  # list all configured accounts
-frmj account use NAME              # set NAME as the active account
-frmj account current               # show the currently active account
-frmj account rename OLD NEW        # rename a profile (keeps its Oanda ID, groups, and active status)
-frmj account remove NAME           # remove a profile and its group memberships (not the active one; its token is kept)
-frmj account set-token practice    # store or update the practice API token
-frmj account set-token live        # store or update the live API token
-```
-
-API tokens belong to an environment (practice or live), not to one account — see [API tokens](configuration.md#api-tokens).
-
-### `frmj account group`
-
-Named, reusable sets of accounts, used by `frmj trade --multi GROUP` to place the same trade on several accounts at once. A group may freely mix practice and live accounts.
-
-```sh
-frmj account group add my-props alpha    # add 'alpha' to group 'my-props' (creates the group if new)
-frmj account group add my-props beta
-frmj account group remove my-props beta  # remove one member
-frmj account group list                  # list all groups and their members
-frmj account group show my-props         # show one group's members
-frmj account group delete my-props       # delete the group entirely
-```
-
-## `frmj mode`
-
-Control whether live order placement is enabled. This is independent of account selection and acts as an additional confirmation gate.
-
-```sh
-frmj mode practice    # disable live order placement (safe default)
-frmj mode live        # enable live order placement (requires typing "ENABLE LIVE")
-```
-
-## `frmj config`
-
-```sh
-frmj config set max_open_trades 6  # set a config key
-frmj config get max_open_trades    # read one key
-frmj config get                    # show all keys + token status
-frmj config unset risk_strategy    # remove a key (resets to default)
-frmj config check                  # validate all config, report issues
-frmj config check --connectivity   # also verify credentials against the API
-frmj config set-token              # store the API token for the active account's environment
-frmj config unset-token            # remove the API token for the active account's environment
-```
-
-The keys and their meanings are listed under [Config table keys](configuration.md#config-table-keys-set-with-frmj-config-set).
