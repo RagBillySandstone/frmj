@@ -96,8 +96,6 @@ frmj config check --connectivity   # also calls the Oanda API to verify credenti
 
 `frmj sync`, `positions`, `trade`, `close`, `trail`, `journal`, and `stats` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command; `journal` and `stats` also take `--all-accounts` (`-A`).
 
-![Example frmj stats output](docs/frmj_stats.png)
-
 ## Documentation
 
 - [Command reference](docs/commands.md) — every command and option in detail
