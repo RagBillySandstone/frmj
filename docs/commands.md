@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md)
 
-`frmj sync`, `positions`, `trade`, `close`, `journal`, and `stats` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command without switching the active account; the output then begins by naming it. `journal` and `stats` also accept `--all-accounts` (`-A`) to cover every account at once.
+`frmj sync`, `positions`, `trade`, `close`, `trail`, `journal`, and `stats` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command without switching the active account; the output then begins by naming it. `journal` and `stats` also accept `--all-accounts` (`-A`) to cover every account at once.
 
 ## `frmj sync`
 
@@ -106,11 +106,11 @@ Exit levels:
   SL: 1.09260  →  $-681.82  (-34.1% RoM)  [1.5× ATR]
 ```
 
-If the candles can't be fetched, the plan shows `Daily ATR(14): unavailable (no default stop-loss)` and Enter skips the stop-loss as it does for take-profit. The trade plan records the ATR and the multiple, if the stop was ATR-based (`frmj journal` shows `SL 1.09260 (1.5× ATR)`). A saved draft records them too. The default applies with `--limit` and `--multi` (one ATR for the whole group, mirrored for `--opposite` accounts).
+If the candles can't be fetched, the plan shows `Daily ATR(14): unavailable (no default stop-loss)` and Enter skips the stop-loss as it does for take-profit. The trade plan records the ATR and the multiple, if the stop was ATR-based (`frmj journal` shows `SL 1.09260 (1.5× ATR)`). A saved draft records them too. The default applies with either `--limit` or `--multi` (one ATR for the whole group, mirrored for `--opposite` accounts).
 
 If the account being traded (the active account, or `--account NAME`) is a live account and live mode is not enabled, the `trade` command exits with a clear error before placing any order.
 
-If the order placement request times out or fails, the plan can be saved (`s`) and resumed later with `frmj trade --resume`. The saved plan records the account it was planned for, and `--resume` places the order on that account even if the active account has since changed. It follows the account through `frmj account rename`, and refuses to place the order if that Oanda account is no longer configured, even if another account now has its old name. `--account` cannot be combined with `--resume` or `--multi`.
+If the order placement request times out or fails, the plan can be saved (`s`) and resumed later with `frmj trade --resume`. The draft is written to `saved_plan.json` next to the database (see [`FRMJ_DB_PATH`](configuration.md#environment-variables)) and overwrites any earlier draft. The saved plan records the account it was planned for, and `--resume` places the order on that account even if the active account has since changed. It follows the account through `frmj account rename`, and refuses to place the order if that Oanda account is no longer configured, even if another account now has its old name. `--account` cannot be combined with `--resume` or `--multi`.
 
 **`--limit`** (`-l`) places a GTC limit entry order instead of a market order. After the risk check, the current bid/ask is shown and you're prompted for the entry:
 
@@ -130,7 +130,7 @@ A price that would fill immediately (at or above the ask for a long, at or below
   R:R  2.27
 ```
 
-A fixed stop-loss and a trailing stop can be set together; Oanda closes the trade on whichever triggers first, and R:R is measured against the tighter of the two. A distance outside the instrument's allowed trailing-stop range is rejected and re-prompted. On a market order the trailing stop is attached after the fill, like TP/SL; a limit order carries it and Oanda sets it when the order fills. The distance is saved in the trade plan (shown by `frmj journal`) and in a saved draft. To add, change, or remove a trailing stop after the trade is open, use [`frmj trail`](#frmj-trail). It works with `--limit` and `--multi` (the same distance on every account, `--opposite` ones included) but cannot be combined with `--resume`, which uses the saved draft's trailing stop.
+A fixed stop-loss and a trailing stop can be set together; Oanda closes the trade on whichever triggers first, and R:R is measured against the tighter of the two. A distance outside the instrument's allowed trailing-stop range is rejected and re-prompted. On a market order the trailing stop is attached after the fill, like TP/SL; a limit order carries it and Oanda sets it when the order fills. The distance is saved in the trade plan (shown by `frmj journal`) and in a saved draft. To add, change, or remove a trailing stop after the trade is open, use [`frmj trail`](#frmj-trail). It works with either `--limit` or `--multi` (the same distance on every account, `--opposite` ones included) but cannot be combined with `--resume`, which uses the saved draft's trailing stop.
 
 **`--multi GROUP`** places the same trade on every account in a saved group (see [`frmj account group`](#frmj-account-group) below) instead of just the active account. Risk, sizing, and correlation are evaluated independently per account (each has its own NAV and open positions); the instrument and TP/SL choice are shared, and a single confirmation covers the whole group. Not supported together with `--resume`.
 
@@ -162,7 +162,7 @@ After confirmation (default No) Oanda replaces any existing trail; TP and a fixe
 
 ## `frmj stats`
 
-Show trade performance statistics from the local journal. Auto-syncs before displaying. Only the active account's trades are counted unless `--account NAME` or `--all-accounts` is given (not both); the report begins with `Account: NAME` or `Accounts: all` so combined figures can't be mistaken for one account's.
+Show trade performance statistics from the local journal. Auto-syncs before displaying. Only the active account's trades are counted unless `--account NAME` or `--all-accounts` is given (not both); with no active account configured, every account is combined. The report begins with `Account: NAME` or `Accounts: all` so combined figures can't be mistaken for one account's.
 
 ```sh
 frmj stats                    # active account
@@ -176,7 +176,7 @@ Output includes: win rate, average P/L, total P/L, total financing, and best/wor
 
 ## `frmj journal`
 
-Display recent transactions with any attached notes and tags. Auto-syncs before displaying. Only the active account's transactions are shown unless `--account NAME` or `--all-accounts` is given (not both).
+Display recent transactions with any attached notes and tags. Auto-syncs before displaying. Only the active account's transactions are shown unless `--account NAME` or `--all-accounts` is given (not both); with no active account configured, every account is shown.
 
 ```sh
 frmj journal                          # last 20 transactions
