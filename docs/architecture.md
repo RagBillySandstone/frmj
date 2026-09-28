@@ -50,16 +50,19 @@ SQLite at the platform default path (see [`FRMJ_DB_PATH`](configuration.md#envir
 |---|---|
 | `accounts` | Named Oanda account profiles (name, account ID, practice flag). Active account and live-mode flag are stored in `config`. |
 | `account_groups` | Named sets of accounts for `trade --multi`; one row per group membership. |
+| `account_config` | Each account's own trading settings (`max_open_trades`, `risk_strategy`, ...), one row per (account, key). No shared fallback: an unset key uses its built-in default. |
 | `transactions` | Append-only Oanda event ledger. Stores full raw JSON alongside parsed index columns. |
 | `notes` | Free-text notes attached to transactions. |
 | `tags` | Short labels attached to transactions; used in journal filters and stats breakdowns. |
 | `trade_plans` | Intended TP/SL prices recorded at order time; shown in `journal` alongside fills. For a limit order the plan (and any notes/tags) sits on the pending order's transaction until sync moves it to the fill. |
 | `financing_rate_snapshots` | Daily captures of Oanda's long/short financing rates, recorded by each live `frmj financing` run; read back by `financing --date`. |
 | `sync_cursors` | One row per account; tracks the last ingested Oanda transaction ID for incremental sync. |
-| `config` | Flat key/value store for all runtime configuration, including `active_account` and `live_mode`. |
+| `config` | Flat key/value store for installation-wide settings: `active_account` and `live_mode`. |
 
 Transactions are never updated or deleted — Oanda is the system of record. Corrective events arrive as new rows. The full raw JSON payload is preserved in every row so new columns can be added via migration without re-fetching from the API.
 
 ## Migration from earlier versions
 
 If you have an existing database using the old flat-config account system (`practice_account_id`, `account_id`, `practice_mode` keys), FRoMaJ will auto-migrate on first run: it reads those keys, creates corresponding named account profiles (`"practice"` and/or `"live"`), and removes the old keys. No manual action required.
+
+Trading settings (`max_open_trades`, `risk_strategy`, ...) used to be stored once in `config` and shared by every account. On first run after upgrading, each such value is copied into every existing account's `account_config` and removed from `config`, so every account keeps its previous behavior.

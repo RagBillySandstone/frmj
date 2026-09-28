@@ -13,8 +13,8 @@ frmj account add NAME              # add a new account profile (prompts for Oand
 frmj account list                  # list all configured accounts
 frmj account use NAME              # set NAME as the active account
 frmj account current               # show the currently active account
-frmj account rename OLD NEW        # rename a profile (keeps its Oanda ID, groups, and active status)
-frmj account remove NAME           # remove a profile and its group memberships (not the active one; its token is kept)
+frmj account rename OLD NEW        # rename a profile (keeps its Oanda ID, config, groups, and active status)
+frmj account remove NAME           # remove a profile, its config, and its group memberships (not the active one; its token is kept)
 frmj account set-token practice    # store or update the practice API token
 frmj account set-token live        # store or update the live API token
 ```
@@ -53,9 +53,12 @@ frmj config get                    # show all keys + token status
 frmj config unset risk_strategy    # remove a key (resets to default)
 frmj config check                  # validate all config, report issues
 frmj config check --connectivity   # also verify credentials against the API
+frmj config set max_open_trades 3 --account funded   # another account's config (-a)
 frmj config set-token              # store the API token for the active account's environment
 frmj config unset-token            # remove the API token for the active account's environment
 ```
+
+Every account has its own configuration: `set`, `get`, `unset`, and `check` act on the active account, or on another with `--account NAME` (`-a NAME`). Accounts never share values — a key an account hasn't set uses its default, and a newly added account starts with none set. `frmj config get` begins with `Account: NAME  [practice|live, OANDA_ID]`.
 
 The keys and their meanings are listed under [Config table keys](configuration.md#config-table-keys-set-with-frmj-config-set).
 
@@ -259,7 +262,7 @@ A price that would fill immediately (at or above the ask for a long, at or below
 
 A fixed stop-loss and a trailing stop can be set together; Oanda closes the trade on whichever triggers first, and R:R is measured against the tighter of the two. A distance outside the instrument's allowed trailing-stop range is rejected and re-prompted. On a market order the trailing stop is attached after the fill, like TP/SL; a limit order carries it and Oanda sets it when the order fills. The distance is saved in the trade plan (shown by `frmj journal`) and in a saved draft. To add, change, or remove a trailing stop after the trade is open, use [`frmj trail`](#frmj-trail). It works with either `--limit` or `--multi` (the same distance on every account, `--opposite` ones included) but cannot be combined with `--resume`, which uses the saved draft's trailing stop.
 
-**`--multi GROUP`** places the same trade on every account in a saved group (see [`frmj account group`](#frmj-account-group) above) instead of just the active account. Risk, sizing, and correlation are evaluated independently per account (each has its own NAV and open positions); the instrument and TP/SL choice are shared, and a single confirmation covers the whole group. Not supported together with `--resume`.
+**`--multi GROUP`** places the same trade on every account in a saved group (see [`frmj account group`](#frmj-account-group) above) instead of just the active account. Risk, sizing, and correlation are evaluated independently per account (each has its own config, NAV, and open positions); the instrument and TP/SL choice are shared, and a single confirmation covers the whole group. Because the group shares one daily ATR and one default stop-loss, every account in it must have the same `atr_period` and `sl_atr_multiple`; if they differ the trade is refused, listing each account's values. Not supported together with `--resume`.
 
 **`--opposite ACCOUNT`** (repeatable), only with `--multi`, names accounts within the group that take the *other* side of the trade — short when the dialog's direction is long, long when short. TP/SL are mirrored automatically (the same pips/%RoM target applied to the opposite direction naturally lands on the mirrored price). Every named account must already be a member of the group.
 

@@ -57,6 +57,10 @@ Shows the active account name, type (practice / live), Oanda account ID, and cur
 
 ## Config table keys (set with `frmj config set`)
 
+Each account has its own value for every key below: `frmj config set KEY VALUE` sets it on the active account, and `--account NAME` (`-a NAME`) on another. Accounts don't share values, so changing one account's settings never affects another's; an unset key uses the default shown. A newly added account starts with nothing set, so trading on it is disabled until you set its `max_open_trades`.
+
+Databases from before per-account config had one set of values for all accounts; on upgrade those values are copied to every existing account, so each keeps behaving as before.
+
 Account IDs and active account selection are managed via `frmj account`, not `frmj config set`. The following keys are valid:
 
 | Key | Required | Default | Description |
@@ -94,5 +98,5 @@ Before sizing a trade, `frmj trade` runs three checks. Each either refuses the t
 - **Scale-in** (`scale_in`) — adding to an instrument that already has an open ticket or pending order is refused with `never` (the default), allowed with a warning printed above the plan with `warn`, or allowed silently with `allow`.
 - **Correlated positions** (`correlation_blocking_mode`) — a trade is *correlated* with an open ticket or pending order on a different instrument when both bet the same way on a shared currency. Long `EUR_USD` and long `EUR_GBP` are both long EUR; long `EUR_USD` and short `USD_JPY` are both short USD. This compares direction only, not position size. With `warning_only` (the default) each overlap is listed and you must answer an extra "Proceed anyway?" prompt; with `hard_block` the trade is refused.
 
-With `trade --multi`, all three checks run separately for each account in the group.
+With `trade --multi`, all three checks run separately for each account in the group, each against that account's own settings.
 

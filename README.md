@@ -65,8 +65,9 @@ frmj account set-token live        # store live token in OS keychain (prompted, 
 # Activate whichever account you want to work with
 frmj account use practice
 
-# Risk settings (shared by all accounts)
+# Risk settings (each account has its own; this sets the active account's)
 frmj config set max_open_trades 6
+frmj config set max_open_trades 3 --account funded
 
 # Check everything is wired up
 frmj config check
