@@ -6,6 +6,7 @@ from __future__ import annotations
 import typer
 
 from frmj import services
+from frmj.accounts import resolve_account
 from frmj.app import get_client, get_db
 from frmj.cli import app
 from frmj.cli._completion import _complete_account_name
@@ -47,10 +48,13 @@ def positions(
         conn.close()
         raise typer.Exit(1)
 
-    # Name the overridden account up front so its output can't be mistaken
-    # for the active account's.
-    if account is not None:
-        typer.echo(f"Account: {account}")
+    # Name the account up front — active or overridden — so the output can't
+    # be mistaken for another account's. get_client has already validated the
+    # name; the record is re-read here only for its type and Oanda ID.
+    record = resolve_account(conn, account)
+    if record is not None:
+        acct_type = "practice" if record.is_practice else "live"
+        typer.echo(f"Account: {record.name}  [{acct_type}, {record.oanda_id}]")
 
     # --- Open trades ---------------------------------------------------------
     if view.trades:

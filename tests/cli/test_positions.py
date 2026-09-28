@@ -11,6 +11,7 @@ import pytest
 from click.testing import Result
 from typer.testing import CliRunner
 
+from frmj.accounts import add_account, set_active_account
 from frmj.app import get_db, set_config
 from frmj.cli import app
 from frmj.cli._display import _daily_financing_home
@@ -30,6 +31,9 @@ class TestPositionsCommand:
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
         conn = get_db(path=path)
         set_config(conn, "account_id", "acct-1")
+        add_account(conn, "main", "101-001-1-001", is_practice=True)
+        add_account(conn, "other", "101-001-2-001", is_practice=False)
+        set_active_account(conn, "main")
         conn.close()
         return path
 
@@ -257,6 +261,16 @@ class TestPositionsCommand:
         assert result.exit_code == 1
         assert "Error" in result.output + result.stderr
 
+    def test_header_names_active_account(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without --account the output still opens by naming the active
+        account, with its type and Oanda ID."""
+        result = self._invoke(monkeypatch, [])
+        assert result.exit_code == 0, result.output
+        first_line = result.output.splitlines()[0]
+        assert first_line == "Account: main  [practice, 101-001-1-001]"
+
     def test_get_client_error_exits_1(
         self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -286,7 +300,7 @@ class TestPositionsCommand:
         result = runner.invoke(app, ["positions", "--account", "other"])
         assert result.exit_code == 0, result.output
         assert requested == ["other"]
-        assert "Account: other" in result.output
+        assert "Account: other  [live, 101-001-2-001]" in result.output
 
     def test_unknown_account_exits_1(self, pos_db: Path) -> None:
         """A typo in --account fails before any Oanda call, with a clear hint."""
