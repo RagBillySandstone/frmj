@@ -15,6 +15,11 @@ Named, reusable sets of accounts (for fanning a single trade out across
 several profiles) live in the ``account_groups`` table — see the account
 group helpers below.
 
+Each account's own trading settings (``max_open_trades``, ``risk_strategy``,
+...) live in the ``account_config`` table — see the account config helpers
+below. Accounts don't share settings: a key an account hasn't set uses its
+built-in default.
+
 Token storage (OS keychain) is intentionally kept in ``app.py``, the one
 module allowed to perform external I/O. This module is pure SQLite CRUD.
 """
@@ -30,6 +35,24 @@ from dataclasses import dataclass
 
 _ACTIVE_ACCOUNT_KEY: str = "active_account"
 _LIVE_MODE_KEY: str = "live_mode"
+
+#: Settings each account keeps for itself in ``account_config``, set with
+#: ``frmj config set``. Account identity and mode are managed via
+#: ``frmj account`` and ``frmj mode`` and are intentionally not listed.
+ACCOUNT_CONFIG_KEYS: frozenset[str] = frozenset(
+    {
+        "atr_period",
+        "blocking_mode",
+        "correlation_blocking_mode",
+        "fixed_dollar",
+        "max_open_trades",
+        "percent_of_equity",
+        "risk_strategy",
+        "safety_reserve_pct",
+        "scale_in",
+        "sl_atr_multiple",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -110,17 +133,18 @@ def remove_account(conn: sqlite3.Connection, name: str) -> bool:
     found.  Does not remove the OS keychain entry — the caller should call
     ``delete_account_token`` from ``app`` if a clean removal is wanted.
 
-    Also removes *name* from every account group, in the same transaction:
-    ``account_groups`` references ``accounts(name)`` with no ``ON DELETE``
-    action, so the profile row can't be deleted while memberships remain.
-    Callers wanting to report the affected groups should read them first
-    with ``list_groups_for_account``.
+    Also removes *name* from every account group and deletes its
+    ``account_config`` rows, in the same transaction: both tables reference
+    ``accounts(name)`` with no ``ON DELETE`` action, so the profile row can't
+    be deleted while they remain. Callers wanting to report the affected
+    groups should read them first with ``list_groups_for_account``.
     """
-    # Memberships first, so the foreign key never points at a missing row.
+    # Dependent rows first, so no foreign key points at a missing row.
     conn.execute("DELETE FROM account_groups WHERE account_name = ?", (name,))
+    conn.execute("DELETE FROM account_config WHERE account_name = ?", (name,))
     cursor = conn.execute("DELETE FROM accounts WHERE name = ?", (name,))
     if cursor.rowcount == 0:
-        # Nothing to remove — undo the (necessarily empty) membership delete.
+        # Nothing to remove — undo the (necessarily empty) dependent deletes.
         conn.rollback()
         return False
     conn.commit()
@@ -138,7 +162,8 @@ def rename_account(conn: sqlite3.Connection, old_name: str, new_name: str) -> bo
     Rename the profile *old_name* to *new_name*.
 
     Updates the ``accounts`` table and, in the same transaction, the
-    account's group memberships and — when *old_name* is the active account —
+    account's group memberships, its ``account_config`` rows, and — when
+    *old_name* is the active account —
     the ``active_account`` config key, so nothing is left pointing at the old
     name.
 
@@ -154,8 +179,8 @@ def rename_account(conn: sqlite3.Connection, old_name: str, new_name: str) -> bo
     # writes can be committed atomically.
     active_name = get_active_account_name(conn)
 
-    # account_groups references accounts(name) with no ON UPDATE action, so
-    # whichever of the two tables is updated first briefly violates the
+    # account_groups and account_config reference accounts(name) with no ON
+    # UPDATE action, so whichever table is updated first briefly violates the
     # foreign key. Defer the check to COMMIT, by which point both agree.
     # The pragma resets itself when the transaction ends.
     conn.execute("PRAGMA defer_foreign_keys = ON")
@@ -169,6 +194,10 @@ def rename_account(conn: sqlite3.Connection, old_name: str, new_name: str) -> bo
         return False
     conn.execute(
         "UPDATE account_groups SET account_name = ? WHERE account_name = ?",
+        (new_name, old_name),
+    )
+    conn.execute(
+        "UPDATE account_config SET account_name = ? WHERE account_name = ?",
         (new_name, old_name),
     )
 
@@ -263,6 +292,103 @@ def set_live_mode(conn: sqlite3.Connection, *, enabled: bool) -> None:
     conn.execute(
         "REPLACE INTO config (key, value) VALUES (?, ?)",
         (_LIVE_MODE_KEY, "true" if enabled else "false"),
+    )
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Account config — each account's own trading settings
+# ---------------------------------------------------------------------------
+
+
+def get_account_config(
+    conn: sqlite3.Connection, account_name: str, key: str
+) -> str | None:
+    """Return *account_name*'s value for *key*, or ``None`` when unset."""
+    row = conn.execute(
+        "SELECT value FROM account_config WHERE account_name = ? AND key = ?",
+        (account_name, key),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def set_account_config(
+    conn: sqlite3.Connection, account_name: str, key: str, value: str
+) -> None:
+    """
+    Upsert *key* = *value* in *account_name*'s config.
+
+    Raises ``sqlite3.IntegrityError`` when *account_name* does not exist
+    (foreign key). Does not validate *key* — callers check it against
+    ``ACCOUNT_CONFIG_KEYS``.
+    """
+    conn.execute(
+        "REPLACE INTO account_config (account_name, key, value) VALUES (?, ?, ?)",
+        (account_name, key, value),
+    )
+    conn.commit()
+
+
+def delete_account_config(
+    conn: sqlite3.Connection, account_name: str, key: str
+) -> bool:
+    """Remove *key* from *account_name*'s config. Returns ``True`` if it was set."""
+    cursor = conn.execute(
+        "DELETE FROM account_config WHERE account_name = ? AND key = ?",
+        (account_name, key),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def get_all_account_config(
+    conn: sqlite3.Connection, account_name: str
+) -> list[tuple[str, str]]:
+    """Return *account_name*'s config as ``(key, value)`` pairs sorted by key."""
+    rows = conn.execute(
+        "SELECT key, value FROM account_config WHERE account_name = ? ORDER BY key",
+        (account_name,),
+    ).fetchall()
+    return [(row[0], row[1]) for row in rows]
+
+
+def migrate_shared_config_to_accounts(conn: sqlite3.Connection) -> None:
+    """
+    Copy legacy shared settings from ``config`` into every account's config.
+
+    Before per-account config, the ``ACCOUNT_CONFIG_KEYS`` settings were
+    stored once in the ``config`` table and applied to every account. To keep
+    each existing account's behavior unchanged, every such row is copied into
+    each account's ``account_config`` (without overwriting a value the
+    account already has) and then removed from ``config``, in one
+    transaction.
+
+    Idempotent: a no-op once no legacy keys remain. When no accounts exist
+    yet the legacy rows are left in place, so the first account added picks
+    them up on the next run instead of them being lost.
+    """
+    # Legacy settings still sitting in the shared table.
+    placeholders = ", ".join("?" for _ in ACCOUNT_CONFIG_KEYS)
+    legacy = conn.execute(
+        f"SELECT key, value FROM config WHERE key IN ({placeholders})",
+        tuple(ACCOUNT_CONFIG_KEYS),
+    ).fetchall()
+    if not legacy or get_account_count(conn) == 0:
+        return
+
+    # Copy each legacy row to every account; OR IGNORE keeps any value an
+    # account already set for itself.
+    for key, value in legacy:
+        conn.execute(
+            "INSERT OR IGNORE INTO account_config (account_name, key, value) "
+            "SELECT name, ?, ? FROM accounts",
+            (key, value),
+        )
+
+    # Drop the copied rows so the migration never runs again.
+    conn.execute(
+        f"DELETE FROM config WHERE key IN ({placeholders})",
+        tuple(ACCOUNT_CONFIG_KEYS),
     )
     conn.commit()
 

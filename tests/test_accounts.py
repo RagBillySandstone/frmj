@@ -16,27 +16,34 @@ from pathlib import Path
 import pytest
 
 from frmj.accounts import (
+    ACCOUNT_CONFIG_KEYS,
     AccountRecord,
     add_account,
     add_group_member,
+    delete_account_config,
     delete_group,
     get_account,
+    get_account_config,
     get_account_count,
     get_active_account,
     get_active_account_name,
+    get_all_account_config,
     is_live_mode,
     list_accounts,
     list_group_members,
     list_group_names,
     list_groups_for_account,
+    migrate_shared_config_to_accounts,
     remove_account,
     remove_group_member,
     rename_account,
     resolve_account,
+    set_account_config,
     set_active_account,
     set_live_mode,
 )
 from frmj.app import (
+    get_all_config,
     get_config,
     get_db,
     migrate_v1_accounts,
@@ -665,3 +672,144 @@ class TestAccountSwitching:
         names = [r.name for r in list_accounts(conn)]
         assert "a" in names
         assert "b" in names
+
+
+class TestAccountConfig:
+    """Each account's own settings in ``account_config``."""
+
+    def test_set_and_get_roundtrip(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "a", "a-id", is_practice=True)
+        set_account_config(conn, "a", "max_open_trades", "6")
+        assert get_account_config(conn, "a", "max_open_trades") == "6"
+
+    def test_unset_key_is_none(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "a", "a-id", is_practice=True)
+        assert get_account_config(conn, "a", "max_open_trades") is None
+
+    def test_set_overwrites(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "a", "a-id", is_practice=True)
+        set_account_config(conn, "a", "scale_in", "warn")
+        set_account_config(conn, "a", "scale_in", "allow")
+        assert get_account_config(conn, "a", "scale_in") == "allow"
+
+    def test_accounts_are_independent(self, conn: sqlite3.Connection) -> None:
+        """Setting a key on one account never affects another."""
+        add_account(conn, "a", "a-id", is_practice=True)
+        add_account(conn, "b", "b-id", is_practice=True)
+        set_account_config(conn, "a", "max_open_trades", "6")
+        set_account_config(conn, "b", "max_open_trades", "2")
+        assert get_account_config(conn, "a", "max_open_trades") == "6"
+        assert get_account_config(conn, "b", "max_open_trades") == "2"
+
+    def test_unknown_account_raises(self, conn: sqlite3.Connection) -> None:
+        with pytest.raises(sqlite3.IntegrityError):
+            set_account_config(conn, "ghost", "max_open_trades", "6")
+
+    def test_delete_returns_whether_set(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "a", "a-id", is_practice=True)
+        set_account_config(conn, "a", "scale_in", "warn")
+        assert delete_account_config(conn, "a", "scale_in") is True
+        assert delete_account_config(conn, "a", "scale_in") is False
+        assert get_account_config(conn, "a", "scale_in") is None
+
+    def test_get_all_sorted_by_key(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "a", "a-id", is_practice=True)
+        add_account(conn, "b", "b-id", is_practice=True)
+        set_account_config(conn, "a", "scale_in", "warn")
+        set_account_config(conn, "a", "max_open_trades", "6")
+        set_account_config(conn, "b", "atr_period", "20")
+        assert get_all_account_config(conn, "a") == [
+            ("max_open_trades", "6"),
+            ("scale_in", "warn"),
+        ]
+
+    def test_remove_account_deletes_its_config(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "a", "a-id", is_practice=True)
+        add_account(conn, "b", "b-id", is_practice=True)
+        set_account_config(conn, "a", "max_open_trades", "6")
+        set_account_config(conn, "b", "max_open_trades", "2")
+        assert remove_account(conn, "a") is True
+        assert get_all_account_config(conn, "a") == []
+        assert get_account_config(conn, "b", "max_open_trades") == "2"
+
+    def test_rename_account_moves_its_config(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "a", "a-id", is_practice=True)
+        set_account_config(conn, "a", "max_open_trades", "6")
+        assert rename_account(conn, "a", "a2") is True
+        assert get_account_config(conn, "a2", "max_open_trades") == "6"
+        assert get_all_account_config(conn, "a") == []
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    def test_rename_duplicate_name_leaves_config_intact(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        add_account(conn, "a", "a-id", is_practice=True)
+        add_account(conn, "b", "b-id", is_practice=True)
+        set_account_config(conn, "a", "max_open_trades", "6")
+        with pytest.raises(sqlite3.IntegrityError):
+            rename_account(conn, "a", "b")
+        conn.rollback()
+        assert get_account_config(conn, "a", "max_open_trades") == "6"
+
+
+class TestMigrateSharedConfig:
+    """Legacy shared settings are copied into every existing account."""
+
+    def test_copies_legacy_keys_to_every_account(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        add_account(conn, "a", "a-id", is_practice=True)
+        add_account(conn, "b", "b-id", is_practice=False)
+        set_config(conn, "max_open_trades", "6")
+        set_config(conn, "blocking_mode", "warning_only")
+        migrate_shared_config_to_accounts(conn)
+        for name in ("a", "b"):
+            assert get_all_account_config(conn, name) == [
+                ("blocking_mode", "warning_only"),
+                ("max_open_trades", "6"),
+            ]
+
+    def test_removes_legacy_keys_but_keeps_other_config(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        add_account(conn, "a", "a-id", is_practice=True)
+        set_active_account(conn, "a")
+        set_live_mode(conn, enabled=False)
+        set_config(conn, "max_open_trades", "6")
+        migrate_shared_config_to_accounts(conn)
+        keys = {k for k, _ in get_all_config(conn)}
+        assert keys == {"active_account", "live_mode"}
+
+    def test_keeps_value_account_already_set(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "a", "a-id", is_practice=True)
+        set_account_config(conn, "a", "max_open_trades", "2")
+        set_config(conn, "max_open_trades", "6")
+        migrate_shared_config_to_accounts(conn)
+        assert get_account_config(conn, "a", "max_open_trades") == "2"
+
+    def test_no_accounts_leaves_legacy_keys(self, conn: sqlite3.Connection) -> None:
+        """With nobody to receive them, legacy keys wait for the first account."""
+        set_config(conn, "max_open_trades", "6")
+        migrate_shared_config_to_accounts(conn)
+        assert get_config(conn, "max_open_trades") == "6"
+        add_account(conn, "a", "a-id", is_practice=True)
+        migrate_shared_config_to_accounts(conn)
+        assert get_account_config(conn, "a", "max_open_trades") == "6"
+        assert get_config(conn, "max_open_trades") is None
+
+    def test_idempotent(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "a", "a-id", is_practice=True)
+        set_config(conn, "max_open_trades", "6")
+        migrate_shared_config_to_accounts(conn)
+        set_account_config(conn, "a", "max_open_trades", "3")
+        migrate_shared_config_to_accounts(conn)
+        assert get_account_config(conn, "a", "max_open_trades") == "3"
+
+    def test_covers_every_account_config_key(self, conn: sqlite3.Connection) -> None:
+        add_account(conn, "a", "a-id", is_practice=True)
+        for key in ACCOUNT_CONFIG_KEYS:
+            set_config(conn, key, "x")
+        migrate_shared_config_to_accounts(conn)
+        assert {k for k, _ in get_all_account_config(conn, "a")} == set(
+            ACCOUNT_CONFIG_KEYS
+        )

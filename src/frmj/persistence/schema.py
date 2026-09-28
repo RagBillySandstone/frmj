@@ -264,6 +264,25 @@ CREATE INDEX IF NOT EXISTS idx_account_groups_group
 
 
 -- -------------------------------------------------------------------------
+-- Account config — each account's own trading settings
+-- -------------------------------------------------------------------------
+-- One row per (account, key) for the risk/limit/ATR settings that
+-- `frmj config set` manages (max_open_trades, risk_strategy, ...). Every
+-- account's config is independent: there is no shared fallback, and a key
+-- with no row here uses its built-in default. Values are TEXT, parsed by
+-- the caller, exactly like the config table below.
+--
+-- References accounts(name) with no ON DELETE / ON UPDATE action, like
+-- account_groups: remove_account and rename_account keep it in step.
+CREATE TABLE IF NOT EXISTS account_config (
+    account_name TEXT NOT NULL REFERENCES accounts(name),
+    key          TEXT NOT NULL,
+    value        TEXT NOT NULL,
+    PRIMARY KEY (account_name, key)
+);
+
+
+-- -------------------------------------------------------------------------
 -- Financing rate snapshots — daily captures of Oanda's published rates
 -- -------------------------------------------------------------------------
 -- Oanda's API only exposes the *current* long/short financing rate (via
@@ -294,10 +313,11 @@ CREATE TABLE IF NOT EXISTS financing_rate_snapshots (
 
 
 -- -------------------------------------------------------------------------
--- Config — flat key/value store for account settings
+-- Config — flat key/value store for installation-wide settings
 -- -------------------------------------------------------------------------
+-- Per-account trading settings live in account_config above.
 CREATE TABLE IF NOT EXISTS config (
-    -- Examples: "active_account", "live_mode", "max_open_trades"
+    -- Examples: "active_account", "live_mode"
     key     TEXT    PRIMARY KEY,
 
     -- All values stored as TEXT; callers are responsible for serialising and
