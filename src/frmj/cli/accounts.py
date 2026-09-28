@@ -98,6 +98,13 @@ def account_add(
                 f"Account '{name}' added. Run 'frmj account use {name}' to activate it."
             )
 
+        # Each account has its own trading config, starting from defaults —
+        # and trading stays disabled until max_open_trades is set.
+        typer.echo(
+            "Trading settings start at their defaults. Enable trading with:\n"
+            f"  frmj config set max_open_trades <N> --account {name}"
+        )
+
         # Remind the user to store a token if none is set for this environment.
         if not get_token(is_practice):
             typer.echo(

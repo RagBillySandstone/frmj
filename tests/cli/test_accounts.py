@@ -30,6 +30,17 @@ class TestAccountCommands:
         assert result.exit_code == 0, result.output
         assert "demo" in result.output
 
+    def test_account_add_hints_at_its_own_config(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A new account has no trading config yet; the hint names it."""
+        monkeypatch.setattr("frmj.app.keyring.set_password", lambda s, u, p: None)
+        result = runner.invoke(
+            app, ["account", "add", "demo"], input="101-001-99999-001\npractice\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "frmj config set max_open_trades <N> --account demo" in result.output
+
     def test_account_add_duplicate_name_exits_1(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
