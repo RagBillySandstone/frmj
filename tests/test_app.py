@@ -17,7 +17,13 @@ from pathlib import Path
 
 import pytest
 
-from frmj.accounts import AccountRecord, add_account, set_active_account
+from frmj.accounts import (
+    AccountRecord,
+    add_account,
+    get_account_config,
+    set_account_config,
+    set_active_account,
+)
 from frmj.app import (
     DEFAULT_ATR_PERIOD,
     DEFAULT_SL_ATR_MULTIPLE,
@@ -45,6 +51,7 @@ from frmj.domain.risk import (
     ScaleInPolicy,
 )
 from frmj.execution.oanda import OandaClient
+from frmj.persistence.schema import ensure_schema
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +196,23 @@ class TestGetDb:
         conn = get_db()
         assert conn.row_factory == sqlite3.Row
         conn.close()
+
+    def test_get_db_migrates_shared_config_to_accounts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An existing database is migrated the next time it is opened."""
+        path = tmp_path / "legacy.db"
+        c = sqlite3.connect(str(path))
+        ensure_schema(c)
+        add_account(c, "a", "a-id", is_practice=True)
+        set_config(c, "max_open_trades", "6")
+        c.close()
+        c = get_db(path=path)
+        try:
+            assert get_account_config(c, "a", "max_open_trades") == "6"
+            assert get_config(c, "max_open_trades") is None
+        finally:
+            c.close()
 
 
 # ---------------------------------------------------------------------------
@@ -394,17 +418,18 @@ class TestGetRiskConfig:
     ) -> Iterator[sqlite3.Connection]:
         monkeypatch.setenv("FRMJ_DB_PATH", str(tmp_path / "test.db"))
         conn = get_db()
+        add_account(conn, "a", "a-id", is_practice=True)
         yield conn
         conn.close()
 
     def test_raises_without_max_open_trades(self, db: sqlite3.Connection) -> None:
         with pytest.raises(RuntimeError, match="max_open_trades"):
-            get_risk_config(db)
+            get_risk_config(db, "a")
 
     def test_minimal_config_uses_defaults(self, db: sqlite3.Connection) -> None:
         """Only max_open_trades required; everything else has sensible defaults."""
-        set_config(db, "max_open_trades", "5")
-        cfg = get_risk_config(db)
+        set_account_config(db, "a", "max_open_trades", "5")
+        cfg = get_risk_config(db, "a")
         assert cfg.max_open_trades == 5
         assert cfg.strategy is RiskStrategy.REMAINING_MARGIN_FRACTION
         assert cfg.blocking_mode is BlockingMode.HARD_BLOCK
@@ -412,34 +437,50 @@ class TestGetRiskConfig:
         assert cfg.safety_reserve_pct == Decimal("0")
 
     def test_strategy_override(self, db: sqlite3.Connection) -> None:
-        set_config(db, "max_open_trades", "5")
-        set_config(db, "risk_strategy", "percent_of_equity")
-        set_config(db, "percent_of_equity", "0.02")
-        cfg = get_risk_config(db)
+        set_account_config(db, "a", "max_open_trades", "5")
+        set_account_config(db, "a", "risk_strategy", "percent_of_equity")
+        set_account_config(db, "a", "percent_of_equity", "0.02")
+        cfg = get_risk_config(db, "a")
         assert cfg.strategy is RiskStrategy.PERCENT_OF_EQUITY
         assert cfg.percent_of_equity == Decimal("0.02")
 
     def test_blocking_mode_override(self, db: sqlite3.Connection) -> None:
-        set_config(db, "max_open_trades", "5")
-        set_config(db, "blocking_mode", "warning_only")
-        cfg = get_risk_config(db)
+        set_account_config(db, "a", "max_open_trades", "5")
+        set_account_config(db, "a", "blocking_mode", "warning_only")
+        cfg = get_risk_config(db, "a")
         assert cfg.blocking_mode is BlockingMode.WARNING_ONLY
 
     def test_scale_in_warn(self, db: sqlite3.Connection) -> None:
-        set_config(db, "max_open_trades", "5")
-        set_config(db, "scale_in", "warn")
-        cfg = get_risk_config(db)
+        set_account_config(db, "a", "max_open_trades", "5")
+        set_account_config(db, "a", "scale_in", "warn")
+        cfg = get_risk_config(db, "a")
         assert cfg.scale_in is ScaleInPolicy.WARN
 
     def test_safety_reserve_set(self, db: sqlite3.Connection) -> None:
-        set_config(db, "max_open_trades", "5")
-        set_config(db, "safety_reserve_pct", "0.05")
-        cfg = get_risk_config(db)
+        set_account_config(db, "a", "max_open_trades", "5")
+        set_account_config(db, "a", "safety_reserve_pct", "0.05")
+        cfg = get_risk_config(db, "a")
         assert cfg.safety_reserve_pct == Decimal("0.05")
 
+    def test_reads_only_the_named_account(self, db: sqlite3.Connection) -> None:
+        """Another account's settings never leak into this one's config."""
+        add_account(db, "b", "b-id", is_practice=True)
+        set_account_config(db, "a", "max_open_trades", "5")
+        set_account_config(db, "b", "max_open_trades", "2")
+        set_account_config(db, "b", "blocking_mode", "warning_only")
+        cfg = get_risk_config(db, "a")
+        assert cfg.max_open_trades == 5
+        assert cfg.blocking_mode is BlockingMode.HARD_BLOCK
+
+    def test_missing_max_open_trades_names_account(
+        self, db: sqlite3.Connection
+    ) -> None:
+        with pytest.raises(RuntimeError, match="--account a"):
+            get_risk_config(db, "a")
+
     def test_returns_risk_config_instance(self, db: sqlite3.Connection) -> None:
-        set_config(db, "max_open_trades", "6")
-        cfg = get_risk_config(db)
+        set_account_config(db, "a", "max_open_trades", "6")
+        cfg = get_risk_config(db, "a")
         assert isinstance(cfg, RiskConfig)
 
 
@@ -455,32 +496,35 @@ class TestGetAtrConfig:
     ) -> Iterator[sqlite3.Connection]:
         monkeypatch.setenv("FRMJ_DB_PATH", str(tmp_path / "test.db"))
         conn = get_db()
+        add_account(conn, "a", "a-id", is_practice=True)
         yield conn
         conn.close()
 
     def test_defaults_when_unset(self, db: sqlite3.Connection) -> None:
-        assert get_atr_config(db) == AtrConfig(
+        assert get_atr_config(db, "a") == AtrConfig(
             period=DEFAULT_ATR_PERIOD, sl_multiple=DEFAULT_SL_ATR_MULTIPLE
         )
         assert DEFAULT_ATR_PERIOD == 14
         assert DEFAULT_SL_ATR_MULTIPLE == Decimal("1.5")
 
     def test_overrides(self, db: sqlite3.Connection) -> None:
-        set_config(db, "atr_period", "20")
-        set_config(db, "sl_atr_multiple", "2.25")
-        assert get_atr_config(db) == AtrConfig(period=20, sl_multiple=Decimal("2.25"))
+        set_account_config(db, "a", "atr_period", "20")
+        set_account_config(db, "a", "sl_atr_multiple", "2.25")
+        assert get_atr_config(db, "a") == AtrConfig(
+            period=20, sl_multiple=Decimal("2.25")
+        )
 
     @pytest.mark.parametrize("raw", ["0", "-3", "abc", "1.5"])
     def test_invalid_period_raises(self, db: sqlite3.Connection, raw: str) -> None:
-        set_config(db, "atr_period", raw)
+        set_account_config(db, "a", "atr_period", raw)
         with pytest.raises(RuntimeError, match="atr_period"):
-            get_atr_config(db)
+            get_atr_config(db, "a")
 
     @pytest.mark.parametrize("raw", ["0", "-1", "abc", "NaN", "Infinity"])
     def test_invalid_multiple_raises(self, db: sqlite3.Connection, raw: str) -> None:
-        set_config(db, "sl_atr_multiple", raw)
+        set_account_config(db, "a", "sl_atr_multiple", raw)
         with pytest.raises(RuntimeError, match="sl_atr_multiple"):
-            get_atr_config(db)
+            get_atr_config(db, "a")
 
 
 # ---------------------------------------------------------------------------

@@ -12,13 +12,13 @@ import pytest
 from typer.testing import CliRunner
 
 from frmj import services
-from frmj.accounts import add_account, add_group_member
-from frmj.app import get_db, set_config
+from frmj.accounts import add_account, add_group_member, set_active_account
+from frmj.app import get_db
 from frmj.cli import app
 from frmj.cli._trade_helpers import _parse_atr_multiple, _prompt_stop_loss
 from frmj.domain.pricing import TPSLKind, TPSLSpec
 
-from .conftest import FakeFullClient, _atr_candles
+from .conftest import _config_all_accounts, FakeFullClient, _atr_candles
 
 runner = CliRunner()
 
@@ -30,8 +30,9 @@ def trade_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("FRMJ_DB_PATH", str(path))
     monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
     conn = get_db(path=path)
-    set_config(conn, "account_id", "acct-1")
-    set_config(conn, "max_open_trades", "5")
+    add_account(conn, "practice", "acct-1", is_practice=True)
+    set_active_account(conn, "practice")
+    _config_all_accounts(conn, "max_open_trades", "5")
     conn.close()
     return path
 
@@ -240,8 +241,8 @@ class TestTradeAtrStopLoss:
     ) -> None:
         """sl_atr_multiple / atr_period from config drive the default."""
         conn = get_db(path=trade_db)
-        set_config(conn, "sl_atr_multiple", "2")
-        set_config(conn, "atr_period", "20")
+        _config_all_accounts(conn, "sl_atr_multiple", "2")
+        _config_all_accounts(conn, "atr_period", "20")
         conn.close()
         _use_client(monkeypatch, FakeFullClient(candles=_atr_candles(50)))
         result = runner.invoke(
@@ -255,7 +256,7 @@ class TestTradeAtrStopLoss:
         self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         conn = get_db(path=trade_db)
-        set_config(conn, "sl_atr_multiple", "zero")
+        _config_all_accounts(conn, "sl_atr_multiple", "zero")
         conn.close()
         _use_client(monkeypatch, FakeFullClient(candles=_atr_candles(50)))
         result = runner.invoke(app, ["trade", "EUR_USD", "long", "--dry-run"])
@@ -423,7 +424,7 @@ class TestTradeMultiAtr:
         add_account(conn, "beta", "beta-acct", is_practice=True)
         add_group_member(conn, "grp", "alpha")
         add_group_member(conn, "grp", "beta")
-        set_config(conn, "max_open_trades", "5")
+        _config_all_accounts(conn, "max_open_trades", "5")
         # Each account's fill, as the post-fill sync would bring it in.
         for acct_id in ("alpha-acct", "beta-acct"):
             conn.execute(

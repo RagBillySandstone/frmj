@@ -389,9 +389,12 @@ def trade(
         # instrument/direction_str were already validated non-None above.
         assert instrument is not None and direction_str is not None
         # --- Normal path: risk + sizing + TP/SL prompts + confirmation -------
+        # get_client succeeded, so the account exists and resolves; its own
+        # config drives risk, sizing, and the ATR stop-loss.
+        assert target_account is not None
         try:
-            risk_config = get_risk_config(conn)
-            atr_config = get_atr_config(conn)
+            risk_config = get_risk_config(conn, target_account.name)
+            atr_config = get_atr_config(conn, target_account.name)
         except RuntimeError as exc:
             typer.echo(f"Error: {exc}", err=True)
             conn.close()

@@ -1,55 +1,47 @@
-"""``frmj config`` — read/write configuration values, manage the API token."""
+"""``frmj config`` — read/write each account's configuration values, manage
+the API token."""
 
 from __future__ import annotations
 
 import os
+import sqlite3
 from decimal import Decimal
 
 import typer
 
-from frmj.accounts import get_active_account, is_live_mode
+from frmj.accounts import (
+    ACCOUNT_CONFIG_KEYS,
+    AccountRecord,
+    delete_account_config,
+    get_account_config,
+    get_active_account,
+    get_all_account_config,
+    is_live_mode,
+    resolve_account,
+    set_account_config,
+)
 from frmj.app import (
     DEFAULT_ATR_PERIOD,
     DEFAULT_SL_ATR_MULTIPLE,
-    delete_config,
     delete_token,
-    get_all_config,
     get_client,
-    get_config,
     get_db,
     get_token,
-    set_config,
     store_token,
 )
 from frmj.cli import config_app
+from frmj.cli._completion import _complete_account_name
+from frmj.cli._display import _display_account_header
 from frmj.domain.risk import BlockingMode, RiskStrategy, ScaleInPolicy
 
 # ---------------------------------------------------------------------------
 # config sub-commands
 # ---------------------------------------------------------------------------
 
-#: Keys accepted by ``frmj config set``.  Account identity and mode are
-#: managed via ``frmj account`` and ``frmj mode`` — they are intentionally
-#: excluded here to prevent accidental overwrites.
-VALID_CONFIG_KEYS: frozenset[str] = frozenset(
-    {
-        "atr_period",
-        "blocking_mode",
-        "correlation_blocking_mode",
-        "fixed_dollar",
-        "max_open_trades",
-        "percent_of_equity",
-        "risk_strategy",
-        "safety_reserve_pct",
-        "scale_in",
-        "sl_atr_multiple",
-    }
-)
-
 
 def _complete_config_key(incomplete: str) -> list[str]:
     """Return valid config keys whose names start with *incomplete*."""
-    return sorted(k for k in VALID_CONFIG_KEYS if k.startswith(incomplete.lower()))
+    return sorted(k for k in ACCOUNT_CONFIG_KEYS if k.startswith(incomplete.lower()))
 
 
 #: For config keys backed by an enum, the settings a user is allowed to set.
@@ -69,6 +61,45 @@ def _complete_config_value(ctx: typer.Context, incomplete: str) -> list[str]:
     return [v for v in choices if v.startswith(incomplete.lower())]
 
 
+def _account_option() -> typer.models.OptionInfo:
+    """The ``--account NAME`` option shared by set/get/unset/check."""
+    return typer.Option(
+        None,
+        "--account",
+        "-a",
+        help="Use this account instead of the active one (see 'frmj account list').",
+        autocompletion=_complete_account_name,
+    )
+
+
+def _resolve_target_account(
+    conn: sqlite3.Connection, account_name: str | None
+) -> AccountRecord:
+    """
+    Return the account a config command acts on: *account_name* (the
+    ``--account`` override) or the active account.
+
+    Prints an error and exits 1 when there is no such account, with the
+    same hints as ``get_client``. Callers close *conn* in their own
+    ``finally``.
+    """
+    record = resolve_account(conn, account_name)
+    if record is not None:
+        return record
+    if account_name is not None:
+        typer.echo(
+            f"Error: No account named '{account_name}'. "
+            "List accounts with: frmj account list",
+            err=True,
+        )
+    else:
+        typer.echo(
+            "Error: No active account. Add one with: frmj account add NAME",
+            err=True,
+        )
+    raise typer.Exit(1)
+
+
 @config_app.command("set")
 def config_set(
     key: str = typer.Argument(
@@ -79,19 +110,21 @@ def config_set(
     value: str = typer.Argument(
         ..., help="Config value", autocompletion=_complete_config_value
     ),
+    account: str | None = _account_option(),
 ) -> None:
-    """Set a configuration value."""
-    if key not in VALID_CONFIG_KEYS:
-        valid = ", ".join(sorted(VALID_CONFIG_KEYS))
+    """Set a configuration value for the active account (or --account)."""
+    if key not in ACCOUNT_CONFIG_KEYS:
+        valid = ", ".join(sorted(ACCOUNT_CONFIG_KEYS))
         typer.echo(f"Error: '{key}' is not a valid config key.", err=True)
         typer.echo(f"Valid keys: {valid}", err=True)
         raise typer.Exit(1)
     conn = get_db()
     try:
-        set_config(conn, key, value)
+        record = _resolve_target_account(conn, account)
+        set_account_config(conn, record.name, key, value)
     finally:
         conn.close()
-    typer.echo(f"Set {key} = {value}")
+    typer.echo(f"Set {key} = {value} for account '{record.name}'")
 
 
 @config_app.command("get")
@@ -101,14 +134,20 @@ def config_get(
         help="Config key to retrieve. Omit to show all configured values.",
         autocompletion=_complete_config_key,
     ),
+    account: str | None = _account_option(),
 ) -> None:
-    """Read a configuration value, or show all values if no key is given."""
+    """Read a configuration value for the active account (or --account), or
+    show all of its values if no key is given."""
     conn = get_db()
     try:
+        record = _resolve_target_account(conn, account)
         if key is None:
-            pairs = get_all_config(conn)
+            # Name the account first so the values can't be mistaken for
+            # another account's.
+            _display_account_header(conn, record.name)
+            pairs = get_all_account_config(conn, record.name)
         else:
-            value = get_config(conn, key)
+            value = get_account_config(conn, record.name, key)
     finally:
         conn.close()
 
@@ -119,11 +158,11 @@ def config_get(
             width = max(len(k) for k, _ in pairs)
             for k, v in pairs:
                 typer.echo(f"{k:<{width}}  =  {v}")
-        _print_token_status()
+        _print_token_status(record)
         return
 
     if value is None:
-        typer.echo(f"{key} is not set.")
+        typer.echo(f"{key} is not set for account '{record.name}'.")
         raise typer.Exit(1)
     typer.echo(value)
 
@@ -135,17 +174,20 @@ def config_unset(
         help="Config key to remove, e.g. risk_strategy",
         autocompletion=_complete_config_key,
     ),
+    account: str | None = _account_option(),
 ) -> None:
-    """Remove a configuration key from the database."""
+    """Remove a configuration value from the active account (or --account),
+    restoring its default."""
     conn = get_db()
     try:
-        removed = delete_config(conn, key)
+        record = _resolve_target_account(conn, account)
+        removed = delete_account_config(conn, record.name, key)
     finally:
         conn.close()
     if removed:
-        typer.echo(f"Unset {key}.")
+        typer.echo(f"Unset {key} for account '{record.name}'.")
     else:
-        typer.echo(f"{key} was not set.")
+        typer.echo(f"{key} was not set for account '{record.name}'.")
         raise typer.Exit(1)
 
 
@@ -208,43 +250,53 @@ def config_check(
         False,
         "--connectivity",
         "-c",
-        help="Also verify the active account's ID and token are accepted by Oanda.",
+        help="Also verify the account's ID and token are accepted by Oanda.",
     ),
+    account_name: str | None = _account_option(),
 ) -> None:
-    """Validate configuration and report any issues."""
+    """Validate the active account's (or --account's) configuration and
+    report any issues."""
     conn = get_db()
     try:
-        all_cfg = dict(get_all_config(conn))
-
         # Each item is (label, status, detail).
         # status: "OK" | "WARN" | "MISSING" | "INVALID" | "INFO"
         # "INFO" entries are displayed but do not affect the exit code.
         checks: list[tuple[str, str, str]] = []
 
-        # --- Active account --------------------------------------------------
-        account = get_active_account(conn)
+        # --- Target account --------------------------------------------------
+        # An unknown --account is an outright error; a missing active account
+        # is reported as a check so the rest of the report still shows.
+        if account_name is not None:
+            account: AccountRecord | None = _resolve_target_account(conn, account_name)
+        else:
+            account = get_active_account(conn)
         live = is_live_mode(conn)
         mode_label = "LIVE" if live else "PRACTICE"
+        account_label = "active account" if account_name is None else "account"
+        # Hints for fixing a key name --account when it isn't the active one.
+        hint_suffix = f" --account {account_name}" if account_name is not None else ""
 
         if account is None:
+            all_cfg: dict[str, str] = {}
             checks.append(
                 (
-                    "active account",
+                    account_label,
                     "MISSING",
                     "run: frmj account add NAME  then  frmj account use NAME",
                 )
             )
         else:
+            all_cfg = dict(get_all_account_config(conn, account.name))
             acct_type = "practice" if account.is_practice else "live"
             checks.append(
                 (
-                    "active account",
+                    account_label,
                     "OK",
                     f"{account.name}  (Oanda {acct_type} account {account.oanda_id})",
                 )
             )
 
-        # --- Token for active account ----------------------------------------
+        # --- Token for the account ------------------------------------------
         if account is not None:
             env_type = "practice" if account.is_practice else "live"
             # Detect token source in same priority order as get_token.
@@ -276,7 +328,8 @@ def config_check(
                 (
                     "max_open_trades",
                     "WARN",
-                    "not set — trading disabled; run: frmj config set max_open_trades <N>",
+                    "not set — trading disabled; run: "
+                    f"frmj config set max_open_trades <N>{hint_suffix}",
                 )
             )
         else:
@@ -449,7 +502,7 @@ def config_check(
         if connectivity:
             if account is not None and get_token(account.is_practice):
                 try:
-                    client = get_client(conn)
+                    client = get_client(conn, account.name)
                     summary = client.get_account_summary()
                     checks.append(
                         (
@@ -467,7 +520,7 @@ def config_check(
                     (
                         "connectivity",
                         "WARN",
-                        "skipped — active account or token not configured",
+                        f"skipped — {account_label} or token not configured",
                     )
                 )
 
@@ -510,24 +563,12 @@ def config_check(
         raise typer.Exit(1)
 
 
-def _print_token_status() -> None:
-    """Print the token status for the active account's environment.
+def _print_token_status(account: AccountRecord) -> None:
+    """Print the token status for *account*'s environment.
 
     Called by ``config_get`` when showing all values.  Token values are never
     printed — only the source.
     """
-    conn = get_db()
-    try:
-        account = get_active_account(conn)
-    finally:
-        conn.close()
-
-    if account is None:
-        typer.echo(
-            "API token          =  (no active account — run: frmj account add NAME)"
-        )
-        return
-
     env_label = "practice" if account.is_practice else "live"
 
     # Detect source in the same priority order as get_token.

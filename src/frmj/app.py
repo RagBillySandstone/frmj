@@ -66,7 +66,9 @@ import keyring.errors
 
 from frmj.accounts import (
     AccountRecord,
+    get_account_config,
     get_account_count,
+    migrate_shared_config_to_accounts,
     resolve_account,
     add_account,
     set_active_account,
@@ -150,7 +152,9 @@ def get_db(path: Path | None = None) -> sqlite3.Connection:
     is called on every open so startup is always idempotent and schema
     upgrades are automatic.  ``migrate_v1_accounts`` runs immediately after
     to silently convert any old-style flat config into named account profiles
-    — a no-op when the accounts table is already populated.
+    — a no-op when the accounts table is already populated — followed by
+    ``migrate_shared_config_to_accounts``, which copies legacy shared trading
+    settings into each account's own config.
     """
     if path is None:
         env_path = os.environ.get("FRMJ_DB_PATH")
@@ -160,6 +164,7 @@ def get_db(path: Path | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     ensure_schema(conn)
     migrate_v1_accounts(conn)
+    migrate_shared_config_to_accounts(conn)
     return conn
 
 
@@ -453,28 +458,34 @@ def get_client(
 # ---------------------------------------------------------------------------
 
 
-def get_risk_config(conn: sqlite3.Connection) -> RiskConfig:
+def get_risk_config(conn: sqlite3.Connection, account_name: str) -> RiskConfig:
     """
-    Build a ``RiskConfig`` from the config table.
+    Build a ``RiskConfig`` from *account_name*'s own config.
 
     ``max_open_trades`` is the only required key; all others have sensible
     defaults that match Stephen's stated preferences (REMAINING_MARGIN_FRACTION,
     HARD_BLOCK, NEVER scale-in, 0 reserve).
 
-    Raises ``RuntimeError`` if ``max_open_trades`` is not configured.
+    Raises ``RuntimeError`` if ``max_open_trades`` is not configured for the
+    account.
     """
-    max_trades_str = get_config(conn, "max_open_trades")
+
+    def get(key: str) -> str | None:
+        """Read *key* from this account's config."""
+        return get_account_config(conn, account_name, key)
+
+    max_trades_str = get("max_open_trades")
     if not max_trades_str:
         raise RuntimeError(
-            "max_open_trades is not configured. "
-            "Run: frmj config set max_open_trades <N>"
+            f"max_open_trades is not configured for account '{account_name}'. "
+            f"Run: frmj config set max_open_trades <N> --account {account_name}"
         )
 
-    strategy_str = get_config(conn, "risk_strategy") or "remaining_margin_fraction"
-    blocking_str = get_config(conn, "blocking_mode") or "hard_block"
-    scale_in_str = get_config(conn, "scale_in") or "never"
-    reserve_str = get_config(conn, "safety_reserve_pct") or "0"
-    corr_blocking_str = get_config(conn, "correlation_blocking_mode") or "warning_only"
+    strategy_str = get("risk_strategy") or "remaining_margin_fraction"
+    blocking_str = get("blocking_mode") or "hard_block"
+    scale_in_str = get("scale_in") or "never"
+    reserve_str = get("safety_reserve_pct") or "0"
+    corr_blocking_str = get("correlation_blocking_mode") or "warning_only"
 
     strategy = RiskStrategy(strategy_str)
     blocking_mode = BlockingMode(blocking_str)
@@ -482,8 +493,8 @@ def get_risk_config(conn: sqlite3.Connection) -> RiskConfig:
     correlation_blocking_mode = BlockingMode(corr_blocking_str)
 
     # Strategy-specific optional fields.
-    pct_str = get_config(conn, "percent_of_equity")
-    fixed_str = get_config(conn, "fixed_dollar")
+    pct_str = get("percent_of_equity")
+    fixed_str = get("fixed_dollar")
 
     return RiskConfig(
         max_open_trades=int(max_trades_str),
@@ -515,9 +526,10 @@ class AtrConfig:
     sl_multiple: Decimal
 
 
-def get_atr_config(conn: sqlite3.Connection) -> AtrConfig:
+def get_atr_config(conn: sqlite3.Connection, account_name: str) -> AtrConfig:
     """
-    Build an ``AtrConfig`` from the ``atr_period`` / ``sl_atr_multiple`` keys.
+    Build an ``AtrConfig`` from *account_name*'s ``atr_period`` /
+    ``sl_atr_multiple`` keys.
 
     Both are optional and fall back to ``DEFAULT_ATR_PERIOD`` and
     ``DEFAULT_SL_ATR_MULTIPLE``.
@@ -526,8 +538,8 @@ def get_atr_config(conn: sqlite3.Connection) -> AtrConfig:
     positive integer (period) or a positive number (multiple), so the trade
     flow can report it like any other config error.
     """
-    period_str = get_config(conn, "atr_period")
-    multiple_str = get_config(conn, "sl_atr_multiple")
+    period_str = get_account_config(conn, account_name, "atr_period")
+    multiple_str = get_account_config(conn, account_name, "sl_atr_multiple")
 
     # atr_period: a whole number of days, at least 1.
     period = DEFAULT_ATR_PERIOD

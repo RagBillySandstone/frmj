@@ -8,8 +8,9 @@ import pytest
 from typer.testing import CliRunner
 
 from frmj.cli import app
+from frmj.accounts import ACCOUNT_CONFIG_KEYS, add_account, get_account_config
+from frmj.app import get_db
 from frmj.cli.config import (
-    VALID_CONFIG_KEYS,
     _complete_config_key,
     _complete_config_value,
 )
@@ -66,7 +67,7 @@ class TestConfigCommands:
     def test_complete_config_key_matches_prefix(self) -> None:
         """Tab completion suggests only valid keys starting with the prefix."""
         assert _complete_config_key("max") == ["max_open_trades"]
-        assert _complete_config_key("") == sorted(VALID_CONFIG_KEYS)
+        assert _complete_config_key("") == sorted(ACCOUNT_CONFIG_KEYS)
         assert _complete_config_key("nonexistent") == []
 
     def test_complete_config_key_case_insensitive(self) -> None:
@@ -100,12 +101,13 @@ class TestConfigCommands:
         assert "scale_in" in result.output
         assert "never" in result.output
 
-    def test_config_get_all_shows_active_account(self, db_path: Path) -> None:
-        """``frmj config get`` shows the active_account config key set by the fixture."""
+    def test_config_get_all_names_active_account_first(self, db_path: Path) -> None:
+        """``frmj config get`` opens by naming the account whose values follow."""
         result = runner.invoke(app, ["config", "get"])
         assert result.exit_code == 0, result.output
         # The db_path fixture adds a practice account and activates it.
-        assert "active_account" in result.output
+        first_line = result.output.splitlines()[0]
+        assert first_line == "Account: practice  [practice, acct-1]"
 
     def test_config_get_all_shows_token_status(self, db_path: Path) -> None:
         """``frmj config get`` always prints an API token status line."""
@@ -154,12 +156,12 @@ class TestConfigCommands:
     def test_config_get_all_no_active_account_shows_guidance(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When no active account exists, config get shows 'no active account'."""
+        """With no active account there is no config to show: exit 1 with a hint."""
         path = tmp_path / "empty_account.db"
         monkeypatch.setenv("FRMJ_DB_PATH", str(path))
         result = runner.invoke(app, ["config", "get"])
-        assert result.exit_code == 0
-        assert "no active account" in result.output.lower()
+        assert result.exit_code == 1
+        assert "no active account" in (result.output + result.stderr).lower()
 
     def test_config_unset_removes_existing_key(self, db_path: Path) -> None:
         runner.invoke(app, ["config", "set", "max_open_trades", "5"])
@@ -338,7 +340,9 @@ class TestConfigCheck:
         runner.invoke(app, ["config", "set", "max_open_trades", "5"])
 
         fake = FakeFullClient()
-        monkeypatch.setattr("frmj.cli.config.get_client", lambda conn: fake)
+        monkeypatch.setattr(
+            "frmj.cli.config.get_client", lambda conn, account_name=None: fake
+        )
 
         result = runner.invoke(app, ["config", "check", "--connectivity"])
         assert result.exit_code == 0, result.output
@@ -357,7 +361,10 @@ class TestConfigCheck:
             def get_account_summary(self) -> AccountSummary:
                 raise RuntimeError("connection refused")
 
-        monkeypatch.setattr("frmj.cli.config.get_client", lambda conn: BadClient())
+        monkeypatch.setattr(
+            "frmj.cli.config.get_client",
+            lambda conn, account_name=None: BadClient(),
+        )
 
         result = runner.invoke(app, ["config", "check", "--connectivity"])
         assert result.exit_code == 1
@@ -508,3 +515,93 @@ class TestConfigTokenCommands:
         )
         result = runner.invoke(app, ["config", "unset-token"])
         assert result.exit_code == 1
+
+
+class TestConfigPerAccount:
+    """Each account has its own config; --account targets a non-active one."""
+
+    @pytest.fixture()
+    def two_accounts(self, db_path: Path) -> Path:
+        """``db_path`` (active: 'practice' / acct-1) plus 'other' / acct-2 (live)."""
+        conn = get_db(path=db_path)
+        add_account(conn, "other", "acct-2", is_practice=False)
+        conn.close()
+        return db_path
+
+    def test_set_targets_active_account_only(self, two_accounts: Path) -> None:
+        result = runner.invoke(app, ["config", "set", "max_open_trades", "6"])
+        assert result.exit_code == 0, result.output
+        assert "for account 'practice'" in result.output
+        conn = get_db(path=two_accounts)
+        try:
+            assert get_account_config(conn, "practice", "max_open_trades") == "6"
+            assert get_account_config(conn, "other", "max_open_trades") is None
+        finally:
+            conn.close()
+
+    def test_account_option_sets_and_gets_other_account(
+        self, two_accounts: Path
+    ) -> None:
+        runner.invoke(app, ["config", "set", "max_open_trades", "6"])
+        result = runner.invoke(
+            app, ["config", "set", "max_open_trades", "2", "--account", "other"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "for account 'other'" in result.output
+        get_other = runner.invoke(
+            app, ["config", "get", "max_open_trades", "-a", "other"]
+        )
+        assert get_other.output.strip() == "2"
+        get_active = runner.invoke(app, ["config", "get", "max_open_trades"])
+        assert get_active.output.strip() == "6"
+
+    def test_get_all_lists_only_that_account(self, two_accounts: Path) -> None:
+        runner.invoke(app, ["config", "set", "scale_in", "warn"])
+        runner.invoke(app, ["config", "set", "atr_period", "20", "-a", "other"])
+        result = runner.invoke(app, ["config", "get", "--account", "other"])
+        assert result.exit_code == 0, result.output
+        assert result.output.splitlines()[0] == "Account: other  [live, acct-2]"
+        assert "atr_period" in result.output
+        assert "scale_in" not in result.output
+        # The token line reflects the targeted account's environment.
+        assert "API token (live" in result.output
+
+    def test_unset_targets_named_account(self, two_accounts: Path) -> None:
+        runner.invoke(app, ["config", "set", "scale_in", "warn"])
+        runner.invoke(app, ["config", "set", "scale_in", "warn", "-a", "other"])
+        result = runner.invoke(app, ["config", "unset", "scale_in", "-a", "other"])
+        assert result.exit_code == 0, result.output
+        assert "Unset scale_in for account 'other'" in result.output
+        still_set = runner.invoke(app, ["config", "get", "scale_in"])
+        assert still_set.output.strip() == "warn"
+
+    @pytest.mark.parametrize("command", ["set", "get", "unset", "check"])
+    def test_unknown_account_exits_1(self, db_path: Path, command: str) -> None:
+        args = {
+            "set": ["max_open_trades", "6"],
+            "get": ["max_open_trades"],
+            "unset": ["max_open_trades"],
+            "check": [],
+        }[command]
+        result = runner.invoke(app, ["config", command, *args, "-a", "ghost"])
+        assert result.exit_code == 1
+        assert "No account named 'ghost'" in result.output + result.stderr
+
+    def test_set_without_active_account_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FRMJ_DB_PATH", str(tmp_path / "none.db"))
+        result = runner.invoke(app, ["config", "set", "max_open_trades", "6"])
+        assert result.exit_code == 1
+        assert "No active account" in result.output + result.stderr
+
+    def test_check_uses_named_accounts_config(self, two_accounts: Path) -> None:
+        """check --account validates that account's values, not the active one's."""
+        runner.invoke(app, ["config", "set", "max_open_trades", "6"])
+        runner.invoke(app, ["config", "set", "blocking_mode", "bogus", "-a", "other"])
+        result = runner.invoke(app, ["config", "check", "--account", "other"])
+        assert result.exit_code == 1
+        assert "other  (Oanda live account acct-2)" in result.output
+        assert "'bogus'" in result.output
+        # other has no max_open_trades of its own; the hint names it.
+        assert "max_open_trades <N> --account other" in result.output

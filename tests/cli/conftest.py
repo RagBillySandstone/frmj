@@ -9,6 +9,7 @@ close, config check --connectivity, stats/journal auto-sync).
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -17,7 +18,12 @@ import click
 import pytest
 import typer
 
-from frmj.accounts import add_account, set_active_account
+from frmj.accounts import (
+    add_account,
+    list_accounts,
+    set_account_config,
+    set_active_account,
+)
 from frmj.app import get_db
 from frmj.domain.pricing import Candle
 from frmj.domain.sizing import InstrumentSpec, PriceQuote
@@ -48,6 +54,17 @@ class FakeClient:
         if not self.responses:
             return []
         return self.responses.pop(0)
+
+
+def _config_all_accounts(conn: sqlite3.Connection, key: str, value: str) -> None:
+    """Set *key* = *value* in the config of every account currently in *conn*.
+
+    Each account has its own config; fixtures use this where every account
+    should share the same setting (e.g. ``max_open_trades``). Accounts added
+    afterwards don't get it.
+    """
+    for account in list_accounts(conn):
+        set_account_config(conn, account.name, key, value)
 
 
 def _row(oanda_id: str, account_id: str = "acct-1") -> TransactionRow:

@@ -22,7 +22,12 @@ import typer
 
 from frmj import services
 from frmj.accounts import AccountRecord, is_live_mode
-from frmj.app import get_atr_config, get_client_for_account, get_risk_config
+from frmj.app import (
+    AtrConfig,
+    get_atr_config,
+    get_client_for_account,
+    get_risk_config,
+)
 from frmj.cli._display import _daily_financing_home, _pl_str
 from frmj.cli._trade_helpers import (
     _display_daily_atr,
@@ -44,6 +49,7 @@ from frmj.domain.pricing import (
 from frmj.domain.risk import (
     CorrelatedPositionForbidden,
     MaxTradesExceeded,
+    RiskConfig,
     ScaleInForbidden,
     SizingDecision,
 )
@@ -101,7 +107,7 @@ def _trade_multi_account(
     Mirrors the single-account flow in ``trade()`` — risk model, sizing,
     TP/SL prompt, confirm, execute, attach TP/SL, sync, note/tags — but risk,
     sizing, and correlation are evaluated independently per account (each has
-    its own NAV, margin, and open positions), while the instrument, TP/SL
+    its own config, NAV, margin, and open positions), while the instrument, TP/SL
     choice, and final confirmation are shared, since it's the same intended
     trade replicated across accounts.
 
@@ -115,11 +121,39 @@ def _trade_multi_account(
     With *trail*, one trailing-stop distance (in pips) is prompted for and
     attached on every account after its fill.
     """
-    try:
-        risk_config = get_risk_config(conn)
-        atr_config = get_atr_config(conn)
-    except RuntimeError as exc:
-        typer.echo(f"Error: {exc}", err=True)
+    # --- Each account's own config, up front -----------------------------------
+    risk_configs: dict[str, RiskConfig] = {}
+    atr_configs: dict[str, AtrConfig] = {}
+    for acct in accounts:
+        try:
+            risk_configs[acct.name] = get_risk_config(conn, acct.name)
+            atr_configs[acct.name] = get_atr_config(conn, acct.name)
+        except RuntimeError as exc:
+            typer.echo(f"Error [{acct.name}]: {exc}", err=True)
+            conn.close()
+            raise typer.Exit(1)
+
+    # The group shares one daily-ATR fetch and one TP/SL prompt, so every
+    # account must agree on the ATR settings; refuse rather than silently
+    # applying one account's settings to the others.
+    atr_config = atr_configs[accounts[0].name]
+    if any(cfg != atr_config for cfg in atr_configs.values()):
+        typer.echo(
+            "Error: accounts in the group have different ATR settings, but "
+            "--multi uses one daily ATR and default stop-loss for all of them:",
+            err=True,
+        )
+        width = max(len(acct.name) for acct in accounts)
+        for acct in accounts:
+            cfg = atr_configs[acct.name]
+            typer.echo(
+                f"  {acct.name:<{width}}  atr_period={cfg.period}"
+                f"  sl_atr_multiple={cfg.sl_multiple}",
+                err=True,
+            )
+        typer.echo(
+            "Align them with: frmj config set KEY VALUE --account NAME", err=True
+        )
         conn.close()
         raise typer.Exit(1)
 
@@ -173,7 +207,11 @@ def _trade_multi_account(
 
         try:
             account_sizing = services.plan_account_sizing(
-                risk_config, account_ctx, instrument_ctx, instrument, acct_direction
+                risk_configs[acct.name],
+                account_ctx,
+                instrument_ctx,
+                instrument,
+                acct_direction,
             )
         except (MaxTradesExceeded, ScaleInForbidden) as exc:
             typer.echo(f"Cannot trade on '{acct.name}': {exc}", err=True)

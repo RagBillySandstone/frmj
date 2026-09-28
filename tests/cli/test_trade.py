@@ -15,14 +15,15 @@ from frmj.accounts import (
     AccountRecord,
     add_account,
     add_group_member,
+    set_account_config,
     set_active_account,
 )
-from frmj.app import get_db, set_config
+from frmj.app import get_db
 from frmj.cli import app
 from frmj.domain.sizing import InstrumentSpec
 from frmj.execution.oanda import AccountSummary, FinancingRate, OrderFill
 
-from .conftest import FakeFullClient, _open_trade, _pending_order
+from .conftest import _config_all_accounts, FakeFullClient, _open_trade, _pending_order
 
 runner = CliRunner()
 
@@ -43,8 +44,9 @@ class TestDryRun:
         monkeypatch.setenv("FRMJ_DB_PATH", str(path))
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
         conn = get_db(path=path)
-        set_config(conn, "account_id", "acct-1")
-        set_config(conn, "max_open_trades", "5")
+        add_account(conn, "practice", "acct-1", is_practice=True)
+        set_active_account(conn, "practice")
+        _config_all_accounts(conn, "max_open_trades", "5")
         conn.close()
         return path
 
@@ -160,8 +162,9 @@ class TestTradeExecute:
         monkeypatch.setenv("FRMJ_DB_PATH", str(path))
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
         conn = get_db(path=path)
-        set_config(conn, "account_id", "acct-1")
-        set_config(conn, "max_open_trades", "5")
+        add_account(conn, "practice", "acct-1", is_practice=True)
+        set_active_account(conn, "practice")
+        _config_all_accounts(conn, "max_open_trades", "5")
         conn.close()
         return path
 
@@ -398,7 +401,7 @@ class TestTradeErrors:
         conn = get_db(path=path)
         add_account(conn, "practice", "acct-1", is_practice=True)
         set_active_account(conn, "practice")
-        set_config(conn, "max_open_trades", "5")
+        _config_all_accounts(conn, "max_open_trades", "5")
         conn.close()
         return path
 
@@ -411,7 +414,7 @@ class TestTradeErrors:
         conn = get_db(path=path)
         add_account(conn, "my-live", "101-001-live-001", is_practice=False)
         set_active_account(conn, "my-live")
-        set_config(conn, "max_open_trades", "5")
+        _config_all_accounts(conn, "max_open_trades", "5")
         conn.close()
         return path
 
@@ -567,7 +570,7 @@ class TestTradeErrors:
     ) -> None:
         """HARD_BLOCK: a correlated open position refuses the trade outright."""
         conn = get_db(path=trade_db)
-        set_config(conn, "correlation_blocking_mode", "hard_block")
+        _config_all_accounts(conn, "correlation_blocking_mode", "hard_block")
         conn.close()
 
         fake = FakeFullClient(
@@ -731,7 +734,7 @@ class TestTradePendingOrders:
         conn = get_db(path=path)
         add_account(conn, "practice", "acct-1", is_practice=True)
         set_active_account(conn, "practice")
-        set_config(conn, "max_open_trades", "5")
+        _config_all_accounts(conn, "max_open_trades", "5")
         conn.close()
         return path
 
@@ -851,8 +854,9 @@ class TestTradeLimit:
         monkeypatch.setenv("FRMJ_DB_PATH", str(path))
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
         conn = get_db(path=path)
-        set_config(conn, "account_id", "acct-1")
-        set_config(conn, "max_open_trades", "5")
+        add_account(conn, "practice", "acct-1", is_practice=True)
+        set_active_account(conn, "practice")
+        _config_all_accounts(conn, "max_open_trades", "5")
         conn.close()
         return path
 
@@ -1133,8 +1137,9 @@ class TestTradeTrail:
         monkeypatch.setenv("FRMJ_DB_PATH", str(path))
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
         conn = get_db(path=path)
-        set_config(conn, "account_id", "acct-1")
-        set_config(conn, "max_open_trades", "5")
+        add_account(conn, "practice", "acct-1", is_practice=True)
+        set_active_account(conn, "practice")
+        _config_all_accounts(conn, "max_open_trades", "5")
         conn.close()
         return path
 
@@ -1381,8 +1386,9 @@ class TestTradeFailureAndRetry:
         monkeypatch.setenv("FRMJ_DB_PATH", str(path))
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
         conn = get_db(path=path)
-        set_config(conn, "account_id", "acct-1")
-        set_config(conn, "max_open_trades", "5")
+        add_account(conn, "practice", "acct-1", is_practice=True)
+        set_active_account(conn, "practice")
+        _config_all_accounts(conn, "max_open_trades", "5")
         conn.close()
         return path
 
@@ -1524,7 +1530,8 @@ class TestTradeResume:
         monkeypatch.setenv("FRMJ_DB_PATH", str(path))
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
         conn = get_db(path=path)
-        set_config(conn, "account_id", "acct-1")
+        add_account(conn, "practice", "acct-1", is_practice=True)
+        set_active_account(conn, "practice")
         # Note: max_open_trades is NOT set — resume skips risk eval.
         conn.close()
         return path
@@ -1680,7 +1687,7 @@ class TestTradeAccountOption:
         add_account(conn, "other", "acct-2", is_practice=True)
         add_account(conn, "my-live", "101-001-live-001", is_practice=False)
         set_active_account(conn, "practice")
-        set_config(conn, "max_open_trades", "5")
+        _config_all_accounts(conn, "max_open_trades", "5")
         conn.close()
         return path
 
@@ -1928,7 +1935,7 @@ class TestTradeMultiAccount:
         add_account(conn, "beta", "beta-acct", is_practice=True)
         add_group_member(conn, "grp", "alpha")
         add_group_member(conn, "grp", "beta")
-        set_config(conn, "max_open_trades", "5")
+        _config_all_accounts(conn, "max_open_trades", "5")
         conn.close()
         return path
 
@@ -1971,6 +1978,79 @@ class TestTradeMultiAccount:
         return runner.invoke(
             app, args or ["trade", "EUR_USD", "long", "--multi", "grp"], input=inputs
         )
+
+    def test_each_account_uses_its_own_risk_config(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """beta's own max_open_trades=1 blocks it even though alpha allows 5."""
+        conn = get_db(path=multi_db)
+        set_account_config(conn, "beta", "max_open_trades", "1")
+        conn.close()
+        fakes = {
+            "alpha": self._fake("alpha-acct"),
+            "beta": FakeFullClient(
+                account_id="beta-acct",
+                open_trades=[_open_trade(instrument="USD_JPY")],
+            ),
+        }
+        result = self._invoke(
+            monkeypatch,
+            fakes,
+            "\n\n",
+            ["trade", "EUR_USD", "long", "--multi", "grp", "--dry-run"],
+        )
+        assert result.exit_code == 1
+        assert "Cannot trade on 'beta'" in result.output + result.stderr
+        assert "Cannot trade on 'alpha'" not in result.output + result.stderr
+
+    def test_missing_config_on_one_account_names_it(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = get_db(path=multi_db)
+        conn.execute("DELETE FROM account_config WHERE account_name = 'beta'")
+        conn.commit()
+        conn.close()
+        fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
+        result = self._invoke(monkeypatch, fakes, "\n\n")
+        assert result.exit_code == 1
+        assert "Error [beta]: max_open_trades is not configured" in (
+            result.output + result.stderr
+        )
+
+    @pytest.mark.parametrize(
+        ("key", "value"), [("atr_period", "20"), ("sl_atr_multiple", "2")]
+    )
+    def test_differing_atr_settings_refused(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch, key: str, value: str
+    ) -> None:
+        """One ATR fetch and TP/SL prompt serve the group, so they must agree."""
+        conn = get_db(path=multi_db)
+        set_account_config(conn, "beta", key, value)
+        conn.close()
+        fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
+        result = self._invoke(monkeypatch, fakes, "\n\n")
+        out = result.output + result.stderr
+        assert result.exit_code == 1
+        assert "different ATR settings" in out
+        assert "alpha  atr_period=14  sl_atr_multiple=1.5" in out
+        assert not fakes["alpha"].order_placed
+        assert not fakes["beta"].order_placed
+
+    def test_matching_atr_settings_allowed(
+        self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = get_db(path=multi_db)
+        _config_all_accounts(conn, "atr_period", "20")
+        conn.close()
+        fakes = {"alpha": self._fake("alpha-acct"), "beta": self._fake("beta-acct")}
+        result = self._invoke(
+            monkeypatch,
+            fakes,
+            "\n\n",
+            ["trade", "EUR_USD", "long", "--multi", "grp", "--dry-run"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "different ATR settings" not in result.output + result.stderr
 
     def test_dry_run_shows_both_accounts(
         self, multi_db: Path, monkeypatch: pytest.MonkeyPatch
@@ -2042,6 +2122,7 @@ class TestTradeMultiAccount:
         conn = get_db(path=multi_db)
         add_account(conn, "gamma", "gamma-acct", is_practice=False)
         add_group_member(conn, "grp", "gamma")
+        set_account_config(conn, "gamma", "max_open_trades", "5")
         conn.close()
         fakes = {
             "alpha": self._fake("alpha-acct"),
@@ -2443,7 +2524,7 @@ class TestTradeMultiOpposite:
         add_account(conn, "beta", "beta-acct", is_practice=True)
         add_group_member(conn, "grp", "alpha")
         add_group_member(conn, "grp", "beta")
-        set_config(conn, "max_open_trades", "5")
+        _config_all_accounts(conn, "max_open_trades", "5")
         conn.close()
         return path
 
@@ -2565,7 +2646,7 @@ class TestTradeMultiTrail:
         add_account(conn, "beta", "beta-acct", is_practice=True)
         add_group_member(conn, "grp", "alpha")
         add_group_member(conn, "grp", "beta")
-        set_config(conn, "max_open_trades", "5")
+        _config_all_accounts(conn, "max_open_trades", "5")
         conn.close()
         return path
 
