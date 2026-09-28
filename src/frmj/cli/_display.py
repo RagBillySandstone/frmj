@@ -14,6 +14,7 @@ from decimal import Decimal
 
 import typer
 
+from frmj.accounts import resolve_account
 from frmj.domain.sizing import PriceQuote
 from frmj.execution.oanda import (
     AccountSummary,
@@ -379,3 +380,26 @@ def _display_account_summary(summary: AccountSummary) -> None:
     for label, value in rows:
         typer.echo(f"  {label:<{label_width}}  {value}")
     typer.echo("")
+
+
+# ---------------------------------------------------------------------------
+# Account header (shared by close, positions, sync, and trail)
+# ---------------------------------------------------------------------------
+
+
+def _display_account_header(conn: sqlite3.Connection, account_name: str | None) -> None:
+    """
+    Print ``Account: NAME  [practice|live, OANDA_ID]`` for the target account.
+
+    *account_name* is the command's ``--account`` override, or ``None`` for the
+    active account. Commands print this before any results or confirmation
+    prompt so their output can't be mistaken for another account's.
+
+    Prints nothing when the account can't be resolved: callers have either
+    already failed on that (``get_client``) or will report it themselves.
+    """
+    record = resolve_account(conn, account_name)
+    if record is None:
+        return
+    acct_type = "practice" if record.is_practice else "live"
+    typer.echo(f"Account: {record.name}  [{acct_type}, {record.oanda_id}]")
