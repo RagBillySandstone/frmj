@@ -10,7 +10,7 @@ from frmj import services
 from frmj.app import get_client, get_db
 from frmj.cli import app
 from frmj.cli._completion import _complete_account_name, _complete_open_instrument
-from frmj.cli._display import _pl_str
+from frmj.cli._display import _display_account_header, _pl_str
 
 # ---------------------------------------------------------------------------
 # close command
@@ -51,10 +51,9 @@ def close(
 
     trades = [t for t in all_trades if t.instrument == instrument]
 
-    # Name the overridden account before listing tickets or asking to close
-    # them, so the confirmation can't be mistaken for the active account's.
-    if account is not None:
-        typer.echo(f"Account: {account}")
+    # Name the account before listing tickets or asking to close them, so the
+    # confirmation can't be mistaken for another account's.
+    _display_account_header(conn, account)
 
     if not trades:
         typer.echo(f"No open positions for {instrument}.")

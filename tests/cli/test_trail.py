@@ -16,6 +16,8 @@ import pytest
 from click.testing import Result
 from typer.testing import CliRunner
 
+from frmj.accounts import add_account
+from frmj.app import get_db
 from frmj.cli import app
 from frmj.cli._completion import _complete_open_trade_id
 from frmj.domain.sizing import InstrumentSpec
@@ -210,6 +212,9 @@ class TestAccountOption:
     def test_uses_named_account_and_shows_it_first(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        conn = get_db(path=db_path)
+        add_account(conn, "other", "acct-2", is_practice=False)
+        conn.close()
         requested: list[str | None] = []
         fake = FakeFullClient(open_trades=[_open_trade()])
 
@@ -223,7 +228,19 @@ class TestAccountOption:
         )
         assert result.exit_code == 0, result.output
         assert requested == ["other"]
-        assert result.output.index("Account: other") < result.output.index("Set the")
+        assert result.output.index("Account: other  [live, acct-2]") < (
+            result.output.index("Set the")
+        )
+
+    def test_header_names_active_account(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without --account the active account is still named first."""
+        fake = FakeFullClient(open_trades=[_open_trade()])
+        result = _invoke(monkeypatch, fake, ["6368", "15"], "n\n")
+        assert result.exit_code == 0, result.output
+        first_line = result.output.splitlines()[0]
+        assert first_line == "Account: practice  [practice, acct-1]"
 
 
 class TestTradeIdCompletion:

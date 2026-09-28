@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md)
 
-`frmj close`, `journal`, `positions`, `stats`, `sync`, `trade`, and `trail` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command without switching the active account; the output then begins by naming it. `journal` and `stats` also accept `--all-accounts` (`-A`) to cover every account at once.
+`frmj close`, `journal`, `positions`, `stats`, `sync`, `trade`, and `trail` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command without switching the active account. `close`, `positions`, `sync`, and `trail` always begin their output by naming the account they act on — `Account: NAME  [practice|live, OANDA_ID]` — whether it's the active one or chosen with `--account`. `journal` and `stats` also accept `--all-accounts` (`-A`) to cover every account at once.
 
 ## `frmj account`
 
@@ -135,7 +135,7 @@ Run `frmj sync` first if the transaction is not yet in the local database. Oanda
 
 ## `frmj positions`
 
-The output begins with the account it covers — `Account: NAME  [practice|live, OANDA_ID]` — whether that's the active account or one chosen with `--account`. Shows all open trades with live P/L, margin, TP/SL levels, any trailing stop, and an estimated daily financing charge (in home currency, colored green/red — not the raw annualized rate), plus an account summary footer. The footer includes Oanda's margin closeout percent; at 100% Oanda begins closing positions.
+Show all open trades with live P/L, margin, TP/SL levels, any trailing stop, and an estimated daily financing charge (in home currency, colored green/red — not the raw annualized rate), plus an account summary footer. The footer includes Oanda's margin closeout percent; at 100% Oanda begins closing positions.
 
 A trailing stop shows its current trigger price, the P/L if it triggers there, and the distance it trails by in price units: `Trail: 1.10150 (+$10.00) [0.00200 behind]`. The trigger moves as the trade goes your way, so a positive figure means the stop has locked in profit.
 

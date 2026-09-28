@@ -86,6 +86,23 @@ class TestSyncCommand:
         assert result.exit_code == 0
         assert "42" in result.output
 
+    def test_sync_header_names_active_account(
+        self,
+        db_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Without --account the output still opens with the active account."""
+        monkeypatch.setattr(
+            "frmj.cli.sync.get_client",
+            lambda conn, account_name=None: FakeClient(
+                account_id="acct-1", responses=[[]]
+            ),
+        )
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 0, result.output
+        first_line = result.output.splitlines()[0]
+        assert first_line == "Account: practice  [practice, acct-1]"
+
     def test_sync_exits_1_on_missing_account(
         self,
         tmp_path: Path,
@@ -124,7 +141,7 @@ class TestSyncAccountOption:
         result = runner.invoke(app, ["sync", "--account", "other"])
         assert result.exit_code == 0, result.output
         assert requested == ["other"]
-        assert "Account: other" in result.output
+        assert "Account: other  [practice, acct-2]" in result.output
 
     def test_csv_files_rows_under_named_account(
         self, two_account_db: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -280,11 +297,15 @@ class TestSyncWatch:
 
         result = runner.invoke(app, ["sync", "--watch"])
         assert result.exit_code == 0
-        # Only the header and "Stopped." line; no transaction rows.
+        # Only the account and "Watching" headers and the "Stopped." line;
+        # no transaction rows.
         body_lines = [
             ln
             for ln in result.output.splitlines()
-            if ln.strip() and "Watching" not in ln and "Stopped" not in ln
+            if ln.strip()
+            and not ln.startswith("Account:")
+            and "Watching" not in ln
+            and "Stopped" not in ln
         ]
         assert body_lines == []
 

@@ -12,7 +12,7 @@ from frmj.accounts import resolve_account
 from frmj.app import get_client, get_db
 from frmj.cli import app
 from frmj.cli._completion import _complete_account_name
-from frmj.cli._display import _display_transaction
+from frmj.cli._display import _display_account_header, _display_transaction
 from frmj.execution.sync import sync_cold, sync_csv, sync_incremental
 
 # ---------------------------------------------------------------------------
@@ -66,16 +66,14 @@ def sync(
         typer.echo("Error: --watch and --cold cannot be used together.", err=True)
         raise typer.Exit(1)
 
-    # Name the overridden account up front so its results can't be mistaken
-    # for the active account's.
-    if account is not None:
-        typer.echo(f"Account: {account}")
-
     if watch:
         _watch_loop(interval, account)
         return
 
     conn = get_db()
+    # Name the account up front so the results can't be mistaken for another
+    # account's. An unknown account prints nothing here and errors below.
+    _display_account_header(conn, account)
     try:
         if csv_path is not None:
             # CSV rows carry no account ID, so they're filed under the target
@@ -126,6 +124,7 @@ def _watch_loop(interval: int, account: str | None = None) -> None:
         conn.close()
         raise typer.Exit(1)
 
+    _display_account_header(conn, account)
     typer.echo(f"Watching for new transactions (every {interval}s) — Ctrl+C to stop.")
 
     try:

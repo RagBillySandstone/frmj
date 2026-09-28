@@ -8,6 +8,7 @@ import pytest
 from click.testing import Result
 from typer.testing import CliRunner
 
+from frmj.accounts import add_account, set_active_account
 from frmj.app import get_db, set_config
 from frmj.cli import app
 from frmj.cli._completion import _complete_open_instrument
@@ -28,6 +29,9 @@ class TestCloseCommand:
         monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
         conn = get_db(path=path)
         set_config(conn, "account_id", "acct-1")
+        add_account(conn, "main", "101-001-1-001", is_practice=True)
+        add_account(conn, "other", "101-001-2-001", is_practice=False)
+        set_active_account(conn, "main")
         conn.close()
         return path
 
@@ -238,7 +242,19 @@ class TestCloseCommand:
         )
         assert result.exit_code == 0, result.output
         assert requested == ["other"]
-        assert result.output.index("Account: other") < result.output.index("Close 1")
+        assert result.output.index(
+            "Account: other  [live, 101-001-2-001]"
+        ) < result.output.index("Close 1")
+
+    def test_header_names_active_account(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without --account the active account is still named first."""
+        fake = FakeFullClient(open_trades=[_open_trade(trade_id="6368")])
+        result = self._invoke(monkeypatch, fake, inputs="n\n")
+        assert result.exit_code == 0, result.output
+        first_line = result.output.splitlines()[0]
+        assert first_line == "Account: main  [practice, 101-001-1-001]"
 
     def test_completion_uses_account_option(
         self, close_db: Path, monkeypatch: pytest.MonkeyPatch

@@ -10,7 +10,11 @@ from frmj import services
 from frmj.app import get_client, get_db
 from frmj.cli import app
 from frmj.cli._completion import _complete_account_name, _complete_open_trade_id
-from frmj.cli._display import _pl_str, _projected_pl_at_price
+from frmj.cli._display import (
+    _display_account_header,
+    _pl_str,
+    _projected_pl_at_price,
+)
 from frmj.domain.pricing import trailing_stop_distance, trailing_trigger_now
 from frmj.domain.sizing import Direction
 from frmj.execution.oanda import OpenTrade
@@ -104,10 +108,9 @@ def trail(
             typer.echo(f"Error: no open trade #{trade_id}.", err=True)
             raise typer.Exit(1)
 
-        # Name an overridden account up front, as `close` does, so the
-        # confirmation can't be mistaken for the active account's.
-        if account is not None:
-            typer.echo(f"Account: {account}")
+        # Name the account up front, as `close` does, so the confirmation
+        # can't be mistaken for another account's.
+        _display_account_header(conn, account)
         typer.echo(
             f"#{trade.trade_id}  {trade.instrument}  {trade.direction}"
             f"  {trade.units:,} units  @ {trade.open_price}"
