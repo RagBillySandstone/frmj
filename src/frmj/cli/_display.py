@@ -255,7 +255,10 @@ def _display_open_trade(
     spec: InstrumentSpec | None,
     financing_rate: FinancingRate | None,
 ) -> None:
-    """Print one open trade in the positions view.
+    """Print one open trade in the positions view, as three lines: the trade
+    header (ID, instrument, direction, size, entry, open time), the money
+    figures (P/L with pips and percent, margin, daily financing), and the
+    exit levels (TP, SL, trailing stop).
 
     ``quote`` is the live quote for the trade's instrument. Its close-side
     price gives the trade's profit in pips and percent, and its
@@ -348,12 +351,14 @@ def _display_open_trade(
         profit_parts.append(_signed_colored(f"{pct:+.2f}%", pct))
         profit_str = f" ({', '.join(profit_parts)})"
 
+    # Three lines per trade: the header above, then the money figures, then
+    # the exit levels — one long line was hard to scan.
     typer.echo(
         f"         P/L: {_pl_str(trade.unrealised_pl)}{profit_str}"
         f"  margin: ${trade.margin_used:,.2f}"
-        f"  {exits_str}"
         f"{financing_str}"
     )
+    typer.echo(f"         {exits_str}")
     typer.echo("")
 
 

@@ -84,6 +84,24 @@ class TestPositionsCommand:
         assert "TP: 1.10550" in result.output
         assert "SL: 1.09750" in result.output
 
+    def test_trade_spans_three_lines(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each trade prints as header, then P/L + margin, then exit levels."""
+        result = self._invoke(
+            monkeypatch,
+            [_open_trade(tp_price="1.10550", sl_price="1.09750")],
+        )
+        assert result.exit_code == 0, result.output
+        lines = result.output.splitlines()
+        # Locate the header by its instrument, then check the next two lines.
+        header_idx = next(i for i, line in enumerate(lines) if "EUR_USD" in line)
+        pl_line, exits_line = lines[header_idx + 1], lines[header_idx + 2]
+        assert "P/L:" in pl_line and "margin:" in pl_line
+        assert "TP:" not in pl_line
+        assert "TP: 1.10550" in exits_line and "SL: 1.09750" in exits_line
+        assert lines[header_idx + 3] == ""
+
     def test_no_tpsl_shows_fallback_text(
         self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
