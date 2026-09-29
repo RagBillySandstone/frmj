@@ -140,6 +140,8 @@ Run `frmj sync` first if the transaction is not yet in the local database. Oanda
 
 Show all open trades with live P/L, margin, TP/SL levels, any trailing stop, and an estimated daily financing charge (in home currency, colored green/red — not the raw annualized rate), plus an account summary footer. The footer includes Oanda's margin closeout percent; at 100% Oanda begins closing positions.
 
+Each trade's P/L is followed by its profit in pips and percent, matching Oanda's web portal Trades list: `P/L: $-1,785.79 (-45.4 pips, -0.32%)`. Both measure the price move from entry to the price the trade would close at now (bid for a long, ask for a short); the percent is that move relative to the entry price, so it doesn't depend on position size.
+
 A trailing stop shows its current trigger price, the P/L if it triggers there, and the distance it trails by in price units: `Trail: 1.10150 (+$10.00) [0.00200 behind]`. The trigger moves as the trade goes your way, so a positive figure means the stop has locked in profit.
 
 Pending entry orders (limit, stop, and market-if-touched — e.g. from `frmj trade --limit`) are listed in their own section below the open trades, with their price, units, time in force, TP/SL and any trailing stop, and the current market price on the side they would fill against (ask for a long, bid for a short). Cancelling a pending order is done in Oanda's own interface for now.
