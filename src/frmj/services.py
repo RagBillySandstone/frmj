@@ -494,7 +494,8 @@ class PositionsView:
     ``positions`` command.
 
     ``quotes`` holds one live quote per instrument with an open trade or a
-    pending order. ``pending_orders`` is ``None`` (with ``pending_error``
+    pending order; ``specs`` holds the instrument spec (for pip size) of each
+    open trade's instrument. ``pending_orders`` is ``None`` (with ``pending_error``
     set) when the pending-orders fetch failed, so the caller can say so
     rather than implying there are none.
     """
@@ -502,6 +503,7 @@ class PositionsView:
     trades: list[OpenTrade]
     summary: AccountSummary
     quotes: dict[str, PriceQuote]
+    specs: dict[str, InstrumentSpec]
     financing_rates: dict[str, FinancingRate]
     pending_orders: list[PendingOrder] | None
     pending_error: str | None
@@ -509,13 +511,14 @@ class PositionsView:
 
 def fetch_positions_view(client: OandaClient) -> PositionsView:
     """Fetch open trades, pending entry orders, account summary, one live
-    quote per instrument, and financing rates for open instruments (so the
-    caller can show projected dollar P/L at each exit level, the estimated
-    daily financing charge for each position, and how far each pending
-    order is from the market).
+    quote per instrument, and instrument specs and financing rates for open
+    instruments (so the caller can show each trade's profit in pips and
+    percent, projected dollar P/L at each exit level, the estimated daily
+    financing charge for each position, and how far each pending order is
+    from the market).
 
-    Everything after the trades and summary is best-effort: a failed quote
-    or financing fetch just means that instrument displays without those
+    Everything after the trades and summary is best-effort: a failed quote,
+    spec, or financing fetch just means that instrument displays without those
     figures, and a failed pending-orders fetch is reported in
     ``pending_error``, rather than failing the whole command.
     """
@@ -542,6 +545,15 @@ def fetch_positions_view(client: OandaClient) -> PositionsView:
         except Exception:
             pass
 
+    # Specs only for open trades: pip size is what turns their price move
+    # into a pip count.
+    specs: dict[str, InstrumentSpec] = {}
+    for instrument in instruments:
+        try:
+            specs[instrument] = client.get_instrument(instrument)
+        except Exception:
+            pass
+
     financing_rates: dict[str, FinancingRate] = {}
     if instruments:
         try:
@@ -554,6 +566,7 @@ def fetch_positions_view(client: OandaClient) -> PositionsView:
         trades=trades,
         summary=summary,
         quotes=quotes,
+        specs=specs,
         financing_rates=financing_rates,
         pending_orders=pending_orders,
         pending_error=pending_error,

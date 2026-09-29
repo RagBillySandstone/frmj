@@ -15,7 +15,7 @@ from frmj.accounts import add_account, set_active_account
 from frmj.app import get_db, set_config
 from frmj.cli import app
 from frmj.cli._display import _daily_financing_home
-from frmj.domain.sizing import PriceQuote
+from frmj.domain.sizing import InstrumentSpec, PriceQuote
 from frmj.execution.oanda import FinancingRate, OpenTrade, PendingOrder
 
 from .conftest import FakeFullClient, _open_trade, _pending_order
@@ -206,6 +206,47 @@ class TestPositionsCommand:
         assert result.exit_code == 0, result.output
         assert "TP: 1.10550" in result.output
         assert "$" not in result.output.split("TP: 1.10550")[1].split("\n")[0]
+        assert "pips" not in result.output
+        assert "%" not in result.output.split("P/L:")[1].split("\n")[0]
+
+    def test_shows_profit_pips_and_pct_for_long(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A LONG measures to the bid, like Oanda's Trades list.
+
+        FakeFullClient quotes bid 1.09990: 6 pips below the 1.10050 entry,
+        and 0.0006 / 1.10050 = -0.0545% → -0.05%.
+        """
+        result = self._invoke(monkeypatch, [_open_trade(direction="LONG")])
+        assert result.exit_code == 0, result.output
+        assert "P/L: +$45.23 (-6.0 pips, -0.05%)" in result.output
+
+    def test_shows_profit_pips_and_pct_for_short(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A SHORT measures to the ask (1.10010): 4 pips in its favor from
+        the 1.10050 entry, and 0.0004 / 1.10050 = +0.0363% → +0.04%."""
+        result = self._invoke(monkeypatch, [_open_trade(direction="SHORT")])
+        assert result.exit_code == 0, result.output
+        assert "(+4.0 pips, +0.04%)" in result.output
+
+    def test_profit_pips_omitted_when_spec_fetch_fails(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without the instrument spec there's no pip size, so only the
+        percent shows."""
+        fake = FakeFullClient(open_trades=[_open_trade(direction="LONG")])
+
+        def _fail(name: str) -> InstrumentSpec:
+            raise RuntimeError("instruments endpoint unavailable")
+
+        fake.get_instrument = _fail  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            "frmj.cli.positions.get_client", lambda conn, account_name=None: fake
+        )
+        result = runner.invoke(app, ["positions"])
+        assert result.exit_code == 0, result.output
+        assert "P/L: +$45.23 (-0.05%)" in result.output
 
     def test_shows_position_count(
         self, pos_db: Path, monkeypatch: pytest.MonkeyPatch

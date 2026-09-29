@@ -15,7 +15,8 @@ from decimal import Decimal
 import typer
 
 from frmj.accounts import resolve_account
-from frmj.domain.sizing import PriceQuote
+from frmj.domain.pricing import pip_size
+from frmj.domain.sizing import InstrumentSpec, PriceQuote
 from frmj.execution.oanda import (
     AccountSummary,
     FinancingRate,
@@ -219,19 +220,52 @@ def _projected_pl_at_price(
     return favor_sign * (exit_price - trade.open_price) * trade.units * quote_to_home
 
 
+def _profit_pips_and_pct(
+    trade: OpenTrade, quote: PriceQuote, spec: InstrumentSpec | None
+) -> tuple[Decimal | None, Decimal]:
+    """Return the trade's open profit as ``(pips, percent)``, as Oanda's web
+    portal shows them in its Trades list.
+
+    Both measure the price move from entry to the price the trade would
+    close at now — the bid for a LONG, the ask for a SHORT — signed so a
+    favorable move is positive. Percent is that move relative to the entry
+    price (e.g. ``Decimal("-0.32")`` for -0.32%), independent of position
+    size. Pips is ``None`` when *spec* (needed for pip size) is unavailable.
+    """
+    # Close side of the book, and the move signed in the trade's favor.
+    close_price = quote.bid if trade.direction == "LONG" else quote.ask
+    favor_sign = Decimal(1) if trade.direction == "LONG" else Decimal(-1)
+    move = favor_sign * (close_price - trade.open_price)
+
+    pips = move / pip_size(spec) if spec is not None else None
+    pct = move / trade.open_price * 100
+    return pips, pct
+
+
+def _signed_colored(text: str, value: Decimal) -> str:
+    """Color *text* green when *value* ≥ 0, red otherwise (as ``_pl_str``)."""
+    color = typer.colors.GREEN if value >= 0 else typer.colors.RED
+    return typer.style(text, fg=color)
+
+
 def _display_open_trade(
     conn: sqlite3.Connection,
     trade: OpenTrade,
-    quote_to_home: Decimal | None,
+    quote: PriceQuote | None,
+    spec: InstrumentSpec | None,
     financing_rate: FinancingRate | None,
 ) -> None:
     """Print one open trade in the positions view.
 
-    ``quote_to_home`` is the live conversion rate for the trade's instrument,
-    used to show the dollar P/L expected if the trade hits TP or SL, and to
-    convert the estimated daily financing charge into home currency. ``None``
-    when the live quote couldn't be fetched, in which case only the raw
-    TP/SL prices are shown and no financing figure is shown.
+    ``quote`` is the live quote for the trade's instrument. Its close-side
+    price gives the trade's profit in pips and percent, and its
+    ``quote_to_home`` rate is used to show the dollar P/L expected if the
+    trade hits TP or SL, and to convert the estimated daily financing charge
+    into home currency. ``None`` when the live quote couldn't be fetched, in
+    which case only the dollar P/L and raw TP/SL prices are shown.
+
+    ``spec`` is the instrument's spec, needed for pip size. ``None`` when it
+    couldn't be fetched, in which case the pip figure is omitted.
 
     ``financing_rate`` is the instrument's current long/short annualized
     financing rate. ``None`` when it couldn't be fetched, in which case no
@@ -248,6 +282,7 @@ def _display_open_trade(
     note_flag = "  [note]" if note_count else ""
 
     time_short = _to_local_str(trade.open_time)
+    quote_to_home = quote.quote_to_home if quote is not None else None
 
     typer.echo(
         f"  #{trade.trade_id}  {trade.instrument}  {trade.direction}"
@@ -300,8 +335,21 @@ def _display_open_trade(
         )
         financing_str = f"  financing: {_pl_str(daily_financing)}/day"
 
+    # Profit in pips and percent, alongside the dollar P/L. Decimal keeps a
+    # negative zero's sign ("-0.0"), so normalize zero before formatting.
+    profit_str = ""
+    if quote is not None:
+        pips, pct = _profit_pips_and_pct(trade, quote, spec)
+        profit_parts: list[str] = []
+        if pips is not None:
+            pips = abs(pips) if pips == 0 else pips
+            profit_parts.append(_signed_colored(f"{pips:+,.1f} pips", pips))
+        pct = abs(pct) if pct == 0 else pct
+        profit_parts.append(_signed_colored(f"{pct:+.2f}%", pct))
+        profit_str = f" ({', '.join(profit_parts)})"
+
     typer.echo(
-        f"         P/L: {_pl_str(trade.unrealised_pl)}"
+        f"         P/L: {_pl_str(trade.unrealised_pl)}{profit_str}"
         f"  margin: ${trade.margin_used:,.2f}"
         f"  {exits_str}"
         f"{financing_str}"

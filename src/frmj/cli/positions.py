@@ -58,11 +58,11 @@ def positions(
         typer.echo(f"{len(view.trades)} open {label}")
         typer.echo("─" * 56)
         for trade in view.trades:
-            quote = view.quotes.get(trade.instrument)
             _display_open_trade(
                 conn,
                 trade,
-                quote.quote_to_home if quote is not None else None,
+                view.quotes.get(trade.instrument),
+                view.specs.get(trade.instrument),
                 view.financing_rates.get(trade.instrument),
             )
         typer.echo("─" * 56)
