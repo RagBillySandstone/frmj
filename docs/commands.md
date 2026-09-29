@@ -138,7 +138,7 @@ Run `frmj sync` first if the transaction is not yet in the local database. Oanda
 
 ## `frmj positions`
 
-Show all open trades with live P/L, margin, TP/SL levels, any trailing stop, and an estimated daily financing charge (in home currency, colored green/red — not the raw annualized rate), plus an account summary footer. The footer includes Oanda's margin closeout percent; at 100% Oanda begins closing positions.
+Show all open trades with live P/L, margin, TP/SL levels, any trailing stop, and an estimated daily financing charge (in home currency, colored green/red — not the raw annualized rate), plus an account summary footer. Each trade takes three lines: the trade itself (ID, instrument, direction, units, entry price, open time), then P/L, margin, and financing, then its TP/SL and trailing stop. The footer includes Oanda's margin closeout percent; at 100% Oanda begins closing positions.
 
 Each trade's P/L is followed by its profit in pips and percent, matching Oanda's web portal Trades list: `P/L: $-1,785.79 (-45.4 pips, -0.32%)`. Both measure the price move from entry to the price the trade would close at now (bid for a long, ask for a short); the percent is that move relative to the entry price, so it doesn't depend on position size.
 
