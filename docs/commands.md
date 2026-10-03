@@ -19,7 +19,7 @@ frmj account set-token practice    # store or update the practice API token
 frmj account set-token live        # store or update the live API token
 ```
 
-API tokens belong to an environment (practice or live), not to one account — see [API tokens](configuration.md#api-tokens).
+The first account added becomes the active account automatically; later ones need `frmj account use NAME`. API tokens belong to an environment (practice or live), not to one account — see [API tokens](configuration.md#api-tokens).
 
 ### `frmj account group`
 
@@ -49,7 +49,7 @@ Shows each ticket's current P/L, prompts for confirmation, then runs an incremen
 ```sh
 frmj config set max_open_trades 6  # set a config key
 frmj config get max_open_trades    # read one key
-frmj config get                    # show all keys + token status
+frmj config get                    # show every key set on the account + token status
 frmj config unset risk_strategy    # remove a key (resets to default)
 frmj config check                  # validate all config, report issues
 frmj config check --connectivity   # also verify credentials against the API
@@ -58,7 +58,7 @@ frmj config set-token              # store the API token for the active account'
 frmj config unset-token            # remove the API token for the active account's environment
 ```
 
-Every account has its own configuration: `set`, `get`, `unset`, and `check` act on the active account, or on another with `--account NAME` (`-a NAME`). Accounts never share values — a key an account hasn't set uses its default, and a newly added account starts with none set. `frmj config get` begins with `Account: NAME  [practice|live, OANDA_ID]`.
+Every account has its own configuration: `set`, `get`, `unset`, and `check` act on the active account, or on another with `--account NAME` (`-a NAME`). Accounts never share values — a key an account hasn't set uses its default, and a newly added account starts with none set. `frmj config get` begins with `Account: NAME  [practice|live, OANDA_ID]` and lists only the keys set on that account. `config set` checks the key name but not the value; `config check` reports values that aren't valid.
 
 The keys and their meanings are listed under [Config table keys](configuration.md#config-table-keys-set-with-frmj-config-set).
 
@@ -91,7 +91,7 @@ Each live fetch also records that day's rates locally, since Oanda's API only ex
 frmj financing --date 2026-04-01
 ```
 
-Only dates `frmj financing` was actually run on have data — there's no way to backfill earlier dates. Use `--quiet` to fetch and record silently (no output on success; errors still print and exit 1) for an unattended daily cron job:
+Snapshots are recorded and looked up per account, using the active account. Only dates `frmj financing` was actually run on have data — there's no way to backfill earlier dates. Use `--quiet` to fetch and record silently (no output on success; errors still print and exit 1) for an unattended daily cron job (it cannot be combined with `--date`):
 
 ```sh
 frmj financing --quiet
@@ -103,7 +103,7 @@ frmj financing --quiet
 
 ## `frmj journal`
 
-Display recent transactions with any attached notes and tags. Auto-syncs before displaying. Only the active account's transactions are shown unless `--account NAME` or `--all-accounts` is given (not both); with no active account configured, every account is shown.
+Display recent transactions with any attached notes and tags. Auto-syncs before displaying: the account given with `--account`, otherwise the active account — with `--all-accounts`, other accounts are not synced. If the sync fails, a warning is printed and the local data is shown anyway. Only the active account's transactions are shown unless `--account NAME` or `--all-accounts` is given (not both); with no active account configured, every account is shown.
 
 ```sh
 frmj journal                          # last 20 transactions
@@ -138,7 +138,7 @@ Run `frmj sync` first if the transaction is not yet in the local database. Oanda
 
 ## `frmj positions`
 
-Show all open trades with live P/L, margin, TP/SL levels, any trailing stop, and an estimated daily financing charge (in home currency, colored green/red — not the raw annualized rate), plus an account summary footer. Each trade takes three lines: the trade itself (ID, instrument, direction, units, entry price, open time), then P/L, margin, and financing, then its TP/SL and trailing stop. The footer includes Oanda's margin closeout percent; at 100% Oanda begins closing positions.
+Show all open trades with live P/L, margin, TP/SL levels, any trailing stop, and an estimated daily financing charge (in home currency, colored green/red — not the raw annualized rate), plus an account summary footer. Each trade takes three lines: the trade itself (ID, instrument, direction, units, entry price, open time), then P/L, margin, and financing, then its TP/SL and trailing stop. The footer includes Oanda's margin closeout percent; at 100% Oanda begins closing positions. Trades and pending orders that have notes in the local journal are flagged `[note]`.
 
 Each trade's P/L is followed by its profit in pips and percent, matching Oanda's web portal Trades list: `P/L: $-1,785.79 (-45.4 pips, -0.32%)`. Both measure the price move from entry to the price the trade would close at now (bid for a long, ask for a short); the percent is that move relative to the entry price, so it doesn't depend on position size.
 
@@ -152,7 +152,7 @@ frmj positions
 
 ## `frmj stats`
 
-Show trade performance statistics from the local journal. Auto-syncs before displaying. Only the active account's trades are counted unless `--account NAME` or `--all-accounts` is given (not both); with no active account configured, every account is combined. The report begins with `Account: NAME` or `Accounts: all` so combined figures can't be mistaken for one account's.
+Show trade performance statistics from the local journal. Auto-syncs before displaying, the same way as [`journal`](#frmj-journal). Only the active account's trades are counted unless `--account NAME` or `--all-accounts` is given (not both); with no active account configured, every account is combined. The report begins with `Account: NAME` or `Accounts: all` so combined figures can't be mistaken for one account's.
 
 ```sh
 frmj stats                    # active account
@@ -171,7 +171,7 @@ Pull transactions from Oanda into the local database.
 ```sh
 frmj sync               # incremental (only new transactions since last sync)
 frmj sync --cold        # full history re-fetch (safe to re-run; duplicates are skipped)
-frmj sync --watch       # poll for new transactions continuously (Ctrl+C to stop)
+frmj sync --watch       # poll for new transactions continuously (Ctrl+C to stop; not with --cold)
 frmj sync --watch --interval 30   # poll every 30 seconds (default: 60)
 frmj sync --csv history.csv       # import an Oanda Hub CSV export instead of hitting the API
 frmj sync --account funded        # sync a non-active account
