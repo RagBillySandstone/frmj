@@ -103,7 +103,7 @@ frmj financing --quiet
 
 ## `frmj journal`
 
-Display recent transactions with any attached notes and tags. Auto-syncs before displaying: the account given with `--account`, otherwise the active account — with `--all-accounts`, other accounts are not synced. If the sync fails, a warning is printed and the local data is shown anyway. Only the active account's transactions are shown unless `--account NAME` or `--all-accounts` is given (not both); with no active account configured, every account is shown.
+Display recent transactions with any attached notes and tags. Auto-syncs before displaying: the account given with `--account`, otherwise the active account; with `--all-accounts` (or no active account), every configured account is synced, each line naming its account. If an account's sync fails, a warning is printed and its local data is shown anyway. Only the active account's transactions are shown unless `--account NAME` or `--all-accounts` is given (not both); with no active account configured, every account is shown.
 
 ```sh
 frmj journal                          # last 20 transactions
