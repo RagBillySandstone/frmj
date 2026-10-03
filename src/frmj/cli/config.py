@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from decimal import Decimal
+from typing import Any
 
 import typer
 
@@ -61,8 +62,13 @@ def _complete_config_value(ctx: typer.Context, incomplete: str) -> list[str]:
     return [v for v in choices if v.startswith(incomplete.lower())]
 
 
-def _account_option() -> typer.models.OptionInfo:
-    """The ``--account NAME`` option shared by set/get/unset/check."""
+def _account_option() -> Any:
+    """The ``--account NAME`` option shared by set/get/unset/check.
+
+    Returns ``Any``, matching ``typer.Option`` itself: the result is used as a
+    parameter default (``account: str | None = _account_option()``), and
+    annotating it as ``OptionInfo`` makes mypy reject that default.
+    """
     return typer.Option(
         None,
         "--account",
