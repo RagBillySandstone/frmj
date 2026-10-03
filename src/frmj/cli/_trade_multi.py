@@ -17,7 +17,6 @@ import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal
 
-import httpx
 import typer
 
 from frmj import services
@@ -420,6 +419,10 @@ def _trade_multi_account(
         )
         conn.close()
         raise typer.Exit(1)
+
+    # httpx is imported lazily to keep CLI startup fast; it's only needed here
+    # to tell a timeout (order may have filled) apart from other errors.
+    import httpx
 
     # --- Place orders, one account at a time ------------------------------------
     # A failure on one account does not roll back accounts that already

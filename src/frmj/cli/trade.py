@@ -5,7 +5,6 @@ from __future__ import annotations
 import sqlite3
 from decimal import Decimal
 
-import httpx
 import typer
 
 from frmj import services
@@ -630,6 +629,10 @@ def trade(
             )
             conn.close()
             raise typer.Exit(1)
+
+    # httpx is imported lazily to keep CLI startup fast; it's only needed here
+    # to tell a timeout (order may have filled) apart from other errors.
+    import httpx
 
     # --- Place order with retry loop -----------------------------------------
     # Exactly one of these is set once the loop exits: a market order yields

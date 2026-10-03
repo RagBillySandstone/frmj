@@ -50,8 +50,6 @@ import json
 from decimal import Decimal
 from typing import Any, Protocol
 
-import httpx
-
 from frmj.domain.pricing import Candle
 from frmj.domain.sizing import InstrumentSpec, PriceQuote
 
@@ -167,6 +165,10 @@ class OandaClient:
         account_id: str,
         practice: bool = True,
     ) -> None:
+        # httpx is imported here rather than at module level: it costs ~50ms
+        # to import, and commands that never build a client shouldn't pay it.
+        import httpx
+
         self.account_id = account_id
         self._base_url = PRACTICE_BASE_URL if practice else LIVE_BASE_URL
         self._http = httpx.Client(
@@ -684,6 +686,8 @@ class OandaClient:
         Oanda knows about, then calls the pure conversion helper.  Raises
         ``ValueError`` when neither pair is available on this account.
         """
+        import httpx  # lazy: see OandaClient.__init__
+
         if currency == home:
             return Decimal("1")
         direct = f"{currency}_{home}"
