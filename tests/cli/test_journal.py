@@ -995,6 +995,74 @@ class TestJournalAccountScope:
         assert result.exit_code == 0, result.output
         assert requested == ["other"]
 
+    def test_default_syncs_only_active_account(
+        self, scope_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without --all-accounts, only the active account is synced."""
+        requested: list[str | None] = []
+
+        def _get_client(conn: object, account_name: str | None = None) -> object:
+            requested.append(account_name)
+            return FakeClient(account_id="acct-1", responses=[[]])
+
+        monkeypatch.setattr("frmj.cli.journal.get_client", _get_client)
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        assert requested == [None]
+
+    def test_all_accounts_syncs_every_account(
+        self, scope_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--all-accounts syncs each configured account, not just the active one."""
+        requested: list[str | None] = []
+
+        def _get_client(conn: object, account_name: str | None = None) -> object:
+            requested.append(account_name)
+            account_id = "acct-2" if account_name == "other" else "acct-1"
+            return FakeClient(account_id=account_id, responses=[[]])
+
+        monkeypatch.setattr("frmj.cli.journal.get_client", _get_client)
+        result = runner.invoke(app, ["journal", "--all-accounts"])
+        assert result.exit_code == 0, result.output
+        assert requested == ["main", "other"]
+
+    def test_no_active_account_syncs_every_account(
+        self, scope_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With no active account the report covers everything, so syncs everything."""
+        conn = get_db(path=scope_db)
+        conn.execute("DELETE FROM config WHERE key = 'active_account'")
+        conn.commit()
+        conn.close()
+        requested: list[str | None] = []
+
+        def _get_client(conn: object, account_name: str | None = None) -> object:
+            requested.append(account_name)
+            return FakeClient(account_id="acct-1", responses=[[]])
+
+        monkeypatch.setattr("frmj.cli.journal.get_client", _get_client)
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        assert requested == ["main", "other"]
+
+    def test_all_accounts_sync_labels_lines_and_survives_failure(
+        self, scope_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One account failing to sync is reported by name; the others still
+        sync, and each ingest line names its account."""
+
+        def _get_client(conn: object, account_name: str | None = None) -> object:
+            if account_name == "main":
+                raise RuntimeError("No API token found for the practice environment.")
+            return FakeClient(account_id="acct-2", responses=[[_row("900", "acct-2")]])
+
+        monkeypatch.setattr("frmj.cli.journal.get_client", _get_client)
+        result = runner.invoke(app, ["journal", "--all-accounts"])
+        assert result.exit_code == 0, result.output
+        output = result.output + result.stderr
+        assert "[sync] Warning [main]: No API token found" in output
+        assert "[sync] other: +1 transactions" in output
+
     def test_account_option_works_without_active_account(self, scope_db: Path) -> None:
         conn = get_db(path=scope_db)
         conn.execute("DELETE FROM config WHERE key = 'active_account'")

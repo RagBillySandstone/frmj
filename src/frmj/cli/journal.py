@@ -15,7 +15,7 @@ from frmj.cli._completion import (
     _complete_txn_type,
 )
 from frmj.cli._display import _display_transaction
-from frmj.execution.sync import sync_incremental
+from frmj.cli.sync import _auto_sync, _report_sync_targets
 
 # ---------------------------------------------------------------------------
 # Tag helpers (shared by the tag command and trade's post-fill tag prompt)
@@ -295,15 +295,10 @@ def journal(
         raise typer.Exit(1)
 
     # Auto-sync: best-effort; journal display proceeds even if sync fails.
-    try:
-        client = get_client(conn, account_name)
-        sync_result = sync_incremental(conn, client)
-        if sync_result.rows_ingested:
-            typer.echo(f"[sync] +{sync_result.rows_ingested} transactions")
-    except RuntimeError as exc:
-        typer.echo(f"[sync] Warning: {exc}", err=True)
-    except Exception as exc:
-        typer.echo(f"[sync] Warning: sync failed — {exc}", err=True)
+    # A view of every account syncs every account, so none is shown stale.
+    _auto_sync(
+        conn, _report_sync_targets(conn, account_name, account is None), get_client
+    )
 
     try:
         where: list[str] = []

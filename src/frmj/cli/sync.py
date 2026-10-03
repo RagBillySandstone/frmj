@@ -2,18 +2,78 @@
 
 from __future__ import annotations
 
+import sqlite3
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
 
-from frmj.accounts import resolve_account
+from frmj.accounts import list_accounts, resolve_account
 from frmj.app import get_client, get_db
 from frmj.cli import app
 from frmj.cli._completion import _complete_account_name
 from frmj.cli._display import _display_account_header, _display_transaction
+from frmj.execution.oanda import ClientProtocol
 from frmj.execution.sync import sync_cold, sync_csv, sync_incremental
+
+# ---------------------------------------------------------------------------
+# Auto-sync shared by the local-journal reports (journal, stats)
+# ---------------------------------------------------------------------------
+
+
+def _auto_sync(
+    conn: sqlite3.Connection,
+    account_names: list[str | None],
+    client_factory: Callable[[sqlite3.Connection, str | None], ClientProtocol],
+) -> None:
+    """
+    Best-effort incremental sync of each account in *account_names* before a
+    report is read from the local database.
+
+    Each entry is passed to *client_factory* as the ``--account`` override,
+    so ``None`` means the active account.  Callers pass their module's
+    ``get_client`` so tests can swap it per command.
+
+    A failure (no token, network error, ...) is printed as a warning and the
+    remaining accounts are still synced: the report then shows whatever was
+    already stored locally.  When more than one account is synced, every
+    line names the account it is about.
+    """
+    labelled = len(account_names) > 1
+    for name in account_names:
+        # " [name]" / " name:" fragments only when several accounts are synced,
+        # keeping the single-account output unchanged.
+        tag = f" [{name}]" if labelled else ""
+        prefix = f" {name}:" if labelled else ""
+        try:
+            client = client_factory(conn, name)
+            result = sync_incremental(conn, client)
+            if result.rows_ingested:
+                typer.echo(f"[sync]{prefix} +{result.rows_ingested} transactions")
+        except RuntimeError as exc:
+            typer.echo(f"[sync] Warning{tag}: {exc}", err=True)
+        except Exception as exc:
+            typer.echo(f"[sync] Warning{tag}: sync failed — {exc}", err=True)
+
+
+def _report_sync_targets(
+    conn: sqlite3.Connection, account_name: str | None, covers_all: bool
+) -> list[str | None]:
+    """
+    Return the accounts a journal/stats report should auto-sync.
+
+    A report that covers every account (*covers_all*: ``--all-accounts``, or
+    no active account to scope to) syncs every configured account, so none
+    is shown stale.  Otherwise only *account_name* (``None`` = the active
+    account) is synced.  With no accounts configured at all, ``[None]`` lets
+    the client factory report the missing account as a warning.
+    """
+    if covers_all:
+        return [rec.name for rec in list_accounts(conn)] or [None]
+    return [account_name]
+
 
 # ---------------------------------------------------------------------------
 # sync command

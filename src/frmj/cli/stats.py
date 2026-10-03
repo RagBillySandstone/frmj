@@ -13,6 +13,7 @@ from frmj.app import get_client, get_db
 from frmj.cli import app
 from frmj.cli._completion import _complete_account_name
 from frmj.cli._display import _color_pl_padded, _pl_visible_width
+from frmj.cli.sync import _auto_sync, _report_sync_targets
 from frmj.domain.analytics import (
     ClosedTrade,
     DirectionStats,
@@ -23,7 +24,6 @@ from frmj.domain.analytics import (
     pl_by_instrument_direction,
     pl_by_weekday,
 )
-from frmj.execution.sync import sync_incremental
 
 # ---------------------------------------------------------------------------
 # stats command
@@ -78,15 +78,11 @@ def stats(
         conn.close()
         raise typer.Exit(1)
 
-    try:
-        client = get_client(conn, account_name)
-        sync_result = sync_incremental(conn, client)
-        if sync_result.rows_ingested:
-            typer.echo(f"[sync] +{sync_result.rows_ingested} transactions")
-    except RuntimeError as exc:
-        typer.echo(f"[sync] Warning: {exc}", err=True)
-    except Exception as exc:
-        typer.echo(f"[sync] Warning: sync failed — {exc}", err=True)
+    # Auto-sync: best-effort; stats are shown even if sync fails.
+    # A view of every account syncs every account, so none is shown stale.
+    _auto_sync(
+        conn, _report_sync_targets(conn, account_name, account is None), get_client
+    )
 
     # Every query below is limited to the resolved account, or unfiltered
     # when combining all accounts.  Each query aliases the transactions
