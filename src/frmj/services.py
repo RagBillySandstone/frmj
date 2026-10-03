@@ -5,23 +5,21 @@ front ends).
 This module contains no Typer dependency and performs no terminal I/O — it
 only fetches data from ``OandaClient``, calls the domain layer, and writes to
 the local database. Interactive parts of a flow (prompting for TP/SL,
-confirming an order, formatting output for the terminal) stay in ``cli.py``;
-that module calls into the functions here for the parts of a flow that don't
-require user interaction.
+confirming an order, formatting output for the terminal) stay in the
+``frmj.cli`` package, which calls into the functions here for the parts of a
+flow that don't require user interaction.
 
-This is the split described in TODO item 6 ("Service layer extraction"):
 ``fetch_instrument_context``/``fetch_account_context`` + ``plan_account_sizing``
 cover the market-data and risk-check steps of the trade flow,
 ``execute_post_fill`` covers the TP/SL-attach + sync + persist steps after an
-order is placed (``execute_post_limit`` is its limit-order counterpart), and ``fetch_positions_view`` / ``execute_close`` /
-``execute_trail`` cover the ``positions``, ``close``, and ``trail`` commands
-respectively. Order placement itself
-(with its retry/save/abort prompt) stays in ``cli.py`` because the retry
-decision is inherently interactive.
+order is placed (``execute_post_limit`` is its limit-order counterpart), and
+``fetch_positions_view`` / ``execute_close`` / ``execute_trail`` cover the
+``positions``, ``close``, and ``trail`` commands respectively. Order placement
+itself (with its retry/save/abort prompt) stays in ``cli/trade.py`` and
+``cli/_trade_multi.py`` because the retry decision is inherently interactive.
 
-``plan_account_sizing`` is also the shared per-account planning step
-described in TODO item 9 ("Unify single- and multi-account trade planning"):
-the single-account ``trade()`` command calls it once, and
+``plan_account_sizing`` is the shared per-account planning step: the
+single-account ``trade()`` command calls it once, and
 ``_trade_multi_account()`` calls it once per group member, each with its own
 ``AccountContext`` but the same shared ``InstrumentContext``.
 """
