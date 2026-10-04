@@ -28,6 +28,89 @@ src/frmj/
     └── schema.py       # SQLite DDL and ensure_schema()
 ```
 
+## Components and dependencies
+
+How the modules above depend on each other and on the outside world. The arrows were generated from the actual `import` statements in `src/frmj`; an arrow means "imports" (or, for the external stores, "reads/writes").
+
+```mermaid
+flowchart TB
+    user([Trader at terminal])
+
+    subgraph CLI["Interface layer"]
+        cli["cli/<br/>Typer commands, prompts, output"]
+    end
+
+    subgraph APP["Application layer"]
+        services["services.py<br/>multi-step flows"]
+        app["app.py<br/>wiring: DB, client, config, tokens"]
+        accounts["accounts.py<br/>account profiles + config CRUD"]
+    end
+
+    subgraph EXEC["Execution layer"]
+        oanda["execution/oanda/<br/>OandaClient, parsing, models"]
+        sync["execution/sync.py<br/>ingest into ledger"]
+        csvimp["execution/csv_import.py<br/>Oanda Hub CSV parser"]
+    end
+
+    subgraph DOMAIN["Domain layer: pure, no I/O"]
+        risk["risk.py"]
+        sizing["sizing.py"]
+        pricing["pricing.py"]
+        analytics["analytics.py"]
+    end
+
+    persistence["persistence/schema.py<br/>DDL + migrations"]
+
+    subgraph EXT["External"]
+        api[("Oanda v20 REST API")]
+        db[("SQLite database")]
+        keychain[("OS keychain")]
+        files[("Files: saved_plan.json,<br/>export output, Hub CSV")]
+    end
+
+    user --> cli
+    cli --> services
+    cli --> app
+    cli --> accounts
+    cli --> sync
+    cli --> oanda
+    cli --> risk & sizing & pricing & analytics
+
+    services --> oanda
+    services --> sync
+    services --> risk & sizing & pricing
+
+    app --> accounts
+    app --> persistence
+    app --> oanda
+    app --> risk
+
+    sync --> oanda
+    sync --> csvimp
+    csvimp --> oanda
+    oanda --> sizing & pricing
+    risk --> sizing
+    pricing --> sizing
+
+    oanda -- httpx --> api
+    app -- keyring --> keychain
+    app --> files
+    cli -- "export --output" --> files
+    csvimp -- "sync --csv" --> files
+    persistence --> db
+    app --> db
+    accounts --> db
+    sync --> db
+    services --> db
+    cli -. "direct SQL:<br/>journal, stats, export, note, tag" .-> db
+```
+
+- **Dependencies point inward, with no cycles.** The domain layer imports only itself, and nothing outside `cli/` imports `cli/`. `services.py` does not import `app.py`: it is handed an open connection and client, which is what keeps it free of Typer and reusable from another front end.
+- **`sizing.py` is the core.** `risk.py`, `pricing.py`, and the Oanda models all import it for `InstrumentSpec`, `PriceQuote`, and `Direction`.
+- **Execution depends on domain, not the reverse.** `OandaClient` returns domain types (`InstrumentSpec`, `PriceQuote`, `Candle`), so API data becomes domain data at the edge.
+- **The reporting commands bypass `services.py`.** `journal`, `stats`, `export`, `note`, and `tag` run their SQL directly in `cli/` (the dotted arrow), whereas the trade, positions, close, and trail flows go through `services.py`. A second front end would have to duplicate those queries.
+- **External access is concentrated.** Only `execution/oanda` touches the network and only `app.py` touches the keychain. The database is shared: several components issue SQL against the schema defined in `persistence/`.
+
 ## Layer separation
 
 The four domain modules (`risk`, `sizing`, `pricing`, `analytics`) are **pure functions with no I/O**. They accept data objects and return data objects. No database, no HTTP, no environment variables, no clocks. This makes them trivially testable and reusable from any future interface (GUI, REST API, back-testing harness).
