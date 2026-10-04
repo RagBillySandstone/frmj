@@ -268,7 +268,7 @@ def _save_trade_plan(
     trail_pips: Decimal | None,
     atr_pips: Decimal | None = None,
     sl_atr_multiple: Decimal | None = None,
-) -> None:
+) -> bool:
     """Persist the intended TP/SL/trailing stop for a fill transaction if any
     was set, along with the daily ATR at the time and the ATR multiple the
     stop-loss came from (each ``None`` when not applicable).
@@ -277,31 +277,46 @@ def _save_trade_plan(
     LIMIT_ORDER transaction that created it; sync moves the plan to the
     ORDER_FILL once the order fills.
 
-    Silent no-op when no exit was specified (the ATR alone is not a plan),
-    or when the fill
-    transaction is not yet in the local DB (post-fill sync may have failed).
-    Uses INSERT OR IGNORE so a duplicate call (e.g. from a retry) is harmless.
+    When the transaction isn't in the local DB yet (the post-order sync
+    failed), the plan is kept in ``deferred_trade_plans`` instead, and the
+    next sync that ingests the transaction attaches it. Returns ``True`` in
+    that case so the caller can say so; ``False`` otherwise.
+
+    No-op when no exit was specified (the ATR alone is not a plan). Uses
+    INSERT OR IGNORE so a duplicate call (e.g. from a retry) is harmless.
     """
     if tp_price is None and sl_price is None and trail_pips is None:
-        return
+        return False
+
+    # Decimal -> TEXT, keeping NULL for anything not set.
+    values = tuple(
+        str(v) if v is not None else None
+        for v in (tp_price, sl_price, trail_pips, atr_pips, sl_atr_multiple)
+    )
     row = conn.execute(
         "SELECT id FROM transactions WHERE oanda_id = ? AND account_id = ?",
         (fill_oanda_id, account_id),
     ).fetchone()
+
+    # Not synced yet: park the plan, keyed by the Oanda IDs, for sync to pick up.
     if not row:
-        return
-    tp_str = str(tp_price) if tp_price is not None else None
-    sl_str = str(sl_price) if sl_price is not None else None
-    trail_str = str(trail_pips) if trail_pips is not None else None
-    atr_str = str(atr_pips) if atr_pips is not None else None
-    multiple_str = str(sl_atr_multiple) if sl_atr_multiple is not None else None
+        conn.execute(
+            "INSERT OR IGNORE INTO deferred_trade_plans "
+            "(account_id, oanda_id, tp_price, sl_price, trail_pips, atr_pips, "
+            "sl_atr_multiple) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (account_id, fill_oanda_id, *values),
+        )
+        conn.commit()
+        return True
+
     conn.execute(
         "INSERT OR IGNORE INTO trade_plans "
         "(transaction_id, tp_price, sl_price, trail_pips, atr_pips, "
         "sl_atr_multiple) VALUES (?, ?, ?, ?, ?, ?)",
-        (row["id"], tp_str, sl_str, trail_str, atr_str, multiple_str),
+        (row["id"], *values),
     )
     conn.commit()
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,6 +327,9 @@ class PostFillResult:
     CLI's existing warn-and-continue behavior: a failed TP/SL attach or a
     failed post-fill sync should never be treated as the trade itself having
     failed, since the order is already filled.
+
+    ``plan_deferred`` is True when the fill wasn't in the local DB after the
+    sync, so the trade plan was kept for the next sync to attach.
     """
 
     missing_trade_id: bool
@@ -323,6 +341,7 @@ class PostFillResult:
     sync_error: str | None
     trail_transaction_id: str | None = None
     trail_error: str | None = None
+    plan_deferred: bool = False
 
 
 def execute_post_fill(
@@ -390,7 +409,7 @@ def execute_post_fill(
     except Exception as exc:
         sync_error = str(exc)
 
-    _save_trade_plan(
+    plan_deferred = _save_trade_plan(
         conn,
         fill.transaction_id,
         client.account_id,
@@ -411,6 +430,7 @@ def execute_post_fill(
         sync_error=sync_error,
         trail_transaction_id=trail_transaction_id,
         trail_error=trail_error,
+        plan_deferred=plan_deferred,
     )
 
 
@@ -422,12 +442,14 @@ class PostLimitResult:
     trade plan belong to: the ORDER_FILL when the order filled on arrival,
     otherwise the LIMIT_ORDER transaction that created it (whose ID is the
     order ID). As with ``PostFillResult``, a sync failure is reported here
-    rather than raised, since the order itself was accepted.
+    rather than raised, since the order itself was accepted, and
+    ``plan_deferred`` says the trade plan is waiting for the next sync.
     """
 
     journal_oanda_id: str
     sync_rows_ingested: int
     sync_error: str | None
+    plan_deferred: bool = False
 
 
 def execute_post_limit(
@@ -463,7 +485,7 @@ def execute_post_limit(
     except Exception as exc:
         sync_error = str(exc)
 
-    _save_trade_plan(
+    plan_deferred = _save_trade_plan(
         conn,
         journal_oanda_id,
         client.account_id,
@@ -478,6 +500,7 @@ def execute_post_limit(
         journal_oanda_id=journal_oanda_id,
         sync_rows_ingested=sync_rows_ingested,
         sync_error=sync_error,
+        plan_deferred=plan_deferred,
     )
 
 

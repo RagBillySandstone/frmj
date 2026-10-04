@@ -788,6 +788,11 @@ def _report_limit_order(
         typer.echo(
             f"[sync] Warning: post-order sync failed — {post.sync_error}", err=True
         )
+    if post.plan_deferred:
+        typer.echo(
+            "Trade plan kept: it will be attached when the next sync brings in the transaction.",
+            err=True,
+        )
     return post.journal_oanda_id
 
 
@@ -877,6 +882,11 @@ def _report_market_fill(
     if post_fill.sync_error is not None:
         typer.echo(
             f"[sync] Warning: post-fill sync failed — {post_fill.sync_error}", err=True
+        )
+    if post_fill.plan_deferred:
+        typer.echo(
+            "Trade plan kept: it will be attached when the next sync brings in the transaction.",
+            err=True,
         )
 
 

@@ -194,6 +194,28 @@ CREATE INDEX IF NOT EXISTS idx_trade_plans_transaction
 
 
 -- -------------------------------------------------------------------------
+-- Deferred trade plans — plans waiting for their transaction to be synced
+-- -------------------------------------------------------------------------
+-- A trade plan is saved right after the order, against the fill (or a
+-- pending limit order's LIMIT_ORDER transaction). If the sync that should
+-- bring that transaction into the ledger fails, the plan waits here, keyed
+-- by Oanda account + transaction ID, until a later sync ingests the
+-- transaction; sync then moves it into trade_plans and deletes this row.
+-- Same columns as trade_plans; no FK, since the transaction isn't local yet.
+CREATE TABLE IF NOT EXISTS deferred_trade_plans (
+    account_id      TEXT    NOT NULL,
+    oanda_id        TEXT    NOT NULL,
+    tp_price        TEXT,
+    sl_price        TEXT,
+    trail_pips      TEXT,
+    atr_pips        TEXT,
+    sl_atr_multiple TEXT,
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (account_id, oanda_id)
+);
+
+
+-- -------------------------------------------------------------------------
 -- Tags — short labels attachable to transactions for grouping in stats
 -- -------------------------------------------------------------------------
 -- One tag per row; a transaction can have many tags. Tags are stored

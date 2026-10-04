@@ -543,6 +543,12 @@ def _trade_multi_account(
                 f"{post_fill.sync_error}",
                 err=True,
             )
+        if post_fill.plan_deferred:
+            typer.echo(
+                f"[{plan.account.name}] Trade plan kept: it will be attached when "
+                "the next sync brings in the transaction.",
+                err=True,
+            )
         results.append((plan, fill))
 
     # --- Summary -----------------------------------------------------------

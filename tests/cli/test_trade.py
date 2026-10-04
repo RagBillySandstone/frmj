@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from decimal import Decimal
 from pathlib import Path
 
@@ -23,7 +24,14 @@ from frmj.cli import app
 from frmj.domain.sizing import InstrumentSpec
 from frmj.execution.oanda import AccountSummary, FinancingRate, OrderFill
 
-from .conftest import _config_all_accounts, FakeFullClient, _open_trade, _pending_order
+from .conftest import (
+    FakeClient,
+    FakeFullClient,
+    _config_all_accounts,
+    _open_trade,
+    _pending_order,
+    _row,
+)
 
 runner = CliRunner()
 
@@ -700,6 +708,51 @@ class TestTradeErrors:
         )
         assert result.exit_code == 0, result.output
         assert "post-fill sync failed" in result.output + result.stderr
+
+    def test_plan_deferred_when_post_fill_sync_fails_then_attached(
+        self, trade_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed post-fill sync no longer loses the trade plan: it is kept,
+        the user is told, and the next sync attaches it to the fill."""
+        monkeypatch.setattr(
+            "frmj.cli.trade.get_client",
+            lambda conn, account_name=None: FakeFullClient(sync_should_fail=True),
+        )
+        # TP=50, SL=30, confirm=y, note=skip, tags=skip.
+        result = runner.invoke(
+            app, ["trade", "EUR_USD", "long"], input="50\n30\ny\n\n\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "Trade plan kept" in result.output + result.stderr
+
+        conn = sqlite3.connect(str(trade_db))
+        deferred = conn.execute(
+            "SELECT account_id, oanda_id, tp_price, sl_price FROM deferred_trade_plans"
+        ).fetchall()
+        conn.close()
+        assert len(deferred) == 1
+        assert deferred[0][:2] == ("acct-1", "99999")
+
+        # The next sync brings the fill (FakeFullClient's ID 99999) in.
+        monkeypatch.setattr(
+            "frmj.cli.sync.get_client",
+            lambda conn, account_name=None: FakeClient(
+                account_id="acct-1", responses=[[_row("99999")]]
+            ),
+        )
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 0, result.output
+
+        conn = sqlite3.connect(str(trade_db))
+        plan = conn.execute(
+            "SELECT p.tp_price, p.sl_price FROM trade_plans p "
+            "JOIN transactions t ON p.transaction_id = t.id "
+            "WHERE t.oanda_id = '99999'"
+        ).fetchone()
+        left = conn.execute("SELECT COUNT(*) FROM deferred_trade_plans").fetchone()[0]
+        conn.close()
+        assert plan == deferred[0][2:]
+        assert left == 0
 
     def test_note_skipped_when_fill_not_in_db(
         self, trade_db: Path, monkeypatch: pytest.MonkeyPatch

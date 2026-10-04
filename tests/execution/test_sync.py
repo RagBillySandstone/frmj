@@ -605,3 +605,84 @@ class TestSyncCsv:
         assert _read_cursor(db, "acct-1") == "10"
         assert _read_cursor(db, "acct-2") == "10"
         assert _count_transactions(db) == 2
+
+
+# ---------------------------------------------------------------------------
+# Deferred trade plans
+# ---------------------------------------------------------------------------
+
+
+def _defer_plan(
+    conn: sqlite3.Connection, oanda_id: str, account_id: str = "acct-1"
+) -> None:
+    """Park a plan for *oanda_id*, as the trade flow does when its post-order
+    sync fails."""
+    conn.execute(
+        "INSERT INTO deferred_trade_plans "
+        "(account_id, oanda_id, tp_price, sl_price, trail_pips, atr_pips, "
+        "sl_atr_multiple) VALUES (?, ?, '1.1', '1.0', '20', '50', '1.5')",
+        (account_id, oanda_id),
+    )
+    conn.commit()
+
+
+def _deferred_count(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) FROM deferred_trade_plans").fetchone()[0]
+
+
+class TestDeferredTradePlans:
+    """A plan saved before its transaction was synced is attached on ingest."""
+
+    def test_plan_attached_when_transaction_arrives(
+        self, db: sqlite3.Connection
+    ) -> None:
+        _defer_plan(db, "105")
+        sync_incremental(db, FakeClient("acct-1", responses=[[_row("105")]]))
+        assert _journal_owner(db, "trade_plans") == ["105"]
+        plan = db.execute(
+            "SELECT tp_price, sl_price, trail_pips, atr_pips, sl_atr_multiple "
+            "FROM trade_plans"
+        ).fetchone()
+        assert tuple(plan) == ("1.1", "1.0", "20", "50", "1.5")
+        assert _deferred_count(db) == 0
+
+    def test_plan_waits_until_its_transaction_arrives(
+        self, db: sqlite3.Connection
+    ) -> None:
+        _defer_plan(db, "105")
+        sync_incremental(db, FakeClient("acct-1", responses=[[_row("104")]]))
+        assert _journal_owner(db, "trade_plans") == []
+        assert _deferred_count(db) == 1
+
+    def test_same_id_on_other_account_not_attached(
+        self, db: sqlite3.Connection
+    ) -> None:
+        _defer_plan(db, "105", account_id="acct-1")
+        other = FakeClient("acct-2", responses=[[_row("105", account_id="acct-2")]])
+        sync_incremental(db, other)
+        assert _journal_owner(db, "trade_plans") == []
+        assert _deferred_count(db) == 1
+
+    def test_limit_order_and_fill_in_one_batch_end_on_fill(
+        self, db: sqlite3.Connection
+    ) -> None:
+        """A plan deferred on a LIMIT_ORDER reaches the fill even when the
+        order and its fill arrive in the same batch."""
+        _defer_plan(db, "100")
+        batch = [_row("100", type_="LIMIT_ORDER"), _fill("105", "100")]
+        sync_incremental(db, FakeClient("acct-1", responses=[batch]))
+        assert _journal_owner(db, "trade_plans") == ["105"]
+        assert _deferred_count(db) == 0
+
+    def test_existing_plan_is_kept(self, db: sqlite3.Connection) -> None:
+        """Re-syncing a transaction that already has a plan doesn't apply a
+        deferred one over it (duplicates aren't re-ingested anyway)."""
+        sync_incremental(db, FakeClient("acct-1", responses=[[_row("105")]]))
+        db.execute(
+            "INSERT INTO trade_plans (transaction_id, tp_price) VALUES (?, '9.9')",
+            (_txn_id(db, "105"),),
+        )
+        db.commit()
+        _defer_plan(db, "105")
+        sync_cold(db, FakeClient("acct-1", responses=[[_row("105")]]))
+        assert db.execute("SELECT tp_price FROM trade_plans").fetchone()[0] == "9.9"

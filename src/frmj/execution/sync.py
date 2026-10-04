@@ -14,6 +14,9 @@ the persistence schema (``persistence/schema.py``).  It is responsible for:
     We separate each batch into parent-first, children-second before writing.
   * Cursor management — after a successful ingest we write (or advance) the
     ``sync_cursors`` row so the next incremental sync knows where to resume.
+  * Deferred trade plans — a plan ``frmj trade`` couldn't save because its
+    transaction wasn't synced yet is attached when the transaction arrives.
+    See ``_attach_deferred_plan``.
   * Entry-order journal linking — notes, tags, and the trade plan attached
     to a pending entry order (e.g. by ``frmj trade --limit``) move to that
     order's ORDER_FILL when the fill is ingested, since stats and the
@@ -214,6 +217,43 @@ def _move_order_journal_to_fill(
         )
 
 
+def _attach_deferred_plan(
+    conn: sqlite3.Connection,
+    account_id: str,
+    oanda_id: str,
+    transaction_id: int,
+) -> None:
+    """Attach a trade plan that was waiting for this transaction, if any.
+
+    ``frmj trade`` saves its trade plan right after the order, against the
+    fill or LIMIT_ORDER transaction. If the sync that should have brought
+    that transaction in failed, the plan was parked in
+    ``deferred_trade_plans`` (see ``services._save_trade_plan``). Now that
+    the transaction is in the ledger as row *transaction_id*, move the plan
+    into ``trade_plans`` and drop the deferred row.
+
+    Runs inside the caller's batch; does not commit.
+    """
+    columns = "tp_price, sl_price, trail_pips, atr_pips, sl_atr_multiple"
+    plan = conn.execute(
+        f"SELECT {columns} FROM deferred_trade_plans "
+        "WHERE account_id = ? AND oanda_id = ?",
+        (account_id, oanda_id),
+    ).fetchone()
+    if plan is None:
+        return
+    # INSERT OR IGNORE: a plan already saved for this transaction wins.
+    conn.execute(
+        f"INSERT OR IGNORE INTO trade_plans (transaction_id, {columns}) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (transaction_id, *tuple(plan)),
+    )
+    conn.execute(
+        "DELETE FROM deferred_trade_plans WHERE account_id = ? AND oanda_id = ?",
+        (account_id, oanda_id),
+    )
+
+
 def _ingest_rows(
     conn: sqlite3.Connection,
     rows: list[TransactionRow],
@@ -231,10 +271,11 @@ def _ingest_rows(
     Duplicate rows (same ``account_id`` + ``oanda_id``) are skipped via the
     unique index rather than raising — this makes re-sync idempotent.
 
-    Each newly inserted ORDER_FILL then takes over its entry order's
-    journal, if any (``_move_order_journal_to_fill``). This runs after the
-    whole batch is inserted so an order and its fill in the same batch
-    still link.
+    After the whole batch is inserted, each new row picks up a trade plan
+    that was waiting for it (``_attach_deferred_plan``), and then each new
+    ORDER_FILL takes over its entry order's journal, if any
+    (``_move_order_journal_to_fill``). Running these after the inserts, in
+    that order, lets an order and its fill in the same batch still link.
 
     We do NOT commit inside this function.  The caller commits once the whole
     batch is written, giving atomic batch semantics.
@@ -249,7 +290,9 @@ def _ingest_rows(
 
     ingested = 0
     skipped = 0
-    # (row, synthetic id) for each ORDER_FILL inserted in this batch.
+    # (row, synthetic id) for every row, and for each ORDER_FILL, inserted
+    # in this batch.
+    new_rows: list[tuple[TransactionRow, int]] = []
     new_fills: list[tuple[TransactionRow, int]] = []
 
     for row in parents + children:
@@ -280,6 +323,7 @@ def _ingest_rows(
             assert cur.lastrowid is not None
             page_index[row.oanda_id] = cur.lastrowid
             ingested += 1
+            new_rows.append((row, cur.lastrowid))
             if row.type == "ORDER_FILL":
                 new_fills.append((row, cur.lastrowid))
         except sqlite3.IntegrityError:
@@ -287,6 +331,11 @@ def _ingest_rows(
             # previous sync run.  Skip silently; don't update page_index (the
             # existing row's synthetic id is already in the DB if needed).
             skipped += 1
+
+    # Deferred plans first, so a LIMIT_ORDER that gets its plan here can
+    # still hand it on to a fill arriving in this same batch.
+    for new_row, new_id in new_rows:
+        _attach_deferred_plan(conn, new_row.account_id, new_row.oanda_id, new_id)
 
     for fill_row, fill_id in new_fills:
         _move_order_journal_to_fill(

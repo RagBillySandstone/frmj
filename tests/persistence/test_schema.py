@@ -101,6 +101,7 @@ class TestEnsureSchema:
             "sync_cursors",
             "config",
             "trade_plans",
+            "deferred_trade_plans",
         } <= found
 
     def test_creates_all_indexes(self, db: sqlite3.Connection) -> None:
