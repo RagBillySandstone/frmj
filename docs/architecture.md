@@ -44,71 +44,55 @@ flowchart TB
     subgraph APP["Application layer"]
         services["services.py<br/>multi-step flows"]
         queries["queries.py<br/>ledger reads + writes"]
-        app["app.py<br/>wiring: DB, client, config, tokens"]
         accounts["accounts.py<br/>account profiles + config CRUD"]
+        app["app.py<br/>wiring: DB, client, config, tokens"]
     end
 
     subgraph EXEC["Execution layer"]
-        oanda["execution/oanda/<br/>OandaClient, parsing, models"]
         sync["execution/sync.py<br/>ingest into ledger"]
         csvimp["execution/csv_import.py<br/>Oanda Hub CSV parser"]
+        oanda["execution/oanda/<br/>OandaClient, parsing, models"]
     end
 
     subgraph DOMAIN["Domain layer: pure, no I/O"]
         risk["risk.py"]
-        sizing["sizing.py"]
         pricing["pricing.py"]
         analytics["analytics.py"]
+        sizing["sizing.py"]
     end
 
     persistence["persistence/schema.py<br/>DDL + migrations"]
 
     subgraph EXT["External"]
-        api[("Oanda v20 REST API")]
+        api[("Oanda v20 REST API<br/>via httpx")]
         db[("SQLite database")]
-        keychain[("OS keychain")]
+        keychain[("OS keychain<br/>via keyring")]
         files[("Files: saved_plan.json,<br/>export output, Hub CSV")]
     end
 
     user --> cli
-    cli --> services
-    cli --> queries
-    cli --> app
-    cli --> accounts
-    cli --> sync
-    cli --> oanda
-    cli --> risk & sizing & pricing & analytics
+    cli --> services & queries & accounts & app
+    cli --> sync & oanda
+    cli --> DOMAIN
 
-    services --> oanda
-    services --> sync
+    services --> sync & oanda
     services --> risk & sizing & pricing
-
     queries --> oanda
+    app --> accounts & persistence & oanda & risk
 
-    app --> accounts
-    app --> persistence
-    app --> oanda
-    app --> risk
-
-    sync --> oanda
-    sync --> csvimp
+    sync --> csvimp & oanda
     csvimp --> oanda
     oanda --> sizing & pricing
     risk --> sizing
     pricing --> sizing
 
-    oanda -- httpx --> api
-    app -- keyring --> keychain
-    app --> files
-    cli -- "export --output" --> files
-    csvimp -- "sync --csv" --> files
-    persistence --> db
-    app --> db
-    accounts --> db
-    sync --> db
-    services --> db
-    queries --> db
+    oanda --> api
+    app --> keychain
+    app & cli & csvimp --> files
+    persistence & app & accounts & sync & services & queries --> db
 ```
+
+The CLI imports all four domain modules, drawn as one arrow to the layer. Its file access is `export --output`; `csv_import.py` reads the Hub CSV for `sync --csv`; `app.py` owns `saved_plan.json`.
 
 - **Dependencies point inward, with no cycles.** The domain layer imports only itself, and nothing outside `cli/` imports `cli/`. `services.py` does not import `app.py`: it is handed an open connection and client, which is what keeps it free of Typer and reusable from another front end.
 - **`sizing.py` is the core.** `risk.py`, `pricing.py`, and the Oanda models all import it for `InstrumentSpec`, `PriceQuote`, and `Direction`.
