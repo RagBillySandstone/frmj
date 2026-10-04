@@ -98,5 +98,34 @@ Before sizing a trade, `frmj trade` runs three checks. Each either refuses the t
 - **Scale-in** (`scale_in`) — adding to an instrument that already has an open ticket or pending order is refused with `never` (the default), allowed with a warning printed above the plan with `warn`, or allowed silently with `allow`.
 - **Correlated positions** (`correlation_blocking_mode`) — a trade is *correlated* with an open ticket or pending order on a different instrument when both bet the same way on a shared currency. Long `EUR_USD` and long `EUR_GBP` are both long EUR; long `EUR_USD` and short `USD_JPY` are both short USD. This compares direction only, not position size. With `warning_only` (the default) each overlap is listed and you must answer an extra "Proceed anyway?" prompt; with `hard_block` the trade is refused.
 
-With `trade --multi`, all three checks run separately for each account in the group, each against that account's own settings.
+The checks run in this order, so a trade that breaks more than one rule is told about the most specific one first:
+
+```mermaid
+flowchart TD
+    start([frmj trade]) --> si{"instrument already has an open<br/>ticket or pending order?"}
+    si -- no --> cap
+    si -- yes --> sip{scale_in}
+    sip -- never --> refuse([trade refused])
+    sip -- warn --> w1[/warning above the plan/] --> cap
+    sip -- allow --> cap
+
+    cap{"open trades + pending orders<br/>≥ max_open_trades?"}
+    cap -- no --> size
+    cap -- yes --> bm{blocking_mode}
+    bm -- hard_block --> refuse
+    bm -- warning_only --> w2[/warning above the plan/] --> size
+
+    size["size the trade<br/>(risk_strategy, safety_reserve_pct)"] --> corr
+    corr{"same-way exposure to a shared currency<br/>in another open trade or pending order?"}
+    corr -- no --> plan([plan shown])
+    corr -- yes --> cbm{correlation_blocking_mode}
+    cbm -- hard_block --> refuse
+    cbm -- warning_only --> ask{"overlaps listed:<br/>Proceed anyway?"}
+    ask -- yes --> plan
+    ask -- no --> cancel([cancelled])
+```
+
+At the cap with `warning_only`, `remaining_margin_fraction` sizes the trade as if it were the last one allowed (half of usable margin), since its formula has no meaning past the cap. A sized trade that comes out below the instrument's minimum units is also refused.
+
+With `trade --multi`, all three checks run separately for each account in the group, each against that account's own settings. A refusal on any account stops the whole trade before any order is placed, and the correlation overlaps from every account share one "Proceed anyway?" prompt.
 
