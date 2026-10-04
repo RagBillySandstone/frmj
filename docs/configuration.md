@@ -105,21 +105,21 @@ flowchart TD
     start([frmj trade]) --> si{"instrument already has an open<br/>ticket or pending order?"}
     si -- no --> cap
     si -- yes --> sip{scale_in}
-    sip -- never --> refuse([trade refused])
+    sip -- never --> r1([refused: scale-in])
     sip -- warn --> w1[/warning above the plan/] --> cap
     sip -- allow --> cap
 
     cap{"open trades + pending orders<br/>≥ max_open_trades?"}
     cap -- no --> size
     cap -- yes --> bm{blocking_mode}
-    bm -- hard_block --> refuse
+    bm -- hard_block --> r2([refused: trade cap])
     bm -- warning_only --> w2[/warning above the plan/] --> size
 
     size["size the trade<br/>(risk_strategy, safety_reserve_pct)"] --> corr
     corr{"same-way exposure to a shared currency<br/>in another open trade or pending order?"}
     corr -- no --> plan([plan shown])
     corr -- yes --> cbm{correlation_blocking_mode}
-    cbm -- hard_block --> refuse
+    cbm -- hard_block --> r3([refused: correlation])
     cbm -- warning_only --> ask{"overlaps listed:<br/>Proceed anyway?"}
     ask -- yes --> plan
     ask -- no --> cancel([cancelled])
