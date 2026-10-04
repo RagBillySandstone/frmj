@@ -10,14 +10,13 @@ import pytest
 from click.testing import Result
 from typer.testing import CliRunner
 
+from frmj import queries
 from frmj.app import get_db, set_config
 from frmj.cli import app
 from frmj.cli._completion import _FINANCING_PAIRS, _pair_tier
 from frmj.cli.financing import (
     _fmt_financing_pct,
     _group_financing_rates,
-    _load_financing_snapshot,
-    _record_financing_snapshot,
 )
 from frmj.execution.oanda import FinancingRate
 
@@ -189,7 +188,9 @@ class TestFinancingSnapshotRecording:
         assert result.exit_code == 0, result.output
 
         conn = get_db(path=fin_db)
-        snapshot = _load_financing_snapshot(conn, "acct-1", date.today().isoformat())
+        snapshot = queries.load_financing_snapshot(
+            conn, "acct-1", date.today().isoformat()
+        )
         conn.close()
         assert snapshot == [
             FinancingRate("EUR_USD", Decimal("-0.0049"), Decimal("0.0009"))
@@ -231,7 +232,9 @@ class TestFinancingSnapshotRecording:
 
         conn = get_db(path=fin_db)
         rows = conn.execute("SELECT * FROM financing_rate_snapshots").fetchall()
-        snapshot = _load_financing_snapshot(conn, "acct-1", date.today().isoformat())
+        snapshot = queries.load_financing_snapshot(
+            conn, "acct-1", date.today().isoformat()
+        )
         conn.close()
         assert len(rows) == 1
         assert snapshot == [
@@ -257,7 +260,7 @@ class TestFinancingDateOption:
         self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         conn = get_db(path=fin_db)
-        _record_financing_snapshot(
+        queries.record_financing_snapshot(
             conn,
             "acct-1",
             [FinancingRate("EUR_USD", Decimal("-0.0049"), Decimal("0.0009"))],
@@ -313,7 +316,7 @@ class TestFinancingDateOption:
         """A snapshot recorded under a different account_id is invisible to
         the currently active account."""
         conn = get_db(path=fin_db)
-        _record_financing_snapshot(
+        queries.record_financing_snapshot(
             conn,
             "some-other-account",
             [FinancingRate("EUR_USD", Decimal("-0.0049"), Decimal("0.0009"))],
@@ -367,7 +370,9 @@ class TestFinancingQuietOption:
         runner.invoke(app, ["financing", "--quiet"])
 
         conn = get_db(path=fin_db)
-        snapshot = _load_financing_snapshot(conn, "acct-1", date.today().isoformat())
+        snapshot = queries.load_financing_snapshot(
+            conn, "acct-1", date.today().isoformat()
+        )
         conn.close()
         assert snapshot == [
             FinancingRate("EUR_USD", Decimal("-0.0049"), Decimal("0.0009"))

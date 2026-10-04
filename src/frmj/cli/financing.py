@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import date
 from decimal import Decimal
 
 import typer
 
+from frmj import queries
 from frmj.app import get_client, get_db
 from frmj.cli import app
 from frmj.cli._completion import _FINANCING_PAIRS, _pair_tier
@@ -34,58 +34,6 @@ def _group_financing_rates(
     for rate in sorted(rates, key=lambda r: r.instrument):
         groups[_pair_tier(rate.instrument)].append(rate)
     return groups
-
-
-def _record_financing_snapshot(
-    conn: sqlite3.Connection,
-    account_id: str,
-    rates: list[FinancingRate],
-    rate_date: str,
-) -> None:
-    """Upsert today's fetched *rates* into ``financing_rate_snapshots``.
-
-    Oanda's API exposes only the current rate, so this is the only way
-    ``frmj financing --date`` has anything to look up later. Re-running on
-    the same *rate_date* overwrites the existing rows (latest fetch wins)
-    rather than accumulating duplicates.
-    """
-    conn.executemany(
-        """
-        INSERT OR REPLACE INTO financing_rate_snapshots
-            (account_id, instrument, rate_date, long_rate, short_rate)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        [
-            (account_id, r.instrument, rate_date, str(r.long_rate), str(r.short_rate))
-            for r in rates
-        ],
-    )
-    conn.commit()
-
-
-def _load_financing_snapshot(
-    conn: sqlite3.Connection, account_id: str, rate_date: str
-) -> list[FinancingRate]:
-    """Return the recorded financing-rate snapshot for *account_id* on *rate_date*.
-
-    Empty list if no snapshot was ever captured for that date (e.g. it
-    predates the user's first ``frmj financing`` run, or falls on a date
-    that command was never invoked on).
-    """
-    rows = conn.execute(
-        """
-        SELECT instrument, long_rate, short_rate
-        FROM financing_rate_snapshots
-        WHERE account_id = ? AND rate_date = ?
-        """,
-        (account_id, rate_date),
-    ).fetchall()
-    return [
-        FinancingRate(
-            row["instrument"], Decimal(row["long_rate"]), Decimal(row["short_rate"])
-        )
-        for row in rows
-    ]
 
 
 def _display_financing_rates(
@@ -192,7 +140,7 @@ def financing(
             conn.close()
             raise typer.Exit(1)
 
-        rates = _load_financing_snapshot(conn, client.account_id, date_str)
+        rates = queries.load_financing_snapshot(conn, client.account_id, date_str)
         conn.close()
 
         if not rates:
@@ -217,7 +165,7 @@ def financing(
         raise typer.Exit(1)
 
     if rates:
-        _record_financing_snapshot(
+        queries.record_financing_snapshot(
             conn, client.account_id, rates, date.today().isoformat()
         )
     conn.close()

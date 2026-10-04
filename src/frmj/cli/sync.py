@@ -11,12 +11,18 @@ from pathlib import Path
 import typer
 
 from frmj.accounts import list_accounts, resolve_account
+from frmj import queries
 from frmj.app import get_client, get_db
 from frmj.cli import app
 from frmj.cli._completion import _complete_account_name
 from frmj.cli._display import _display_account_header, _display_transaction
 from frmj.execution.oanda import ClientProtocol
-from frmj.execution.sync import sync_cold, sync_csv, sync_incremental
+from frmj.execution.sync import (
+    _read_cursor,
+    sync_cold,
+    sync_csv,
+    sync_incremental,
+)
 
 # ---------------------------------------------------------------------------
 # Auto-sync shared by the local-journal reports (journal, stats)
@@ -191,11 +197,7 @@ def _watch_loop(interval: int, account: str | None = None) -> None:
         while True:
             now_str = datetime.now(tz=timezone.utc).strftime("%H:%M:%S")
             # Read cursor before sync so we can identify new rows afterwards.
-            cursor_row = conn.execute(
-                "SELECT last_oanda_id FROM sync_cursors WHERE account_id = ?",
-                (client.account_id,),
-            ).fetchone()
-            prev_id: str | None = cursor_row[0] if cursor_row else None
+            prev_id: str | None = _read_cursor(conn, client.account_id)
 
             try:
                 result = sync_incremental(conn, client)
@@ -206,16 +208,9 @@ def _watch_loop(interval: int, account: str | None = None) -> None:
 
             if result.rows_ingested:
                 if prev_id is not None:
-                    new_txns = conn.execute(
-                        """
-                        SELECT id, oanda_id, type, time, raw_json
-                        FROM transactions
-                        WHERE account_id = ?
-                          AND CAST(oanda_id AS INTEGER) > CAST(? AS INTEGER)
-                        ORDER BY time ASC
-                        """,
-                        (client.account_id, prev_id),
-                    ).fetchall()
+                    new_txns = queries.list_transactions_after(
+                        conn, client.account_id, prev_id
+                    )
                     typer.echo(f"[{now_str}] +{result.rows_ingested} new:")
                     for txn in new_txns:
                         _display_transaction(txn)

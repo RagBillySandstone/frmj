@@ -14,6 +14,7 @@ from decimal import Decimal
 
 import typer
 
+from frmj import queries
 from frmj.accounts import resolve_account
 from frmj.domain.pricing import pip_size
 from frmj.domain.sizing import InstrumentSpec, PriceQuote
@@ -274,14 +275,7 @@ def _display_open_trade(
     financing rate. ``None`` when it couldn't be fetched, in which case no
     financing figure is shown.
     """
-    note_count = conn.execute(
-        """
-        SELECT COUNT(*) FROM notes n
-        JOIN transactions t ON n.transaction_id = t.id
-        WHERE t.oanda_id = ?
-        """,
-        (trade.trade_id,),
-    ).fetchone()[0]
+    note_count = queries.count_notes_for_oanda_id(conn, trade.trade_id)
     note_flag = "  [note]" if note_count else ""
 
     time_short = _to_local_str(trade.open_time)
@@ -375,14 +369,7 @@ def _display_pending_order(
     The ``[note]`` flag reflects notes on the order's own transaction (the
     order ID), where ``frmj trade --limit`` puts them until the order fills.
     """
-    note_count = conn.execute(
-        """
-        SELECT COUNT(*) FROM notes n
-        JOIN transactions t ON n.transaction_id = t.id
-        WHERE t.oanda_id = ?
-        """,
-        (order.order_id,),
-    ).fetchone()[0]
+    note_count = queries.count_notes_for_oanda_id(conn, order.order_id)
     note_flag = "  [note]" if note_count else ""
 
     # "MARKET_IF_TOUCHED" reads better as "MARKET IF TOUCHED".

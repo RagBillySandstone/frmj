@@ -20,6 +20,9 @@ look a transaction up by its Oanda ID take the account's Oanda ID too —
 from __future__ import annotations
 
 import sqlite3
+from decimal import Decimal
+
+from frmj.execution.oanda.models import FinancingRate
 
 # ---------------------------------------------------------------------------
 # Transaction lookup
@@ -394,3 +397,101 @@ def list_daily_financing(conn: sqlite3.Connection, account_id: str | None) -> li
         params,
     ).fetchall()
     return [row[0] for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Positions and sync --watch
+# ---------------------------------------------------------------------------
+
+
+def count_notes_for_oanda_id(conn: sqlite3.Connection, oanda_id: str) -> int:
+    """
+    Return how many notes are attached to transactions with *oanda_id*.
+
+    Not scoped to an account: a note on another account's transaction with
+    the same Oanda ID is counted too.
+    """
+    return int(
+        conn.execute(
+            """
+            SELECT COUNT(*) FROM notes n
+            JOIN transactions t ON n.transaction_id = t.id
+            WHERE t.oanda_id = ?
+            """,
+            (oanda_id,),
+        ).fetchone()[0]
+    )
+
+
+def list_transactions_after(
+    conn: sqlite3.Connection, account_id: str, after_oanda_id: str
+) -> list[sqlite3.Row]:
+    """
+    Return *account_id*'s transactions with an Oanda ID numerically greater
+    than *after_oanda_id* (``id``, ``oanda_id``, ``type``, ``time``,
+    ``raw_json``), oldest first: the rows a sync just added after that
+    cursor.
+    """
+    return conn.execute(
+        """
+        SELECT id, oanda_id, type, time, raw_json
+        FROM transactions
+        WHERE account_id = ?
+          AND CAST(oanda_id AS INTEGER) > CAST(? AS INTEGER)
+        ORDER BY time ASC
+        """,
+        (account_id, after_oanda_id),
+    ).fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Financing-rate snapshots (financing)
+# ---------------------------------------------------------------------------
+
+
+def record_financing_snapshot(
+    conn: sqlite3.Connection,
+    account_id: str,
+    rates: list[FinancingRate],
+    rate_date: str,
+) -> None:
+    """
+    Upsert *rates* as *account_id*'s snapshot for *rate_date* in
+    ``financing_rate_snapshots``.
+
+    Oanda's API exposes only the current rate, so these snapshots are the
+    only history ``frmj financing --date`` can show. Re-recording the same
+    date overwrites its rows (latest fetch wins) instead of adding
+    duplicates.
+    """
+    conn.executemany(
+        """
+        INSERT OR REPLACE INTO financing_rate_snapshots
+            (account_id, instrument, rate_date, long_rate, short_rate)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        [
+            (account_id, r.instrument, rate_date, str(r.long_rate), str(r.short_rate))
+            for r in rates
+        ],
+    )
+    conn.commit()
+
+
+def load_financing_snapshot(
+    conn: sqlite3.Connection, account_id: str, rate_date: str
+) -> list[FinancingRate]:
+    """
+    Return *account_id*'s recorded financing-rate snapshot for *rate_date*,
+    or an empty list if none was captured that day (e.g. it predates the
+    first ``frmj financing`` run, or the command wasn't run that day).
+    """
+    rows = conn.execute(
+        """
+        SELECT instrument, long_rate, short_rate
+        FROM financing_rate_snapshots
+        WHERE account_id = ? AND rate_date = ?
+        """,
+        (account_id, rate_date),
+    ).fetchall()
+    return [FinancingRate(row[0], Decimal(row[1]), Decimal(row[2])) for row in rows]
