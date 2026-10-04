@@ -1,7 +1,7 @@
 """
 Sync logic: ingest Oanda transaction rows into the local SQLite database.
 
-This module is the bridge between the Oanda HTTP client (``oanda.py``) and
+This module is the bridge between the Oanda HTTP client (``execution/oanda``) and
 the persistence schema (``persistence/schema.py``).  It is responsible for:
 
   * Pagination-free ingestion — the client already handles pagination and
