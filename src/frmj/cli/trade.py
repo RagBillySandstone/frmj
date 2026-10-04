@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import typer
 
-from frmj import services
+from frmj import queries, services
 from frmj.accounts import (
     is_live_mode,
     list_accounts,
@@ -891,19 +891,12 @@ def _prompt_note_and_tags(
     nothing is saved and the user is told how to add them later.
     """
     # Resolve the transaction's synthetic DB id once; used for note and tags.
-    txn_row = conn.execute(
-        "SELECT id FROM transactions WHERE oanda_id = ? AND account_id = ?",
-        (journal_oanda_id, account_id),
-    ).fetchone()
+    txn_id = queries.get_transaction_id(conn, journal_oanda_id, account_id)
 
     note_text = typer.prompt("Add a note (Enter to skip)", default="").strip()
     if note_text:
-        if txn_row:
-            conn.execute(
-                "INSERT INTO notes (transaction_id, body) VALUES (?, ?)",
-                (txn_row["id"], note_text),
-            )
-            conn.commit()
+        if txn_id is not None:
+            queries.add_note(conn, txn_id, note_text)
             typer.echo("Note saved.")
         else:
             typer.echo(
@@ -913,12 +906,12 @@ def _prompt_note_and_tags(
             )
 
     tags_raw = typer.prompt("Tags (space-separated, Enter to skip)", default="").strip()
-    if tags_raw and txn_row:
-        attached = _attach_tags(conn, txn_row["id"], tags_raw.split())
+    if tags_raw and txn_id is not None:
+        attached = _attach_tags(conn, txn_id, tags_raw.split())
         label = "tag" if attached == 1 else "tags"
         if attached:
             typer.echo(f"{attached} {label} saved.")
-    elif tags_raw and not txn_row:
+    elif tags_raw and txn_id is None:
         typer.echo(
             "Tags not saved: transaction not yet in local DB. "
             "Run 'frmj sync' then add tags with 'frmj tag'.",

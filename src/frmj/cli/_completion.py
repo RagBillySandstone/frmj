@@ -11,6 +11,7 @@ from __future__ import annotations
 import typer
 
 from frmj.accounts import list_accounts, list_group_members, list_group_names
+from frmj import queries
 from frmj.app import get_client, get_db
 
 # ---------------------------------------------------------------------------
@@ -216,9 +217,7 @@ def _complete_txn_type(incomplete: str) -> list[str]:
     """Return distinct transaction types already seen in the local DB."""
     conn = get_db()
     try:
-        rows = conn.execute(
-            "SELECT DISTINCT type FROM transactions ORDER BY type"
-        ).fetchall()
+        types = queries.list_transaction_types(conn)
     finally:
         conn.close()
-    return [r[0] for r in rows if r[0].startswith(incomplete.upper())]
+    return [t for t in types if t.startswith(incomplete.upper())]

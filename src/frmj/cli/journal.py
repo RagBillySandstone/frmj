@@ -7,6 +7,7 @@ import sqlite3
 import typer
 
 from frmj.accounts import get_active_account, list_accounts, resolve_account
+from frmj import queries
 from frmj.app import get_client, get_db
 from frmj.cli import app
 from frmj.cli._completion import (
@@ -49,7 +50,8 @@ def _attach_tags(
     Returns the count of tags actually inserted (duplicates and invalids not
     counted).  Uses INSERT OR IGNORE so idempotent re-tagging is harmless.
     """
-    attached = 0
+    # Validate and normalise first, reporting each rejected tag.
+    valid: list[str] = []
     for raw in raw_tags:
         t = _validate_tag(raw)
         if t is None:
@@ -59,17 +61,8 @@ def _attach_tags(
                 err=True,
             )
             continue
-        try:
-            conn.execute(
-                "INSERT OR IGNORE INTO tags (transaction_id, tag) VALUES (?, ?)",
-                (transaction_id, t),
-            )
-            if conn.execute("SELECT changes()").fetchone()[0]:
-                attached += 1
-        except Exception:
-            pass
-    conn.commit()
-    return attached
+        valid.append(t)
+    return queries.add_tags(conn, transaction_id, valid)
 
 
 def _complete_oanda_id(incomplete: str) -> list[str]:
@@ -83,28 +76,21 @@ def _complete_oanda_id(incomplete: str) -> list[str]:
     try:
         # Match _resolve_transaction: only suggest the active account's IDs.
         account = get_active_account(conn)
-        account_sql = "AND account_id = ? " if account is not None else ""
-        params: list[str] = [f"{incomplete}%"]
-        if account is not None:
-            params.append(account.oanda_id)
-        rows = conn.execute(
-            "SELECT DISTINCT oanda_id FROM transactions WHERE oanda_id LIKE ? "
-            f"{account_sql}ORDER BY CAST(oanda_id AS INTEGER) DESC LIMIT 50",
-            params,
-        ).fetchall()
+        return queries.list_oanda_ids_with_prefix(
+            conn, incomplete, account.oanda_id if account is not None else None
+        )
     finally:
         conn.close()
-    return [r[0] for r in rows]
 
 
 def _complete_tag(incomplete: str) -> list[str]:
     """Return distinct tags already attached to some transaction in the local DB."""
     conn = get_db()
     try:
-        rows = conn.execute("SELECT DISTINCT tag FROM tags ORDER BY tag").fetchall()
+        tags = queries.list_tags(conn)
     finally:
         conn.close()
-    return [r[0] for r in rows if r[0].startswith(incomplete.lower())]
+    return [t for t in tags if t.startswith(incomplete.lower())]
 
 
 def _resolve_transaction(conn: sqlite3.Connection, oanda_id: str) -> int:
@@ -118,34 +104,27 @@ def _resolve_transaction(conn: sqlite3.Connection, oanda_id: str) -> int:
     account = get_active_account(conn)
 
     # Step 1: find candidate rows, scoped to the active account if any.
-    if account is not None:
-        rows = conn.execute(
-            "SELECT id FROM transactions WHERE oanda_id = ? AND account_id = ?",
-            (oanda_id, account.oanda_id),
-        ).fetchall()
-        where = f" for account {account.name!r}"
-    else:
-        rows = conn.execute(
-            "SELECT id FROM transactions WHERE oanda_id = ?", (oanda_id,)
-        ).fetchall()
-        where = ""
+    ids = queries.find_transaction_ids(
+        conn, oanda_id, account.oanda_id if account is not None else None
+    )
+    where = f" for account {account.name!r}" if account is not None else ""
 
     # Step 2: exactly one match is the only acceptable outcome.
-    if not rows:
+    if not ids:
         typer.echo(
             f"Transaction {oanda_id!r} not found in local database{where}. "
             f"Run 'frmj sync' first.",
             err=True,
         )
         raise typer.Exit(1)
-    if len(rows) > 1:
+    if len(ids) > 1:
         typer.echo(
-            f"Transaction {oanda_id!r} exists in {len(rows)} accounts. "
+            f"Transaction {oanda_id!r} exists in {len(ids)} accounts. "
             "Select one first with 'frmj account use NAME'.",
             err=True,
         )
         raise typer.Exit(1)
-    return int(rows[0]["id"])
+    return ids[0]
 
 
 # ---------------------------------------------------------------------------
@@ -166,11 +145,7 @@ def note(
     conn = get_db()
     try:
         txn_id = _resolve_transaction(conn, oanda_id)
-        conn.execute(
-            "INSERT INTO notes (transaction_id, body) VALUES (?, ?)",
-            (txn_id, text),
-        )
-        conn.commit()
+        queries.add_note(conn, txn_id, text)
     finally:
         conn.close()
     typer.echo(f"Note added to transaction {oanda_id}.")

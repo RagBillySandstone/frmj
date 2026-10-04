@@ -19,7 +19,7 @@ from decimal import Decimal
 
 import typer
 
-from frmj import services
+from frmj import queries, services
 from frmj.accounts import AccountRecord, is_live_mode
 from frmj.app import (
     AtrConfig,
@@ -559,11 +559,10 @@ def _trade_multi_account(
     tags_raw = typer.prompt("Tags (space-separated, Enter to skip)", default="").strip()
     for plan, fill in filled:
         assert fill is not None
-        fill_row = conn.execute(
-            "SELECT id FROM transactions WHERE oanda_id = ? AND account_id = ?",
-            (fill.transaction_id, plan.client.account_id),
-        ).fetchone()
-        if not fill_row:
+        txn_id = queries.get_transaction_id(
+            conn, fill.transaction_id, plan.client.account_id
+        )
+        if txn_id is None:
             if note_text or tags_raw:
                 typer.echo(
                     f"[{plan.account.name}] Note/tags not saved: fill transaction "
@@ -572,13 +571,9 @@ def _trade_multi_account(
                 )
             continue
         if note_text:
-            conn.execute(
-                "INSERT INTO notes (transaction_id, body) VALUES (?, ?)",
-                (fill_row["id"], note_text),
-            )
-            conn.commit()
+            queries.add_note(conn, txn_id, note_text)
         if tags_raw:
-            _attach_tags(conn, fill_row["id"], tags_raw.split())
+            _attach_tags(conn, txn_id, tags_raw.split())
     if note_text or tags_raw:
         typer.echo("Note/tags saved.")
 
