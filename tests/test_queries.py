@@ -243,3 +243,64 @@ class TestAnnotations:
         queries.add_note(conn, a, "two")
         assert queries.notes_by_transaction(conn, [a, b]) == {a: ["one", "two"]}
         assert queries.notes_by_transaction(conn, []) == {}
+
+
+# ---------------------------------------------------------------------------
+# Statistics inputs
+# ---------------------------------------------------------------------------
+
+
+class TestStatsInputs:
+    def test_fill_open_time_from_full_close(self, conn: sqlite3.Connection) -> None:
+        _add_txn(conn, "10", time="2026-04-01T08:00:00Z")
+        _add_txn(
+            conn,
+            "11",
+            time="2026-04-02T08:00:00Z",
+            raw_json='{"pl":"5","tradesClosed":[{"tradeID":"10"}]}',
+        )
+        rows = {r["oanda_id"]: r for r in queries.list_fills_with_open_time(conn, None)}
+        assert rows["11"]["open_time"] == "2026-04-01T08:00:00Z"
+        assert rows["10"]["open_time"] is None
+
+    def test_fill_open_time_from_partial_reduce(self, conn: sqlite3.Connection) -> None:
+        _add_txn(conn, "10", time="2026-04-01T08:00:00Z")
+        _add_txn(conn, "11", raw_json='{"pl":"5","tradeReduced":{"tradeID":"10"}}')
+        rows = {r["oanda_id"]: r for r in queries.list_fills_with_open_time(conn, None)}
+        assert rows["11"]["open_time"] == "2026-04-01T08:00:00Z"
+
+    def test_open_fill_only_matched_within_same_account(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        # Trade 10 was opened on acct-2; acct-1's close of "its" trade 10
+        # must not pick that up.
+        _add_txn(conn, "10", "acct-2", time="2026-04-01T08:00:00Z")
+        _add_txn(conn, "11", "acct-1", raw_json='{"tradesClosed":[{"tradeID":"10"}]}')
+        rows = queries.list_fills_with_open_time(conn, "acct-1")
+        assert [(r["oanda_id"], r["open_time"]) for r in rows] == [("11", None)]
+
+    def test_fills_exclude_other_types(self, conn: sqlite3.Connection) -> None:
+        _add_txn(conn, "1")
+        _add_txn(conn, "2", txn_type="DAILY_FINANCING")
+        assert _ids(queries.list_fills_with_open_time(conn, None)) == ["1"]
+
+    def test_tagged_fills_scoped(self, conn: sqlite3.Connection) -> None:
+        mine = _add_txn(conn, "1", "acct-1", raw_json='{"pl":"5"}')
+        other = _add_txn(conn, "1", "acct-2")
+        financing = _add_txn(conn, "2", "acct-1", txn_type="DAILY_FINANCING")
+        queries.add_tags(conn, mine, ["breakout"])
+        queries.add_tags(conn, other, ["other"])
+        queries.add_tags(conn, financing, ["ignored"])
+        rows = queries.list_tagged_fills(conn, "acct-1")
+        assert [(r["tag"], r["raw_json"]) for r in rows] == [("breakout", '{"pl":"5"}')]
+        assert len(queries.list_tagged_fills(conn, None)) == 2
+
+    def test_daily_financing_scoped(self, conn: sqlite3.Connection) -> None:
+        _add_txn(conn, "1", "acct-1", txn_type="DAILY_FINANCING", raw_json='{"a":1}')
+        _add_txn(conn, "1", "acct-2", txn_type="DAILY_FINANCING", raw_json='{"b":2}')
+        _add_txn(conn, "2", "acct-1")
+        assert queries.list_daily_financing(conn, "acct-1") == ['{"a":1}']
+        assert sorted(queries.list_daily_financing(conn, None)) == [
+            '{"a":1}',
+            '{"b":2}',
+        ]

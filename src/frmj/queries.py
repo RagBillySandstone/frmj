@@ -317,3 +317,80 @@ def notes_by_transaction(
     ).fetchall():
         result.setdefault(row[0], []).append(row[1])
     return result
+
+
+# ---------------------------------------------------------------------------
+# Statistics inputs (stats)
+# ---------------------------------------------------------------------------
+
+
+def list_fills_with_open_time(
+    conn: sqlite3.Connection, account_id: str | None
+) -> list[sqlite3.Row]:
+    """
+    Return every ORDER_FILL (``id``, ``oanda_id``, ``time``, ``raw_json``)
+    plus ``open_time``: the time of the fill that opened the trade it
+    closes, or ``None`` if that opening fill isn't in the ledger (or the
+    fill opened a trade rather than closing one).
+
+    Scoped to *account_id* when given, otherwise every account. Opening and
+    closing fills are both returned; callers tell them apart by P/L.
+    """
+    account_sql = " AND t.account_id = ?" if account_id is not None else ""
+    params = (account_id,) if account_id is not None else ()
+    return conn.execute(
+        """
+        SELECT t.id, t.oanda_id, t.time, t.raw_json,
+               open_t.time AS open_time
+        FROM transactions t
+        -- Resolve the opening fill so callers can bucket by open time.
+        -- COALESCE covers both full closes (tradesClosed array) and
+        -- partial reduces (tradeReduced object), each carrying tradeID.
+        LEFT JOIN transactions open_t
+            ON  open_t.account_id = t.account_id
+            AND open_t.type       = 'ORDER_FILL'
+            AND open_t.oanda_id   = COALESCE(
+                    json_extract(t.raw_json, '$.tradesClosed[0].tradeID'),
+                    json_extract(t.raw_json, '$.tradeReduced.tradeID')
+                )
+        WHERE t.type = 'ORDER_FILL'
+        """
+        + account_sql,
+        params,
+    ).fetchall()
+
+
+def list_tagged_fills(
+    conn: sqlite3.Connection, account_id: str | None
+) -> list[sqlite3.Row]:
+    """
+    Return one row (``tag``, ``raw_json``) per tag on each ORDER_FILL,
+    scoped to *account_id* when given, otherwise every account.
+    """
+    account_sql = " AND tx.account_id = ?" if account_id is not None else ""
+    params = (account_id,) if account_id is not None else ()
+    return conn.execute(
+        """
+        SELECT tg.tag, tx.raw_json
+        FROM tags tg
+        JOIN transactions tx ON tg.transaction_id = tx.id
+        WHERE tx.type = 'ORDER_FILL'
+        """
+        + account_sql,
+        params,
+    ).fetchall()
+
+
+def list_daily_financing(conn: sqlite3.Connection, account_id: str | None) -> list[str]:
+    """
+    Return the raw JSON of every DAILY_FINANCING transaction, scoped to
+    *account_id* when given, otherwise every account.
+    """
+    account_sql = " AND account_id = ?" if account_id is not None else ""
+    params = (account_id,) if account_id is not None else ()
+    rows = conn.execute(
+        "SELECT raw_json FROM transactions WHERE type = 'DAILY_FINANCING'"
+        + account_sql,
+        params,
+    ).fetchall()
+    return [row[0] for row in rows]

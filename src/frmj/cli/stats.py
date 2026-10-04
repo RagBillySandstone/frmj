@@ -9,6 +9,7 @@ from decimal import Decimal
 import typer
 
 from frmj.accounts import resolve_account
+from frmj import queries
 from frmj.app import get_client, get_db
 from frmj.cli import app
 from frmj.cli._completion import _complete_account_name
@@ -84,53 +85,16 @@ def stats(
         conn, _report_sync_targets(conn, account_name, account is None), get_client
     )
 
-    # Every query below is limited to the resolved account, or unfiltered
-    # when combining all accounts.  Each query aliases the transactions
-    # table differently, so the column is qualified per query.
-    scope_params: tuple[str, ...] = (account.oanda_id,) if account else ()
-    fills_sql = " AND t.account_id = ?" if account else ""
-    tags_sql = " AND tx.account_id = ?" if account else ""
-    fin_sql = " AND account_id = ?" if account else ""
-
+    # Every query below is limited to the resolved account, or covers every
+    # account when combining them.
+    scope = account.oanda_id if account else None
     try:
-        rows = conn.execute(
-            """
-            SELECT t.id, t.oanda_id, t.time, t.raw_json,
-                   open_t.time AS open_time
-            FROM transactions t
-            -- Resolve the opening fill so we can also bucket by open time.
-            -- COALESCE covers both full closes (tradesClosed array) and
-            -- partial reduces (tradeReduced object), each carrying tradeID.
-            LEFT JOIN transactions open_t
-                ON  open_t.account_id = t.account_id
-                AND open_t.type       = 'ORDER_FILL'
-                AND open_t.oanda_id   = COALESCE(
-                        json_extract(t.raw_json, '$.tradesClosed[0].tradeID'),
-                        json_extract(t.raw_json, '$.tradeReduced.tradeID')
-                    )
-            WHERE t.type = 'ORDER_FILL'
-            """
-            + fills_sql,
-            scope_params,
-        ).fetchall()
+        rows = queries.list_fills_with_open_time(conn, scope)
         # Tag breakdown: for each tag, collect P/L values of tagged closing fills.
-        tag_rows = conn.execute(
-            """
-            SELECT tg.tag, tx.raw_json
-            FROM tags tg
-            JOIN transactions tx ON tg.transaction_id = tx.id
-            WHERE tx.type = 'ORDER_FILL'
-            """
-            + tags_sql,
-            scope_params,
-        ).fetchall()
+        tag_rows = queries.list_tagged_fills(conn, scope)
         # Financing breakdown: each DAILY_FINANCING row's "positionFinancings"
         # array is unpacked per-instrument below.
-        financing_rows = conn.execute(
-            "SELECT raw_json FROM transactions WHERE type = 'DAILY_FINANCING'"
-            + fin_sql,
-            scope_params,
-        ).fetchall()
+        financing_json = queries.list_daily_financing(conn, scope)
     finally:
         conn.close()
 
@@ -182,9 +146,9 @@ def stats(
     # top-level "financing" field is the day's account-wide total, and the
     # "positionFinancings" array carries the per-instrument breakdown.
     financing_by_instrument: dict[str, list[Decimal]] = {}
-    for fr in financing_rows:
+    for raw_json in financing_json:
         try:
-            data = json.loads(fr["raw_json"])
+            data = json.loads(raw_json)
             for pf in data.get("positionFinancings", []):
                 instrument = pf.get("instrument")
                 if not instrument:
