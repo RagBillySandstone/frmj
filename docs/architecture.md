@@ -216,50 +216,31 @@ Variants of the same flow:
 
 ## Trade lifecycle
 
-The states a trade passes through from FRoMaJ's side, and where its journal (trade plan, notes, tags) is stored at each point. Oanda holds the trade itself; FRoMaJ only records it.
+The states a trade passes through from FRoMaJ's side, and where its journal (trade plan, notes, tags) is stored at each point. Oanda holds the trade itself; FRoMaJ only records it. The quoted letters are the answers to `trade`'s prompts: confirm `y`/`n`, and after a failed order `r`etry, `s`ave, or `a`bort.
 
 ```mermaid
 stateDiagram-v2
+    direction LR
+    NotPlaced: Not placed
+    Open: Open (journal on the ORDER_FILL)
+    Pending: Pending (journal on the LIMIT_ORDER)
+
     [*] --> Planned: frmj trade
-    Planned --> [*]: --dry-run, or confirm "n"
-    Planned --> Placing: confirm "y"
-
-    Placing --> Placing: order failed, choose "r"
-    Placing --> Draft: order failed, choose "s"
-    Placing --> [*]: order failed, choose "a"
-    Draft --> Placing: frmj trade --resume, confirm
-
-    Placing --> Open: market order fills
+    Planned --> NotPlaced: --dry-run, or "n"
+    Planned --> Placing: "y"
+    Placing --> Draft: failed, "s"
+    Draft --> Placing: --resume
+    Placing --> NotPlaced: failed, "a"
+    Placing --> Open: filled
     Placing --> Pending: limit order accepted
-    Placing --> Open: limit order fills on arrival
-
-    state Pending {
-        direction LR
-        [*] --> Waiting
-        note right of Waiting
-            plan, notes, tags on the
-            LIMIT_ORDER transaction
-        end note
-    }
-    Pending --> Open: order fills, next sync moves the journal to the ORDER_FILL
+    Pending --> Open: fills (sync moves journal)
     Pending --> Cancelled: cancelled in Oanda
-
-    state Open {
-        direction LR
-        [*] --> Running
-        Running --> Running: frmj trail (add / change / remove)
-        note right of Running
-            plan, notes, tags on the
-            ORDER_FILL transaction
-        end note
-    }
-    Open --> Closed: TP, SL or trailing stop triggers
-    Open --> Closed: frmj close
-    Closed --> [*]
-    Cancelled --> [*]
+    Open --> Open: frmj trail
+    Open --> Closed: TP / SL / trail, or frmj close
 ```
 
 - **Planned** exists only in memory. Nothing is written until an order is placed, except the draft.
+- **Placing** is the order request. If it fails, `r` sends it again (not drawn), `s` saves a draft, and `a` gives up. **Filled** covers both a market order and a limit order that fills the moment it arrives; either way the journal goes on the fill.
 - **Draft** is `saved_plan.json` in the data directory: one slot, overwritten by the next save and removed once the order is placed. It records the account, so `--resume` places it on the account it was planned for.
 - **Placing → Open/Pending** is where the journal is written: right after the order, FRoMaJ syncs, saves the trade plan on the fill (market) or on the LIMIT_ORDER transaction (pending limit), and prompts for a note and tags, which go on the same transaction. If that post-order sync fails, the transaction isn't in the ledger yet: the trade plan waits in `deferred_trade_plans` and is attached by the next sync that brings the transaction in, while the note and tags are refused with a hint to add them later with `frmj note` / `frmj tag`.
 - **Pending → Open** happens at Oanda. The next `frmj sync` (or any command that auto-syncs) ingests the ORDER_FILL and moves the plan, notes, and tags from the LIMIT_ORDER transaction onto it (see [Sync flow](#sync-flow)), because `journal` and `stats` look for them on the fill. A **Cancelled** order's journal stays on its LIMIT_ORDER transaction.
