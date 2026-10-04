@@ -139,3 +139,107 @@ class TestCompletionSources:
             "DAILY_FINANCING",
             "ORDER_FILL",
         ]
+
+
+# ---------------------------------------------------------------------------
+# Transaction listings
+# ---------------------------------------------------------------------------
+
+
+def _ids(rows: list[sqlite3.Row]) -> list[str]:
+    """The Oanda IDs of *rows*, in order."""
+    return [row["oanda_id"] for row in rows]
+
+
+class TestListRecentTransactions:
+    def test_single_account_newest_id_first_with_limit(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        for oanda_id in ("9", "10", "11"):
+            _add_txn(conn, oanda_id, "acct-1")
+        _add_txn(conn, "50", "acct-2")
+        rows = queries.list_recent_transactions(conn, 2, account_id="acct-1")
+        # Numeric, not string, ordering: 11 > 10 > 9.
+        assert _ids(rows) == ["11", "10"]
+
+    def test_all_accounts_ordered_by_time(self, conn: sqlite3.Connection) -> None:
+        # The highest ID is the oldest, so ID ordering would put it first.
+        _add_txn(conn, "999", "acct-2", time="2026-01-01T00:00:00Z")
+        _add_txn(conn, "5", "acct-1", time="2026-03-01T00:00:00Z")
+        rows = queries.list_recent_transactions(conn, 10)
+        assert _ids(rows) == ["5", "999"]
+
+    def test_type_since_and_instrument_filters(self, conn: sqlite3.Connection) -> None:
+        _add_txn(conn, "1", raw_json='{"instrument":"EUR_USD"}')
+        _add_txn(conn, "2", raw_json='{"instrument":"GBP_USD"}')
+        _add_txn(conn, "3", txn_type="DAILY_FINANCING")
+        _add_txn(conn, "4", raw_json='{"instrument":"EUR_USD"}', time="2025-01-01")
+        rows = queries.list_recent_transactions(
+            conn,
+            10,
+            account_id="acct-1",
+            txn_type="ORDER_FILL",
+            since="2026-01-01",
+            instrument="eur_usd",
+        )
+        assert _ids(rows) == ["1"]
+
+    def test_notes_and_tag_filters(self, conn: sqlite3.Connection) -> None:
+        noted = _add_txn(conn, "1")
+        tagged = _add_txn(conn, "2")
+        _add_txn(conn, "3")
+        queries.add_note(conn, noted, "x")
+        queries.add_tags(conn, tagged, ["breakout"])
+        assert _ids(queries.list_recent_transactions(conn, 10, with_notes=True)) == [
+            "1"
+        ]
+        # Tag matching is case-insensitive; tags are stored lowercase.
+        assert _ids(queries.list_recent_transactions(conn, 10, tag="Breakout")) == ["2"]
+
+
+class TestListTransactionsChronological:
+    def test_every_account_oldest_first(self, conn: sqlite3.Connection) -> None:
+        _add_txn(conn, "1", "acct-1", time="2026-03-01T00:00:00Z")
+        _add_txn(conn, "2", "acct-2", time="2026-01-01T00:00:00Z")
+        assert _ids(queries.list_transactions_chronological(conn)) == ["2", "1"]
+
+    def test_filters(self, conn: sqlite3.Connection) -> None:
+        _add_txn(conn, "1", raw_json='{"instrument":"EUR_USD"}')
+        _add_txn(conn, "2", raw_json='{"instrument":"GBP_USD"}')
+        rows = queries.list_transactions_chronological(conn, instrument="EUR_USD")
+        assert _ids(rows) == ["1"]
+
+
+# ---------------------------------------------------------------------------
+# Per-transaction annotations
+# ---------------------------------------------------------------------------
+
+
+class TestAnnotations:
+    def test_trade_plan(self, conn: sqlite3.Connection) -> None:
+        txn = _add_txn(conn, "1")
+        assert queries.get_trade_plan(conn, txn) is None
+        conn.execute(
+            "INSERT INTO trade_plans (transaction_id, tp_price, sl_price) "
+            "VALUES (?, '1.1', '1.0')",
+            (txn,),
+        )
+        plan = queries.get_trade_plan(conn, txn)
+        assert plan is not None
+        assert (plan["tp_price"], plan["sl_price"]) == ("1.1", "1.0")
+
+    def test_notes_oldest_first_and_tags_sorted(self, conn: sqlite3.Connection) -> None:
+        txn = _add_txn(conn, "1")
+        queries.add_note(conn, txn, "first")
+        queries.add_note(conn, txn, "second")
+        queries.add_tags(conn, txn, ["zeta", "alpha"])
+        assert queries.list_notes(conn, txn) == ["first", "second"]
+        assert queries.list_transaction_tags(conn, txn) == ["alpha", "zeta"]
+
+    def test_notes_by_transaction(self, conn: sqlite3.Connection) -> None:
+        a = _add_txn(conn, "1")
+        b = _add_txn(conn, "2")
+        queries.add_note(conn, a, "one")
+        queries.add_note(conn, a, "two")
+        assert queries.notes_by_transaction(conn, [a, b]) == {a: ["one", "two"]}
+        assert queries.notes_by_transaction(conn, []) == {}

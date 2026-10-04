@@ -10,6 +10,7 @@ from decimal import Decimal
 
 import typer
 
+from frmj import queries
 from frmj.app import get_db
 from frmj.cli import app
 from frmj.cli._completion import _complete_instrument, _complete_txn_type
@@ -89,41 +90,14 @@ def export(
 
     conn = get_db()
     try:
-        where: list[str] = []
-        params: list[object] = []
-
-        if txn_type:
-            where.append("type = ?")
-            params.append(txn_type)
-        if since:
-            where.append("time >= ?")
-            params.append(since)
-        if instrument:
-            where.append("json_extract(raw_json, '$.instrument') = ?")
-            params.append(instrument.upper())
-
-        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-
-        txns = conn.execute(
-            f"""
-            SELECT id, oanda_id, account_id, type, time, raw_json
-            FROM transactions
-            {where_sql}
-            ORDER BY time ASC
-            """,
-            params,
-        ).fetchall()
-
-        notes_by_id: dict[int, list[str]] = {}
-        if include_notes and txns:
-            txn_ids = [t["id"] for t in txns]
-            placeholders = ",".join("?" * len(txn_ids))
-            for nr in conn.execute(
-                f"SELECT transaction_id, body FROM notes "
-                f"WHERE transaction_id IN ({placeholders}) ORDER BY id",
-                txn_ids,
-            ).fetchall():
-                notes_by_id.setdefault(nr["transaction_id"], []).append(nr["body"])
+        txns = queries.list_transactions_chronological(
+            conn, txn_type=txn_type, since=since, instrument=instrument
+        )
+        notes_by_id: dict[int, list[str]] = (
+            queries.notes_by_transaction(conn, [t["id"] for t in txns])
+            if include_notes
+            else {}
+        )
     finally:
         conn.close()
 

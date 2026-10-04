@@ -276,54 +276,17 @@ def journal(
     )
 
     try:
-        where: list[str] = []
-        params: list[object] = []
-
         # Scope to the resolved account unless the user asked for everything.
-        if account is not None:
-            where.append("account_id = ?")
-            params.append(account.oanda_id)
-        if txn_type:
-            where.append("type = ?")
-            params.append(txn_type)
-        if since:
-            where.append("time >= ?")
-            params.append(since)
-        if instrument:
-            # json_extract is available in SQLite ≥ 3.9 (2015); safe on all
-            # target platforms.  Normalise to uppercase so 'eur_usd' matches
-            # 'EUR_USD' as stored by Oanda.
-            where.append("json_extract(raw_json, '$.instrument') = ?")
-            params.append(instrument.upper())
-        if with_notes:
-            where.append("id IN (SELECT DISTINCT transaction_id FROM notes)")
-        if filter_tag:
-            where.append(
-                "id IN (SELECT DISTINCT transaction_id FROM tags WHERE tag = ?)"
-            )
-            params.append(filter_tag.lower())
-
-        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-        params.append(n)
-
-        # Oanda transaction IDs are only sequential within one account, so
-        # a multi-account listing is ordered by time instead (ID breaks ties
-        # between events stamped in the same instant).
-        order_sql = (
-            "CAST(oanda_id AS INTEGER) DESC"
-            if account is not None
-            else "time DESC, CAST(oanda_id AS INTEGER) DESC"
+        txns = queries.list_recent_transactions(
+            conn,
+            n,
+            account_id=account.oanda_id if account is not None else None,
+            txn_type=txn_type,
+            since=since,
+            instrument=instrument,
+            with_notes=with_notes,
+            tag=filter_tag,
         )
-        txns = conn.execute(
-            f"""
-            SELECT id, oanda_id, account_id, type, time, raw_json
-            FROM transactions
-            {where_sql}
-            ORDER BY {order_sql}
-            LIMIT ?
-            """,
-            params,
-        ).fetchall()
 
         # When several accounts are shown, label each row with its profile
         # name.  IDs with no profile (e.g. a removed account) fall back to
@@ -366,12 +329,7 @@ def journal(
             )
             _display_transaction(txn, label)
             if txn["type"] == "ORDER_FILL":
-                plan = conn.execute(
-                    "SELECT tp_price, sl_price, trail_pips, sl_atr_multiple "
-                    "FROM trade_plans "
-                    "WHERE transaction_id = ?",
-                    (txn["id"],),
-                ).fetchone()
+                plan = queries.get_trade_plan(conn, txn["id"])
                 if plan:
                     parts: list[str] = []
                     if plan["tp_price"]:
@@ -388,18 +346,10 @@ def journal(
                         parts.append(f"Trail {plan['trail_pips']}p")
                     if parts:
                         typer.echo(f"    Plan: {'  '.join(parts)}")
-            notes = conn.execute(
-                "SELECT body FROM notes WHERE transaction_id = ? ORDER BY id",
-                (txn["id"],),
-            ).fetchall()
-            for note_row in notes:
-                typer.echo(f"    Note: {note_row['body']}")
-            txn_tags = conn.execute(
-                "SELECT tag FROM tags WHERE transaction_id = ? ORDER BY tag",
-                (txn["id"],),
-            ).fetchall()
+            for body in queries.list_notes(conn, txn["id"]):
+                typer.echo(f"    Note: {body}")
+            txn_tags = queries.list_transaction_tags(conn, txn["id"])
             if txn_tags:
-                tag_list = "  ".join(r["tag"] for r in txn_tags)
-                typer.echo(f"    Tags: {tag_list}")
+                typer.echo(f"    Tags: {'  '.join(txn_tags)}")
     finally:
         conn.close()

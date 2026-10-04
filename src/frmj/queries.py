@@ -138,3 +138,182 @@ def list_transaction_types(conn: sqlite3.Connection) -> list[str]:
         "SELECT DISTINCT type FROM transactions ORDER BY type"
     ).fetchall()
     return [row[0] for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Transaction listings (journal, export)
+# ---------------------------------------------------------------------------
+
+
+def _transaction_filter_sql(
+    *,
+    account_id: str | None = None,
+    txn_type: str | None = None,
+    since: str | None = None,
+    instrument: str | None = None,
+    with_notes: bool = False,
+    tag: str | None = None,
+) -> tuple[str, list[object]]:
+    """
+    Build the ``WHERE`` clause (possibly empty) and its parameters for a
+    transactions listing. Every filter is optional and they combine with
+    ``AND``.
+    """
+    where: list[str] = []
+    params: list[object] = []
+
+    # Plain column filters.
+    if account_id is not None:
+        where.append("account_id = ?")
+        params.append(account_id)
+    if txn_type:
+        where.append("type = ?")
+        params.append(txn_type)
+    if since:
+        where.append("time >= ?")
+        params.append(since)
+
+    # Instruments live in the raw JSON. json_extract needs SQLite >= 3.9
+    # (2015). Uppercased so 'eur_usd' matches 'EUR_USD' as Oanda stores it.
+    if instrument:
+        where.append("json_extract(raw_json, '$.instrument') = ?")
+        params.append(instrument.upper())
+
+    # Annotation filters: transactions with any note, or with a given tag
+    # (tags are stored lowercase).
+    if with_notes:
+        where.append("id IN (SELECT DISTINCT transaction_id FROM notes)")
+    if tag:
+        where.append("id IN (SELECT DISTINCT transaction_id FROM tags WHERE tag = ?)")
+        params.append(tag.lower())
+
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    return where_sql, params
+
+
+def list_recent_transactions(
+    conn: sqlite3.Connection,
+    limit: int,
+    *,
+    account_id: str | None = None,
+    txn_type: str | None = None,
+    since: str | None = None,
+    instrument: str | None = None,
+    with_notes: bool = False,
+    tag: str | None = None,
+) -> list[sqlite3.Row]:
+    """
+    Return up to *limit* transactions matching the filters, newest first.
+
+    Rows have ``id``, ``oanda_id``, ``account_id``, ``type``, ``time`` and
+    ``raw_json``. Within one account (*account_id* given) they're ordered by
+    Oanda ID, which is sequential per account. Across accounts IDs aren't
+    comparable, so they're ordered by time, with the ID breaking ties
+    between events stamped in the same instant.
+    """
+    where_sql, params = _transaction_filter_sql(
+        account_id=account_id,
+        txn_type=txn_type,
+        since=since,
+        instrument=instrument,
+        with_notes=with_notes,
+        tag=tag,
+    )
+    order_sql = (
+        "CAST(oanda_id AS INTEGER) DESC"
+        if account_id is not None
+        else "time DESC, CAST(oanda_id AS INTEGER) DESC"
+    )
+    return conn.execute(
+        f"""
+        SELECT id, oanda_id, account_id, type, time, raw_json
+        FROM transactions
+        {where_sql}
+        ORDER BY {order_sql}
+        LIMIT ?
+        """,
+        [*params, limit],
+    ).fetchall()
+
+
+def list_transactions_chronological(
+    conn: sqlite3.Connection,
+    *,
+    txn_type: str | None = None,
+    since: str | None = None,
+    instrument: str | None = None,
+) -> list[sqlite3.Row]:
+    """
+    Return every transaction (all accounts) matching the filters, oldest
+    first, with the same columns as ``list_recent_transactions``.
+    """
+    where_sql, params = _transaction_filter_sql(
+        txn_type=txn_type, since=since, instrument=instrument
+    )
+    return conn.execute(
+        f"""
+        SELECT id, oanda_id, account_id, type, time, raw_json
+        FROM transactions
+        {where_sql}
+        ORDER BY time ASC
+        """,
+        params,
+    ).fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Per-transaction annotations (journal, export)
+# ---------------------------------------------------------------------------
+
+
+def get_trade_plan(conn: sqlite3.Connection, transaction_id: int) -> sqlite3.Row | None:
+    """
+    Return the trade plan recorded for *transaction_id* (``tp_price``,
+    ``sl_price``, ``trail_pips``, ``sl_atr_multiple``), or ``None`` if the
+    transaction has no plan.
+    """
+    return conn.execute(
+        "SELECT tp_price, sl_price, trail_pips, sl_atr_multiple "
+        "FROM trade_plans "
+        "WHERE transaction_id = ?",
+        (transaction_id,),
+    ).fetchone()
+
+
+def list_notes(conn: sqlite3.Connection, transaction_id: int) -> list[str]:
+    """Return the bodies of *transaction_id*'s notes, oldest first."""
+    rows = conn.execute(
+        "SELECT body FROM notes WHERE transaction_id = ? ORDER BY id",
+        (transaction_id,),
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
+def list_transaction_tags(conn: sqlite3.Connection, transaction_id: int) -> list[str]:
+    """Return *transaction_id*'s tags, alphabetically."""
+    rows = conn.execute(
+        "SELECT tag FROM tags WHERE transaction_id = ? ORDER BY tag",
+        (transaction_id,),
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
+def notes_by_transaction(
+    conn: sqlite3.Connection, transaction_ids: list[int]
+) -> dict[int, list[str]]:
+    """
+    Return the note bodies for each of *transaction_ids* that has notes,
+    keyed by transaction ID, each list oldest first. Transactions without
+    notes are absent from the result.
+    """
+    if not transaction_ids:
+        return {}
+    placeholders = ",".join("?" * len(transaction_ids))
+    result: dict[int, list[str]] = {}
+    for row in conn.execute(
+        f"SELECT transaction_id, body FROM notes "
+        f"WHERE transaction_id IN ({placeholders}) ORDER BY id",
+        transaction_ids,
+    ).fetchall():
+        result.setdefault(row[0], []).append(row[1])
+    return result
