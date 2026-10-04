@@ -124,6 +124,146 @@ Variants of the same flow:
 - **`--multi GROUP`** runs the market-data block once and `plan_account_sizing` once per account, then places and post-processes each account's order in turn.
 - **`--resume`** skips market data, sizing, and the TP/SL prompts: it loads `saved_plan.json`, shows the saved plan, asks for a single "Place order?" confirmation, then joins the flow at the live-mode gate.
 
+## Planning data types
+
+Almost every class in FRoMaJ is a frozen data container (dataclass, enum, or exception); the logic lives in functions. The one class with real behavior is `OandaClient`. So a class diagram is most useful for showing how data moves through trade planning, the middle of the [trade flow](#trade-flow) above:
+
+```mermaid
+classDiagram
+    direction LR
+
+    class ClientProtocol {
+        <<Protocol>>
+        account_id: str
+        get_transactions_since(from_id) list~TransactionRow~
+    }
+    class OandaClient {
+        account_id: str
+        get_instrument(name) InstrumentSpec
+        get_price(instrument) PriceQuote
+        get_account_summary() AccountSummary
+        get_open_trades() list~OpenTrade~
+        get_pending_orders() list~PendingOrder~
+        place_market_order(...) OrderFill
+        place_limit_order(...) LimitOrderResult
+        attach_take_profit(...)
+        attach_stop_loss(...)
+        attach_trailing_stop(...)
+    }
+    ClientProtocol <|.. OandaClient : satisfies structurally
+
+    class InstrumentContext {
+        spec: InstrumentSpec
+        quote: PriceQuote
+        financing_rate: FinancingRate?
+        daily_atr: Decimal?
+    }
+    class AccountContext {
+        summary: AccountSummary
+        open_tickets_on_instrument: int
+        open_trades: list~OpenTrade~
+        pending_orders: list~PendingOrder~
+        pending_margin: Decimal
+    }
+    class AccountSizing {
+        sizing_decision: SizingDecision
+        correlation_warnings: tuple~str~
+        units_calc: UnitsCalc
+    }
+
+    class InstrumentSpec {
+        name: str
+        pip_location: int
+        margin_rate: Decimal
+        min_units: int
+        units_increment: int
+        display_precision: int
+    }
+    class PriceQuote {
+        bid: Decimal
+        ask: Decimal
+        quote_to_home: Decimal
+        base_to_home: Decimal
+        mid() Decimal
+        entry_price(direction) Decimal
+    }
+    class RiskConfig {
+        max_open_trades: int
+        strategy: RiskStrategy
+        blocking_mode: BlockingMode
+        scale_in: ScaleInPolicy
+        correlation_blocking_mode: BlockingMode
+        safety_reserve_pct: Decimal
+    }
+    class SizingDecision {
+        capital_to_deploy: Decimal
+        strategy_used: RiskStrategy
+        warnings: tuple~str~
+    }
+    class UnitsCalc {
+        units: int
+        margin_used: Decimal
+        capital_unused: Decimal
+    }
+    class RiskStrategy {
+        <<enumeration>>
+    }
+    class BlockingMode {
+        <<enumeration>>
+    }
+    class ScaleInPolicy {
+        <<enumeration>>
+    }
+
+    class AccountSummary {
+        nav: Decimal
+        balance: Decimal
+        margin_available: Decimal
+    }
+    class OpenTrade {
+        trade_id: str
+        instrument: str
+        direction: str
+        units: int
+    }
+    class PendingOrder {
+        order_id: str
+        instrument: str
+        direction: str
+        price: Decimal
+    }
+    class FinancingRate {
+        instrument: str
+        long_rate: Decimal
+        short_rate: Decimal
+    }
+
+    InstrumentContext *-- InstrumentSpec
+    InstrumentContext *-- PriceQuote
+    InstrumentContext *-- FinancingRate
+    AccountContext *-- AccountSummary
+    AccountContext *-- "0..*" OpenTrade
+    AccountContext *-- "0..*" PendingOrder
+    AccountSizing *-- SizingDecision
+    AccountSizing *-- UnitsCalc
+    RiskConfig --> RiskStrategy
+    RiskConfig --> BlockingMode
+    RiskConfig --> ScaleInPolicy
+    SizingDecision --> RiskStrategy
+
+    OandaClient ..> InstrumentContext : fetch_instrument_context
+    OandaClient ..> AccountContext : fetch_account_context
+    RiskConfig ..> AccountSizing : plan_account_sizing
+    InstrumentContext ..> AccountSizing : plan_account_sizing
+    AccountContext ..> AccountSizing : plan_account_sizing
+```
+
+Solid diamonds are "contains"; dotted arrows are the `services.py` functions that build one bundle from another, not methods. Each step produces an immutable bundle the next one reads: `fetch_instrument_context` and `fetch_account_context` turn API data into `InstrumentContext` and `AccountContext`, and `plan_account_sizing` combines them with the account's `RiskConfig` into an `AccountSizing`. With `trade --multi` the group shares one `InstrumentContext`, while each account has its own `AccountContext` and `RiskConfig`.
+
+`ClientProtocol` is the only inheritance-like relationship: `sync.py` needs just `get_transactions_since`, so tests pass any object with that method, without subclassing.
+
+Not shown: the post-trade result types (`PostFillResult`, `CloseResult`, `TrailResult`, `PositionsView`), TP/SL pricing (`TPSLSpec`, `ExitLevels`, `TrailingStopLevels`), analytics (`ClosedTrade`, `TradeSummary`, `DirectionStats`), and the risk-check exceptions (`MaxTradesExceeded`, `ScaleInForbidden`, `CorrelatedPositionForbidden`, `BelowMinimumUnits`).
+
 ## Database schema
 
 SQLite at the platform default path (see [`FRMJ_DB_PATH`](configuration.md#environment-variables)) or `$FRMJ_DB_PATH`. WAL mode. Foreign keys enforced.
