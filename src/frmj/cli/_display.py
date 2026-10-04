@@ -14,7 +14,6 @@ from decimal import Decimal
 
 import typer
 
-from frmj import queries
 from frmj.accounts import resolve_account
 from frmj.domain.pricing import pip_size
 from frmj.domain.sizing import InstrumentSpec, PriceQuote
@@ -250,11 +249,11 @@ def _signed_colored(text: str, value: Decimal) -> str:
 
 
 def _display_open_trade(
-    conn: sqlite3.Connection,
     trade: OpenTrade,
     quote: PriceQuote | None,
     spec: InstrumentSpec | None,
     financing_rate: FinancingRate | None,
+    has_note: bool,
 ) -> None:
     """Print one open trade in the positions view, as three lines: the trade
     header (ID, instrument, direction, size, entry, open time), the money
@@ -274,9 +273,11 @@ def _display_open_trade(
     ``financing_rate`` is the instrument's current long/short annualized
     financing rate. ``None`` when it couldn't be fetched, in which case no
     financing figure is shown.
+
+    ``has_note`` adds a ``[note]`` flag: the trade's opening fill has notes
+    in the local journal.
     """
-    note_count = queries.count_notes_for_oanda_id(conn, trade.trade_id)
-    note_flag = "  [note]" if note_count else ""
+    note_flag = "  [note]" if has_note else ""
 
     time_short = _to_local_str(trade.open_time)
     quote_to_home = quote.quote_to_home if quote is not None else None
@@ -357,7 +358,7 @@ def _display_open_trade(
 
 
 def _display_pending_order(
-    conn: sqlite3.Connection, order: PendingOrder, quote: PriceQuote | None
+    order: PendingOrder, quote: PriceQuote | None, has_note: bool
 ) -> None:
     """Print one pending entry order in the positions view.
 
@@ -366,11 +367,11 @@ def _display_pending_order(
     short) next to the order's price. ``None`` when the quote couldn't be
     fetched, in which case that figure is omitted.
 
-    The ``[note]`` flag reflects notes on the order's own transaction (the
-    order ID), where ``frmj trade --limit`` puts them until the order fills.
+    ``has_note`` adds a ``[note]`` flag: the order's own transaction (the
+    order ID) has notes, which is where ``frmj trade --limit`` puts them
+    until the order fills.
     """
-    note_count = queries.count_notes_for_oanda_id(conn, order.order_id)
-    note_flag = "  [note]" if note_count else ""
+    note_flag = "  [note]" if has_note else ""
 
     # "MARKET_IF_TOUCHED" reads better as "MARKET IF TOUCHED".
     order_type = order.order_type.replace("_", " ")

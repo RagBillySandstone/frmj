@@ -404,21 +404,24 @@ def list_daily_financing(conn: sqlite3.Connection, account_id: str | None) -> li
 # ---------------------------------------------------------------------------
 
 
-def count_notes_for_oanda_id(conn: sqlite3.Connection, oanda_id: str) -> int:
+def count_notes_for_oanda_id(
+    conn: sqlite3.Connection, oanda_id: str, account_id: str
+) -> int:
     """
-    Return how many notes are attached to transactions with *oanda_id*.
+    Return how many notes are attached to *account_id*'s transaction with
+    *oanda_id* (0 if it has none or isn't in the ledger).
 
-    Not scoped to an account: a note on another account's transaction with
-    the same Oanda ID is counted too.
+    Scoped to the account because Oanda IDs are only unique within one:
+    another account's transaction with the same ID is a different event.
     """
     return int(
         conn.execute(
             """
             SELECT COUNT(*) FROM notes n
             JOIN transactions t ON n.transaction_id = t.id
-            WHERE t.oanda_id = ?
+            WHERE t.oanda_id = ? AND t.account_id = ?
             """,
-            (oanda_id,),
+            (oanda_id, account_id),
         ).fetchone()[0]
     )
 

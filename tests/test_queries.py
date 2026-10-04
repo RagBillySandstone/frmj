@@ -314,17 +314,19 @@ class TestStatsInputs:
 class TestPositionsAndWatch:
     def test_count_notes_for_oanda_id(self, conn: sqlite3.Connection) -> None:
         txn = _add_txn(conn, "100", "acct-1")
-        assert queries.count_notes_for_oanda_id(conn, "100") == 0
+        assert queries.count_notes_for_oanda_id(conn, "100", "acct-1") == 0
         queries.add_note(conn, txn, "a")
         queries.add_note(conn, txn, "b")
-        assert queries.count_notes_for_oanda_id(conn, "100") == 2
+        assert queries.count_notes_for_oanda_id(conn, "100", "acct-1") == 2
 
-    def test_count_notes_is_not_account_scoped(self, conn: sqlite3.Connection) -> None:
-        """Documents current behavior: another account's note on the same
-        Oanda ID is counted too."""
+    def test_count_notes_ignores_other_accounts(self, conn: sqlite3.Connection) -> None:
+        """Oanda IDs repeat across accounts: another account's note on the
+        same ID must not count."""
+        _add_txn(conn, "100", "acct-1")
         other = _add_txn(conn, "100", "acct-2")
         queries.add_note(conn, other, "elsewhere")
-        assert queries.count_notes_for_oanda_id(conn, "100") == 1
+        assert queries.count_notes_for_oanda_id(conn, "100", "acct-1") == 0
+        assert queries.count_notes_for_oanda_id(conn, "100", "acct-2") == 1
 
     def test_transactions_after_cursor(self, conn: sqlite3.Connection) -> None:
         _add_txn(conn, "9", time="2026-04-01T00:00:00Z")

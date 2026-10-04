@@ -3,9 +3,11 @@ pending entry orders."""
 
 from __future__ import annotations
 
+import sqlite3
+
 import typer
 
-from frmj import services
+from frmj import queries, services
 from frmj.app import get_client, get_db
 from frmj.cli import app
 from frmj.cli._completion import _complete_account_name
@@ -19,6 +21,11 @@ from frmj.cli._display import (
 # ---------------------------------------------------------------------------
 # positions command
 # ---------------------------------------------------------------------------
+
+
+def _has_note(conn: sqlite3.Connection, oanda_id: str, account_id: str) -> bool:
+    """True when *account_id*'s transaction *oanda_id* has any local notes."""
+    return queries.count_notes_for_oanda_id(conn, oanda_id, account_id) > 0
 
 
 @app.command()
@@ -58,12 +65,14 @@ def positions(
         typer.echo(f"{len(view.trades)} open {label}")
         typer.echo("─" * 56)
         for trade in view.trades:
+            # A trade's ID is its opening fill's transaction ID, so notes on
+            # that fill (in this account only) flag the trade.
             _display_open_trade(
-                conn,
                 trade,
                 view.quotes.get(trade.instrument),
                 view.specs.get(trade.instrument),
                 view.financing_rates.get(trade.instrument),
+                has_note=_has_note(conn, trade.trade_id, client.account_id),
             )
         typer.echo("─" * 56)
     else:
@@ -84,7 +93,11 @@ def positions(
         typer.echo(f"{len(pending)} pending {label}")
         typer.echo("─" * 56)
         for order in pending:
-            _display_pending_order(conn, order, view.quotes.get(order.instrument))
+            _display_pending_order(
+                order,
+                view.quotes.get(order.instrument),
+                has_note=_has_note(conn, order.order_id, client.account_id),
+            )
         typer.echo("─" * 56)
 
     # The account summary only adds something when there's exposure to see.

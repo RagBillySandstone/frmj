@@ -298,6 +298,27 @@ class TestPositionsCommand:
         result = self._invoke(monkeypatch, [_open_trade(trade_id="6368")])
         assert "[note]" in result.output
 
+    def test_note_on_another_accounts_transaction_not_flagged(
+        self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Oanda IDs are only unique per account: a note on acct-2's
+        transaction 6368 must not flag acct-1's trade 6368."""
+        conn = sqlite3.connect(str(pos_db))
+        cur = conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+            "VALUES ('6368', 'acct-2', 'ORDER_FILL', '2026-04-25T14:30:00Z', '{}')"
+        )
+        conn.execute(
+            "INSERT INTO notes (transaction_id, body) VALUES (?, 'Other account')",
+            (cur.lastrowid,),
+        )
+        conn.commit()
+        conn.close()
+
+        result = self._invoke(monkeypatch, [_open_trade(trade_id="6368")])
+        assert result.exit_code == 0, result.output
+        assert "[note]" not in result.output
+
     def test_no_note_flag_when_no_notes(
         self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
