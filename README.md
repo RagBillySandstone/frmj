@@ -100,8 +100,8 @@ frmj config check --connectivity   # also calls the Oanda API to verify credenti
 ## Documentation
 
 - [Command reference](docs/commands.md) — every command and option in detail
-- [Configuration](docs/configuration.md) — API tokens, execution mode, environment variables, config keys, the risk model, and trade limits
-- [Architecture](docs/architecture.md) — module layout, component, sequence and class diagrams, layer separation, and database schema
+- [Configuration](docs/configuration.md) — API tokens, execution mode, environment variables, config keys, the risk model, and trade limits (with a flowchart of the checks)
+- [Architecture](docs/architecture.md) — module layout, layer separation, and diagrams: components, trade flow, trade lifecycle, sync flow, data types, and the database schema
 
 ---
 
