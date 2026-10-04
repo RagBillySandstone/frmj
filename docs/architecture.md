@@ -214,6 +214,57 @@ Variants of the same flow:
 - **`--multi GROUP`** runs the market-data block once and `plan_account_sizing` once per account, then places and post-processes each account's order in turn.
 - **`--resume`** skips market data, sizing, and the TP/SL prompts: it loads `saved_plan.json`, shows the saved plan, asks for a single "Place order?" confirmation, then joins the flow at the live-mode gate.
 
+## Trade lifecycle
+
+The states a trade passes through from FRoMaJ's side, and where its journal (trade plan, notes, tags) is stored at each point. Oanda holds the trade itself; FRoMaJ only records it.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Planned: frmj trade
+    Planned --> [*]: --dry-run, or confirm "n"
+    Planned --> Placing: confirm "y"
+
+    Placing --> Placing: order failed, choose "r"
+    Placing --> Draft: order failed, choose "s"
+    Placing --> [*]: order failed, choose "a"
+    Draft --> Placing: frmj trade --resume, confirm
+
+    Placing --> Open: market order fills
+    Placing --> Pending: limit order accepted
+    Placing --> Open: limit order fills on arrival
+
+    state Pending {
+        direction LR
+        [*] --> Waiting
+        note right of Waiting
+            plan, notes, tags on the
+            LIMIT_ORDER transaction
+        end note
+    }
+    Pending --> Open: order fills, next sync moves the journal to the ORDER_FILL
+    Pending --> Cancelled: cancelled in Oanda
+
+    state Open {
+        direction LR
+        [*] --> Running
+        Running --> Running: frmj trail (add / change / remove)
+        note right of Running
+            plan, notes, tags on the
+            ORDER_FILL transaction
+        end note
+    }
+    Open --> Closed: TP, SL or trailing stop triggers
+    Open --> Closed: frmj close
+    Closed --> [*]
+    Cancelled --> [*]
+```
+
+- **Planned** exists only in memory. Nothing is written until an order is placed, except the draft.
+- **Draft** is `saved_plan.json` in the data directory: one slot, overwritten by the next save and removed once the order is placed. It records the account, so `--resume` places it on the account it was planned for.
+- **Placing → Open/Pending** is where the journal is written: right after the order, FRoMaJ syncs, saves the trade plan on the fill (market) or on the LIMIT_ORDER transaction (pending limit), and prompts for a note and tags, which go on the same transaction. If that post-order sync fails, the transaction isn't in the ledger yet, so the trade plan isn't saved and the note and tags are refused with a hint to add them later with `frmj note` / `frmj tag`.
+- **Pending → Open** happens at Oanda. The next `frmj sync` (or any command that auto-syncs) ingests the ORDER_FILL and moves the plan, notes, and tags from the LIMIT_ORDER transaction onto it (see [Sync flow](#sync-flow)), because `journal` and `stats` look for them on the fill. A **Cancelled** order's journal stays on its LIMIT_ORDER transaction.
+- **Open → Closed** is also an Oanda event (or `frmj close`); the closing ORDER_FILL lands in the ledger on the next sync, and `stats` pairs it with the opening fill by trade ID. `frmj trail` changes the live trailing stop but not the saved trade plan, so the plan keeps what was intended at entry.
+
 ## Planning data types
 
 Almost every class in FRoMaJ is a frozen data container (dataclass, enum, or exception); the logic lives in functions. The one class with real behavior is `OandaClient`. So a class diagram is most useful for showing how data moves through trade planning, the middle of the [trade flow](#trade-flow) above:
