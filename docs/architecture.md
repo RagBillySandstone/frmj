@@ -4,12 +4,13 @@
 
 ```
 src/frmj/
-├── cli/                # Typer CLI — prompts/output, thin shell over services + app layer
+├── cli/                # Typer CLI — prompts/output, thin shell over services, queries + app layer
 │   ├── __init__.py     # The Typer app; registers each command module
 │   ├── sync.py, trade.py, positions.py, ...   # One module per command (or command family)
 │   ├── _trade_helpers.py, _trade_multi.py     # TP/SL prompts and the --multi flow for trade
 │   └── _display.py, _completion.py            # Output formatting and tab completion shared across commands
 ├── services.py         # Multi-step flows (trade planning, post-fill, positions, close) — no Typer dependency
+├── queries.py          # Plain SQL reads/writes on the ledger: transactions, notes, tags, plans, snapshots
 ├── app.py              # Wiring: DB factory, client factory, config helpers, keychain
 ├── accounts.py         # Pure SQLite CRUD for named account profiles and live-mode flag
 ├── domain/
@@ -42,6 +43,7 @@ flowchart TB
 
     subgraph APP["Application layer"]
         services["services.py<br/>multi-step flows"]
+        queries["queries.py<br/>ledger reads + writes"]
         app["app.py<br/>wiring: DB, client, config, tokens"]
         accounts["accounts.py<br/>account profiles + config CRUD"]
     end
@@ -70,6 +72,7 @@ flowchart TB
 
     user --> cli
     cli --> services
+    cli --> queries
     cli --> app
     cli --> accounts
     cli --> sync
@@ -79,6 +82,8 @@ flowchart TB
     services --> oanda
     services --> sync
     services --> risk & sizing & pricing
+
+    queries --> oanda
 
     app --> accounts
     app --> persistence
@@ -102,13 +107,13 @@ flowchart TB
     accounts --> db
     sync --> db
     services --> db
-    cli -. "direct SQL:<br/>journal, stats, export, note, tag, ..." .-> db
+    queries --> db
 ```
 
 - **Dependencies point inward, with no cycles.** The domain layer imports only itself, and nothing outside `cli/` imports `cli/`. `services.py` does not import `app.py`: it is handed an open connection and client, which is what keeps it free of Typer and reusable from another front end.
 - **`sizing.py` is the core.** `risk.py`, `pricing.py`, and the Oanda models all import it for `InstrumentSpec`, `PriceQuote`, and `Direction`.
 - **Execution depends on domain, not the reverse.** `OandaClient` returns domain types (`InstrumentSpec`, `PriceQuote`, `Candle`), so API data becomes domain data at the edge.
-- **`cli/` still issues its own SQL.** The trade, positions, close, and trail flows go through `services.py`, but the reporting commands (`journal`, `stats`, `export`, `note`, `tag`) query the database directly (the dotted arrow), as do smaller pieces elsewhere in `cli/`: the post-trade note prompt, `positions`' `[note]` flags, `sync --watch` output, `financing` snapshots, and tab completion. A second front end would have to duplicate those queries.
+- **`cli/` issues no SQL of its own.** Multi-step flows go through `services.py`, and every other database read or write goes through `queries.py` (ledger) or `accounts.py` (profiles and config), so another front end can reuse them as-is. `queries.py` imports only the Oanda data models, for `FinancingRate`.
 - **External access is concentrated.** Only `execution/oanda` touches the network and only `app.py` touches the keychain. The database is shared: several components issue SQL against the schema defined in `persistence/`.
 
 ## Layer separation
@@ -122,6 +127,8 @@ The execution layer (`oanda`, `sync`) handles all network and database I/O. It f
 `app.py` is the only place that resolves configuration from the environment, touches the database file or draft plan, or accesses the OS keychain. The exceptions are files the user names on the command line (`export --output` writes one, `sync --csv` reads one) and `config get`/`config check`, which look at the token environment variables only to report where the token comes from. The CLI commands call `app.py` to obtain wired-up dependencies, then pass them into `services.py` and the domain layer.
 
 `services.py` holds multi-step operations that combine several Oanda API calls and/or domain calls into one unit — fetching the market data needed to plan a trade, evaluating risk and correlation, attaching TP/SL and syncing after a fill, fetching the data behind `positions`, and closing tickets for `close`. It takes an already-open connection and client as arguments and has no Typer dependency, so it's reusable from any future non-CLI interface. Prompting, confirmation, and terminal output stay in the `cli/` package.
+
+`queries.py` holds the single-step SQL behind the CLI that isn't about account profiles: transaction lookups and listings (`journal`, `export`, `sync --watch`), notes and tags, trade plans, the inputs to `stats`, and financing-rate snapshots. Like `accounts.py`, each function takes an open connection and returns plain data (or `sqlite3.Row`s); nothing in it prompts, prints, or exits.
 
 `plan_account_sizing()` is the one per-account planning step — risk check, correlation check, and unit sizing — shared by both `trade()` (called once) and the `--multi` group flow (called once per account, against a shared `InstrumentContext` but each account's own `AccountContext`), so the two commands can't drift out of sync on that logic.
 
@@ -196,7 +203,7 @@ sequenceDiagram
     OC->>API: GET transactions/sinceid
     Svc->>DB: insert transactions, save trade_plan
     CLI->>U: note and tags?
-    CLI->>DB: insert notes, tags
+    CLI->>DB: insert notes, tags (queries.py)
 ```
 
 Every prompt comes from `cli/trade.py`; `services.py` and the domain layer never talk to the user. All risk, sizing, and pricing math is a pure domain call, and all network traffic goes through `OandaClient`. Before the fill the database is only read; trading data (transactions, trade plan, notes, tags) is written only after Oanda confirms the order.
