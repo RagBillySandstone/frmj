@@ -265,6 +265,47 @@ stateDiagram-v2
 - **Pending → Open** happens at Oanda. The next `frmj sync` (or any command that auto-syncs) ingests the ORDER_FILL and moves the plan, notes, and tags from the LIMIT_ORDER transaction onto it (see [Sync flow](#sync-flow)), because `journal` and `stats` look for them on the fill. A **Cancelled** order's journal stays on its LIMIT_ORDER transaction.
 - **Open → Closed** is also an Oanda event (or `frmj close`); the closing ORDER_FILL lands in the ledger on the next sync, and `stats` pairs it with the opening fill by trade ID. `frmj trail` changes the live trailing stop but not the saved trade plan, so the plan keeps what was intended at entry.
 
+## Sync flow
+
+How Oanda's transactions get into the ledger (`execution/sync.py`, fed by `OandaClient` or the CSV parser). Every command that syncs, including the automatic syncs in `journal`, `stats`, and after a trade, goes through this path.
+
+```mermaid
+flowchart TD
+    start([sync_incremental]) --> cursor{"cursor in<br/>sync_cursors?"}
+    cursor -- no --> cold([sync_cold])
+    cursor -- yes --> since["GET /transactions/sinceid<br/>repeat until a page<br/>comes back short"]
+    cold --> pages["GET /transactions for the page list,<br/>then fetch every page"]
+    csv([sync_csv]) --> parse["parse Hub CSV<br/>(UTC timestamps only)"]
+
+    since --> link["link DAILY_FINANCING children<br/>to their parent row ID"]
+    pages --> link
+    since -- no rows --> unchanged([cursor unchanged, done])
+
+    link --> order["order the batch:<br/>parents first, then children"]
+    parse --> order
+
+    order --> insert["INSERT each row"]
+    insert -- "duplicate<br/>(account_id, oanda_id)" --> skip["count as skipped"]
+    insert -- new --> parent["children: parent ID from this batch,<br/>else from earlier rows in the DB"]
+    skip --> fills
+    parent --> fills{"new ORDER_FILL for a<br/>pending entry order?"}
+    fills -- yes --> move["move that order's notes, tags,<br/>trade plan onto the fill"]
+    fills -- no --> commit
+    move --> commit["COMMIT the whole batch"]
+
+    commit --> write{"which entry point?"}
+    write -- "cold / incremental" --> adv["cursor = last row's ID"]
+    write -- csv --> fwd["cursor = highest ID,<br/>only if it moves forward"]
+    adv --> done([SyncResult: ingested, skipped, cursor])
+    fwd --> done
+```
+
+- **One batch, one commit.** Each run fetches everything new first and writes it in a single transaction, so a network error mid-fetch writes nothing, and an error mid-insert leaves nothing committed. The next run simply fetches the same window again.
+- **Re-running is always safe.** The unique index on `(account_id, oanda_id)` turns an overlapping or repeated sync (`--cold` re-runs, a CSV covering already-synced history) into skipped rows rather than errors. The cursor is written only after the commit.
+- **Financing children** are linked in two places: within one fetch, the client stamps each child with its parent's Oanda ID; when the rows are inserted, the parent's local row ID is found in the current batch or, if it arrived in an earlier sync, in the database. A child whose parent is missing is kept with no parent rather than failing the batch.
+- **Entry-order journals** move to the fill only for LIMIT, STOP and MARKET_IF_TOUCHED orders, so notes on other transactions an ORDER_FILL refers to stay put. This runs after all rows in the batch are inserted, so an order and its fill arriving together still link.
+- **`sync --csv`** joins at the insert step. CSV rows carry no parent links or order IDs, so it only ever inserts and skips, and it never moves the cursor backwards: importing old history doesn't make the next API sync re-fetch it.
+
 ## Planning data types
 
 Almost every class in FRoMaJ is a frozen data container (dataclass, enum, or exception); the logic lives in functions. The one class with real behavior is `OandaClient`. So a class diagram is most useful for showing how data moves through trade planning, the middle of the [trade flow](#trade-flow) above:
