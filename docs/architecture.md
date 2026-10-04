@@ -261,7 +261,7 @@ stateDiagram-v2
 
 - **Planned** exists only in memory. Nothing is written until an order is placed, except the draft.
 - **Draft** is `saved_plan.json` in the data directory: one slot, overwritten by the next save and removed once the order is placed. It records the account, so `--resume` places it on the account it was planned for.
-- **Placing → Open/Pending** is where the journal is written: right after the order, FRoMaJ syncs, saves the trade plan on the fill (market) or on the LIMIT_ORDER transaction (pending limit), and prompts for a note and tags, which go on the same transaction. If that post-order sync fails, the transaction isn't in the ledger yet, so the trade plan isn't saved and the note and tags are refused with a hint to add them later with `frmj note` / `frmj tag`.
+- **Placing → Open/Pending** is where the journal is written: right after the order, FRoMaJ syncs, saves the trade plan on the fill (market) or on the LIMIT_ORDER transaction (pending limit), and prompts for a note and tags, which go on the same transaction. If that post-order sync fails, the transaction isn't in the ledger yet: the trade plan waits in `deferred_trade_plans` and is attached by the next sync that brings the transaction in, while the note and tags are refused with a hint to add them later with `frmj note` / `frmj tag`.
 - **Pending → Open** happens at Oanda. The next `frmj sync` (or any command that auto-syncs) ingests the ORDER_FILL and moves the plan, notes, and tags from the LIMIT_ORDER transaction onto it (see [Sync flow](#sync-flow)), because `journal` and `stats` look for them on the fill. A **Cancelled** order's journal stays on its LIMIT_ORDER transaction.
 - **Open → Closed** is also an Oanda event (or `frmj close`); the closing ORDER_FILL lands in the ledger on the next sync, and `stats` pairs it with the opening fill by trade ID. `frmj trail` changes the live trailing stop but not the saved trade plan, so the plan keeps what was intended at entry.
 
@@ -288,7 +288,10 @@ flowchart TD
     insert -- "duplicate<br/>(account_id, oanda_id)" --> skip["count as skipped"]
     insert -- new --> parent["children: parent ID from this batch,<br/>else from earlier rows in the DB"]
     skip --> fills
-    parent --> fills{"new ORDER_FILL for a<br/>pending entry order?"}
+    parent --> deferred{"trade plan waiting in<br/>deferred_trade_plans?"}
+    deferred -- yes --> attach["attach it to this row,<br/>delete the deferred copy"]
+    deferred -- no --> fills
+    attach --> fills{"new ORDER_FILL for a<br/>pending entry order?"}
     fills -- yes --> move["move that order's notes, tags,<br/>trade plan onto the fill"]
     fills -- no --> commit
     move --> commit["COMMIT the whole batch"]
@@ -303,7 +306,8 @@ flowchart TD
 - **One batch, one commit.** Each run fetches everything new first and writes it in a single transaction, so a network error mid-fetch writes nothing, and an error mid-insert leaves nothing committed. The next run simply fetches the same window again.
 - **Re-running is always safe.** The unique index on `(account_id, oanda_id)` turns an overlapping or repeated sync (`--cold` re-runs, a CSV covering already-synced history) into skipped rows rather than errors. The cursor is written only after the commit.
 - **Financing children** are linked in two places: within one fetch, the client stamps each child with its parent's Oanda ID; when the rows are inserted, the parent's local row ID is found in the current batch or, if it arrived in an earlier sync, in the database. A child whose parent is missing is kept with no parent rather than failing the batch.
-- **Entry-order journals** move to the fill only for LIMIT, STOP and MARKET_IF_TOUCHED orders, so notes on other transactions an ORDER_FILL refers to stay put. This runs after all rows in the batch are inserted, so an order and its fill arriving together still link.
+- **Deferred trade plans** are plans `frmj trade` couldn't save because its post-order sync failed (see [Trade lifecycle](#trade-lifecycle)). When the transaction they belong to is ingested, the plan moves into `trade_plans`.
+- **Entry-order journals** move to the fill only for LIMIT, STOP and MARKET_IF_TOUCHED orders, so notes on other transactions an ORDER_FILL refers to stay put. This runs after all rows in the batch are inserted, and after deferred plans are attached, so an order and its fill arriving together still link, even if the order's plan was deferred.
 - **`sync --csv`** joins at the insert step. CSV rows carry no parent links or order IDs, so it only ever inserts and skips, and it never moves the cursor backwards: importing old history doesn't make the next API sync re-fetch it.
 
 ## Planning data types
@@ -459,6 +463,7 @@ SQLite at the platform default path (see [`FRMJ_DB_PATH`](configuration.md#envir
 | `notes` | Free-text notes attached to transactions. |
 | `tags` | Short labels attached to transactions; used in journal filters and stats breakdowns. |
 | `trade_plans` | Intended TP/SL prices recorded at order time; shown in `journal` alongside fills. For a limit order the plan (and any notes/tags) sits on the pending order's transaction until sync moves it to the fill. |
+| `deferred_trade_plans` | Trade plans whose transaction wasn't in the ledger yet because the post-order sync failed, keyed by Oanda account + transaction ID. Sync moves each into `trade_plans` when its transaction arrives. |
 | `financing_rate_snapshots` | Daily captures of Oanda's long/short financing rates, recorded by each live `frmj financing` run; read back by `financing --date`. |
 | `sync_cursors` | One row per account; tracks the last ingested Oanda transaction ID for incremental sync. |
 | `config` | Flat key/value store for installation-wide settings: `active_account` and `live_mode`. |
@@ -512,6 +517,15 @@ erDiagram
         TEXT atr_pips
         TEXT sl_atr_multiple
     }
+    deferred_trade_plans {
+        TEXT account_id PK "Oanda account ID"
+        TEXT oanda_id PK "transaction not synced yet"
+        TEXT tp_price
+        TEXT sl_price
+        TEXT trail_pips
+        TEXT atr_pips
+        TEXT sl_atr_multiple
+    }
     sync_cursors {
         TEXT account_id PK "Oanda account ID"
         TEXT last_oanda_id
@@ -533,13 +547,14 @@ erDiagram
     accounts |o..o{ transactions : "oanda_id = account_id (no FK)"
     accounts |o..o| sync_cursors : "oanda_id = account_id (no FK)"
     accounts |o..o{ financing_rate_snapshots : "oanda_id = account_id (no FK)"
+    transactions |o..o| deferred_trade_plans : "waits for (account_id, oanda_id)"
     config |o..o| accounts : "active_account = name (no FK)"
 ```
 
 Solid lines are foreign keys SQLite enforces; dashed lines are links made only in code. The schema has two halves:
 
 - **Profiles** (`accounts`, `account_groups`, `account_config`, `config`) are keyed by the profile *name* you choose, with real foreign keys between them.
-- **The ledger** (`transactions` and everything hanging off it, `sync_cursors`, `financing_rate_snapshots`) is keyed by the *Oanda* account ID, exactly as Oanda reports it, and has no foreign key to `accounts`. Code joins the two on `accounts.oanda_id`.
+- **The ledger** (`transactions` and everything hanging off it, `deferred_trade_plans`, `sync_cursors`, `financing_rate_snapshots`) is keyed by the *Oanda* account ID, exactly as Oanda reports it, and has no foreign key to `accounts`. Code joins the two on `accounts.oanda_id`.
 
 Keeping them separate lets the ledger outlive its profile: `frmj account remove` deletes the profile, its config, and its group memberships but keeps its transactions, and re-adding an account with the same Oanda ID picks the history back up. It also means anything that looks a transaction up by Oanda ID must also filter by `account_id`, because Oanda IDs repeat across accounts. `accounts.oanda_id` isn't unique either: two profiles may point at one Oanda account.
 

@@ -215,7 +215,7 @@ The flow:
 7. Confirms before placing the order (`y` / `n` / `e` to re-enter TP/SL and any trailing stop).
 8. Places a market order (or a limit order with `--limit`, see below); on failure, prompts to retry, save the draft, or abort.
 9. Attaches TP/SL and any trailing stop to the open trade on Oanda (a limit order carries them instead).
-10. Syncs the fill into the local journal.
+10. Syncs the fill into the local journal and saves the trade plan on it. If that sync fails, the order still stands: the plan is kept and attached by the next `frmj sync` (or any command that syncs), and you're told so.
 11. Prompts for an optional note and tags.
 
 **TP/SL input formats:**
