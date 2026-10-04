@@ -42,6 +42,88 @@ The execution layer (`oanda`, `sync`) handles all network and database I/O. It f
 
 `plan_account_sizing()` is the one per-account planning step — risk check, correlation check, and unit sizing — shared by both `trade()` (called once) and the `--multi` group flow (called once per account, against a shared `InstrumentContext` but each account's own `AccountContext`), so the two commands can't drift out of sync on that logic.
 
+## Trade flow
+
+`frmj trade` (a plain market order) is the one flow that crosses every layer, so it shows how the pieces fit together. The other commands are slices of it: `sync`, `positions`, `close`, and `trail` each go CLI → `services.py` → `OandaClient` → Oanda, and write any results to SQLite.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Trader
+    participant CLI as cli/trade.py
+    participant App as app.py
+    participant Svc as services.py
+    participant Dom as domain (risk, sizing, pricing)
+    participant OC as OandaClient
+    participant API as Oanda v20 API
+    participant DB as SQLite
+
+    U->>CLI: frmj trade EUR_USD long
+    CLI->>App: get_db()
+    App->>DB: open, ensure_schema, migrations
+    CLI->>App: get_client(conn, account)
+    App->>App: token: env var → keychain
+    App-->>CLI: OandaClient
+    CLI->>App: get_risk_config / get_atr_config
+    App->>DB: read account_config
+
+    rect rgba(127,127,127,0.1)
+    note over CLI,API: Gather market and account state
+    CLI->>Svc: fetch_instrument_context(client, instrument)
+    Svc->>OC: get_instrument, get_price, get_financing_rates, get_daily_candles
+    OC->>API: GET instruments / pricing / candles
+    Svc->>Dom: wilder_atr(candles)
+    CLI->>Svc: fetch_account_context(client, instrument)
+    Svc->>OC: get_account_summary, get_open_trades, get_pending_orders
+    OC->>API: GET account / trades / orders
+    end
+
+    CLI->>Svc: plan_account_sizing(...)
+    Svc->>Dom: evaluate_trade (cap, scale-in)
+    Svc->>Dom: evaluate_correlation
+    Svc->>Dom: compute_units
+    Svc-->>CLI: sizing + correlation warnings
+    opt correlation warnings
+        CLI->>U: Proceed anyway?
+    end
+
+    CLI->>U: plan (NAV, units, margin, ATR)
+    loop until y or n (e = re-enter)
+        CLI->>U: TP / SL (Enter = ATR default) / trail prompts
+        CLI->>Dom: exit prices, P/L, R:R
+        CLI->>U: exit levels, confirm y/n/e
+    end
+
+    CLI->>DB: live-mode gate (if live account)
+    loop retry / save draft / abort
+        CLI->>OC: place_market_order
+        OC->>API: POST orders
+        alt timeout or error
+            CLI->>U: retry, save, or abort?
+            opt save
+                CLI->>App: save_draft_plan → saved_plan.json
+            end
+        end
+    end
+
+    CLI->>Svc: execute_post_fill(fill, TP/SL/trail)
+    Svc->>OC: attach_take_profit / stop_loss / trailing_stop
+    OC->>API: PUT trades/{id}/orders
+    Svc->>OC: get_transactions_since (via sync_incremental)
+    OC->>API: GET transactions/sinceid
+    Svc->>DB: insert transactions, save trade_plan
+    CLI->>U: note and tags?
+    CLI->>DB: insert notes, tags
+```
+
+Every prompt comes from `cli/trade.py`; `services.py` and the domain layer never talk to the user. All risk, sizing, and pricing math is a pure domain call, and all network traffic goes through `OandaClient`. Before the fill the database is only read; trading data (transactions, trade plan, notes, tags) is written only after Oanda confirms the order.
+
+Variants of the same flow:
+
+- **`--limit`** adds a limit-price prompt after sizing, sends TP/SL and any trailing stop with the order, and finishes with `execute_post_limit` instead of `execute_post_fill`.
+- **`--multi GROUP`** runs the market-data block once and `plan_account_sizing` once per account, then places and post-processes each account's order in turn.
+- **`--resume`** skips market data, sizing, and the TP/SL prompts: it loads `saved_plan.json`, shows the saved plan, asks for a single "Place order?" confirmation, then joins the flow at the live-mode gate.
+
 ## Database schema
 
 SQLite at the platform default path (see [`FRMJ_DB_PATH`](configuration.md#environment-variables)) or `$FRMJ_DB_PATH`. WAL mode. Foreign keys enforced.
