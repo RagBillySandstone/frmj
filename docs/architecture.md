@@ -102,13 +102,13 @@ flowchart TB
     accounts --> db
     sync --> db
     services --> db
-    cli -. "direct SQL:<br/>journal, stats, export, note, tag" .-> db
+    cli -. "direct SQL:<br/>journal, stats, export, note, tag, ..." .-> db
 ```
 
 - **Dependencies point inward, with no cycles.** The domain layer imports only itself, and nothing outside `cli/` imports `cli/`. `services.py` does not import `app.py`: it is handed an open connection and client, which is what keeps it free of Typer and reusable from another front end.
 - **`sizing.py` is the core.** `risk.py`, `pricing.py`, and the Oanda models all import it for `InstrumentSpec`, `PriceQuote`, and `Direction`.
 - **Execution depends on domain, not the reverse.** `OandaClient` returns domain types (`InstrumentSpec`, `PriceQuote`, `Candle`), so API data becomes domain data at the edge.
-- **The reporting commands bypass `services.py`.** `journal`, `stats`, `export`, `note`, and `tag` run their SQL directly in `cli/` (the dotted arrow), whereas the trade, positions, close, and trail flows go through `services.py`. A second front end would have to duplicate those queries.
+- **`cli/` still issues its own SQL.** The trade, positions, close, and trail flows go through `services.py`, but the reporting commands (`journal`, `stats`, `export`, `note`, `tag`) query the database directly (the dotted arrow), as do smaller pieces elsewhere in `cli/`: the post-trade note prompt, `positions`' `[note]` flags, `sync --watch` output, `financing` snapshots, and tab completion. A second front end would have to duplicate those queries.
 - **External access is concentrated.** Only `execution/oanda` touches the network and only `app.py` touches the keychain. The database is shared: several components issue SQL against the schema defined in `persistence/`.
 
 ## Layer separation
