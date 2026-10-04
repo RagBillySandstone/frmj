@@ -244,6 +244,23 @@ class TestAnnotations:
         assert queries.notes_by_transaction(conn, [a, b]) == {a: ["one", "two"]}
         assert queries.notes_by_transaction(conn, []) == {}
 
+    def test_notes_by_transaction_beyond_sqlite_parameter_limit(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """More IDs than SQLite allows bound parameters in one statement
+        (32766 on current builds) must not raise "too many SQL variables"."""
+        first = _add_txn(conn, "1")
+        last = _add_txn(conn, "2")
+        queries.add_note(conn, first, "first")
+        queries.add_note(conn, last, "last")
+        # Pad with IDs that have no notes, putting the real ones at both ends
+        # so they land in different batches.
+        ids = [first, *range(10_000, 50_000), last]
+        assert queries.notes_by_transaction(conn, ids) == {
+            first: ["first"],
+            last: ["last"],
+        }
+
 
 # ---------------------------------------------------------------------------
 # Statistics inputs

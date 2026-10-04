@@ -268,6 +268,10 @@ def list_transactions_chronological(
 # Per-transaction annotations (journal, export)
 # ---------------------------------------------------------------------------
 
+#: Most IDs passed in one ``IN (...)`` list; safely below SQLite's oldest
+#: default limit of 999 bound parameters per statement.
+_IN_BATCH_SIZE: int = 500
+
 
 def get_trade_plan(conn: sqlite3.Connection, transaction_id: int) -> sqlite3.Row | None:
     """
@@ -308,17 +312,22 @@ def notes_by_transaction(
     Return the note bodies for each of *transaction_ids* that has notes,
     keyed by transaction ID, each list oldest first. Transactions without
     notes are absent from the result.
+
+    The IDs are looked up in batches of ``_IN_BATCH_SIZE``: SQLite caps the
+    number of ``?`` parameters in one statement (999 before 3.32, 32766
+    since), and an export can cover more transactions than that. Each
+    transaction falls in exactly one batch, so its notes stay in order.
     """
-    if not transaction_ids:
-        return {}
-    placeholders = ",".join("?" * len(transaction_ids))
     result: dict[int, list[str]] = {}
-    for row in conn.execute(
-        f"SELECT transaction_id, body FROM notes "
-        f"WHERE transaction_id IN ({placeholders}) ORDER BY id",
-        transaction_ids,
-    ).fetchall():
-        result.setdefault(row[0], []).append(row[1])
+    for start in range(0, len(transaction_ids), _IN_BATCH_SIZE):
+        batch = transaction_ids[start : start + _IN_BATCH_SIZE]
+        placeholders = ",".join("?" * len(batch))
+        for row in conn.execute(
+            f"SELECT transaction_id, body FROM notes "
+            f"WHERE transaction_id IN ({placeholders}) ORDER BY id",
+            batch,
+        ).fetchall():
+            result.setdefault(row[0], []).append(row[1])
     return result
 
 
