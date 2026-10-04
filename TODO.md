@@ -33,3 +33,7 @@ Unlike the REST API's ORDER_FILL transactions, the Oanda Hub CSV export never st
 ### 15. ATR-multiple take-profit (`3x` at the TP prompt)
 
 `trade` accepts `2x` / `2atr` only at the stop-loss prompt (see the ATR stop-loss in `docs/commands.md`). Allowing it at the take-profit prompt too would let a plan be set up fully in ATR terms (e.g. 1.5× ATR stop, 3× ATR target). This needs `_prompt_tpsl` to take the ATR, and a `tp_atr_multiple` in `trade_plans` and the draft, next to `sl_atr_multiple`. There should be no default: Enter still skips the TP.
+
+### 16. Move direct SQL out of `cli/` into a query module
+
+`services.py` is meant to hold everything a non-CLI front end would need, but 27 `conn.execute` calls still live in `cli/` (see "Components and dependencies" in `docs/architecture.md`): the `journal` listing and filters, `stats`' closed-trade/tag/financing queries, `export`, `note`/`tag` lookup and inserts (`_resolve_transaction`, `_attach_tags`), the post-trade note prompt in `trade.py` and `_trade_multi.py`, `[note]` counts in `_display.py`, `sync --watch` output, `financing` snapshot read/write, and transaction-type completion. Move them into plain functions that take a connection and return data (in `services.py`, or a `queries.py` beside it if that grows too large), leaving `cli/` to prompt and format. No behavior change; the existing CLI tests should cover it.
