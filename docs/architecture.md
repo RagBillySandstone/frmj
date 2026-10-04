@@ -371,6 +371,86 @@ SQLite at the platform default path (see [`FRMJ_DB_PATH`](configuration.md#envir
 | `sync_cursors` | One row per account; tracks the last ingested Oanda transaction ID for incremental sync. |
 | `config` | Flat key/value store for installation-wide settings: `active_account` and `live_mode`. |
 
+```mermaid
+erDiagram
+    accounts {
+        TEXT name PK
+        TEXT oanda_id "not unique"
+        INTEGER is_practice
+    }
+    account_groups {
+        INTEGER id PK
+        TEXT group_name
+        TEXT account_name FK
+    }
+    account_config {
+        TEXT account_name PK, FK
+        TEXT key PK
+        TEXT value
+    }
+    config {
+        TEXT key PK "active_account, live_mode"
+        TEXT value
+    }
+    transactions {
+        INTEGER id PK
+        TEXT account_id UK "Oanda account ID"
+        TEXT oanda_id UK "unique per account"
+        TEXT type
+        TEXT time
+        INTEGER parent_id FK "DAILY_FINANCING child to parent"
+        TEXT raw_json
+    }
+    notes {
+        INTEGER id PK
+        INTEGER transaction_id FK
+        TEXT body
+    }
+    tags {
+        INTEGER id PK
+        INTEGER transaction_id FK
+        TEXT tag "unique per transaction"
+    }
+    trade_plans {
+        INTEGER id PK
+        INTEGER transaction_id FK, UK
+        TEXT tp_price
+        TEXT sl_price
+        TEXT trail_pips
+        TEXT atr_pips
+        TEXT sl_atr_multiple
+    }
+    sync_cursors {
+        TEXT account_id PK "Oanda account ID"
+        TEXT last_oanda_id
+    }
+    financing_rate_snapshots {
+        TEXT account_id PK "Oanda account ID"
+        TEXT instrument PK
+        TEXT rate_date PK
+        TEXT long_rate
+        TEXT short_rate
+    }
+
+    accounts ||--o{ account_groups : "member of"
+    accounts ||--o{ account_config : "settings"
+    transactions ||--o{ notes : "annotated by"
+    transactions ||--o{ tags : "labelled by"
+    transactions ||--o| trade_plans : "planned by"
+    transactions |o--o{ transactions : "parent of"
+    accounts |o..o{ transactions : "oanda_id = account_id (no FK)"
+    accounts |o..o| sync_cursors : "oanda_id = account_id (no FK)"
+    accounts |o..o{ financing_rate_snapshots : "oanda_id = account_id (no FK)"
+    config |o..o| accounts : "active_account = name (no FK)"
+```
+
+Solid lines are foreign keys SQLite enforces; dashed lines are links made only in code. The schema has two halves:
+
+- **Profiles** (`accounts`, `account_groups`, `account_config`, `config`) are keyed by the profile *name* you choose, with real foreign keys between them.
+- **The ledger** (`transactions` and everything hanging off it, `sync_cursors`, `financing_rate_snapshots`) is keyed by the *Oanda* account ID, exactly as Oanda reports it, and has no foreign key to `accounts`. Code joins the two on `accounts.oanda_id`.
+
+Keeping them separate lets the ledger outlive its profile: `frmj account remove` deletes the profile, its config, and its group memberships but keeps its transactions, and re-adding an account with the same Oanda ID picks the history back up. It also means anything that looks a transaction up by Oanda ID must also filter by `account_id`, because Oanda IDs repeat across accounts. `accounts.oanda_id` isn't unique either: two profiles may point at one Oanda account.
+
 Transactions are never updated or deleted — Oanda is the system of record. Corrective events arrive as new rows. The full raw JSON payload is preserved in every row so new columns can be added via migration without re-fetching from the API.
 
 ## Migration from earlier versions
