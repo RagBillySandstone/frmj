@@ -23,8 +23,18 @@ runner = CliRunner()
 
 class TestCompletionHelpers:
     def test_complete_instrument_matches_prefix_case_insensitively(self) -> None:
-        assert "eur_usd" in _complete_instrument("EUR")
+        assert "EUR_USD" in _complete_instrument("EUR")
+        assert "eur_usd" in _complete_instrument("eur")
+
+    def test_complete_instrument_echoes_the_typed_case(self) -> None:
+        """Candidates must start with exactly what was typed, or bash/zsh
+        discard them."""
+        assert all(p.startswith("EUR") for p in _complete_instrument("EUR"))
         assert all(p.startswith("eur") for p in _complete_instrument("eur"))
+        assert _complete_instrument("Eur_u") == ["Eur_usd"]
+        assert _complete_instrument("EUR_US") == ["EUR_USD"]
+        # Nothing typed yet: offer Oanda's canonical uppercase form.
+        assert "EUR_USD" in _complete_instrument("")
 
     def test_complete_instrument_no_match_returns_empty(self) -> None:
         assert _complete_instrument("zzz") == []

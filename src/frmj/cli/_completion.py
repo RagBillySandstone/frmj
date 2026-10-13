@@ -144,8 +144,13 @@ def _match_typed_case(candidates: Iterable[str], incomplete: str) -> list[str]:
 
 
 def _complete_instrument(incomplete: str) -> list[str]:
-    """Return FX pairs whose names start with *incomplete* (case-insensitive)."""
-    return [p for p in _FX_PAIRS if p.startswith(incomplete.lower())]
+    """Return FX pairs starting with *incomplete*, in the case typed.
+
+    Matching is case-insensitive; see ``_match_typed_case`` for how the
+    returned case is chosen. Every caller (``trade``, ``journal --instrument``,
+    ``export --instrument``) uppercases the value, so either form works.
+    """
+    return _match_typed_case((p.upper() for p in _FX_PAIRS), incomplete)
 
 
 def _complete_open_instrument(ctx: typer.Context, incomplete: str) -> list[str]:
