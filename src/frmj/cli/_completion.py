@@ -136,6 +136,14 @@ def _complete_open_instrument(ctx: typer.Context, incomplete: str) -> list[str]:
     command line, otherwise the active account. Any failure (no active
     account configured, network/auth error) is swallowed and yields no
     completions rather than breaking the user's shell.
+
+    Matching is case-insensitive, and each candidate is returned in the case
+    the user typed: bash and zsh discard any candidate that doesn't literally
+    start with the word being completed, so offering ``EUR_USD`` for ``eur``
+    would complete nothing. Input containing a lowercase letter gets the typed
+    prefix followed by a lowercase remainder (``eur`` -> ``eur_usd``); anything
+    else, including an empty word, gets Oanda's uppercase form. ``close``
+    uppercases its argument, so either form works.
     """
     conn = get_db()
     try:
@@ -145,7 +153,15 @@ def _complete_open_instrument(ctx: typer.Context, incomplete: str) -> list[str]:
         return []
     finally:
         conn.close()
-    return sorted(i for i in instruments if i.upper().startswith(incomplete.upper()))
+    matching = sorted(
+        i for i in instruments if i.upper().startswith(incomplete.upper())
+    )
+    # Uppercase input (or nothing typed yet) keeps Oanda's canonical form.
+    if incomplete == incomplete.upper():
+        return matching
+    # Otherwise keep the typed prefix verbatim so the shell accepts the
+    # candidate, and lowercase the rest to match the user's style.
+    return [incomplete + i[len(incomplete) :].lower() for i in matching]
 
 
 def _complete_open_trade_id(ctx: typer.Context, incomplete: str) -> list[str]:

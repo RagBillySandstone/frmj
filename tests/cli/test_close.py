@@ -119,8 +119,25 @@ class TestCloseCommand:
             "frmj.cli._completion.get_client", lambda conn, account_name=None: fake
         )
         assert _complete_open_instrument(_CTX, "") == ["EUR_USD", "USD_JPY"]
-        assert _complete_open_instrument(_CTX, "eur") == ["EUR_USD"]
+        assert _complete_open_instrument(_CTX, "EUR") == ["EUR_USD"]
         assert _complete_open_instrument(_CTX, "gbp") == []
+
+    def test_completion_echoes_the_typed_case(
+        self, close_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Candidates must start with exactly what was typed, or bash/zsh
+        discard them — so lowercase or mixed-case input gets a lowercase
+        candidate that preserves the typed prefix."""
+        fake = FakeFullClient(
+            open_trades=[_open_trade(trade_id="200", instrument="EUR_USD")]
+        )
+        monkeypatch.setattr(
+            "frmj.cli._completion.get_client", lambda conn, account_name=None: fake
+        )
+        assert _complete_open_instrument(_CTX, "eur") == ["eur_usd"]
+        assert _complete_open_instrument(_CTX, "Eu") == ["Eur_usd"]
+        assert _complete_open_instrument(_CTX, "eur_U") == ["eur_Usd"]
+        assert _complete_open_instrument(_CTX, "EUR_") == ["EUR_USD"]
 
     def test_completion_empty_when_no_open_trades(
         self, close_db: Path, monkeypatch: pytest.MonkeyPatch
