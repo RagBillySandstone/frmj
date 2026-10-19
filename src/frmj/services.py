@@ -14,7 +14,7 @@ cover the market-data and risk-check steps of the trade flow,
 ``execute_post_fill`` covers the TP/SL-attach + sync + persist steps after an
 order is placed (``execute_post_limit`` is its limit-order counterpart), and
 ``fetch_positions_view`` / ``execute_close`` / ``execute_trail`` cover the
-``positions``, ``close``, and ``trail`` commands respectively. Order placement
+``positions``, ``close``, and ``tstop`` commands respectively. Order placement
 itself (with its retry/save/abort prompt) stays in ``cli/trade.py`` and
 ``cli/_trade_multi.py`` because the retry decision is inherently interactive.
 
@@ -673,7 +673,7 @@ def execute_close(
 
 
 # ---------------------------------------------------------------------------
-# trail command: set/remove a trailing stop on an open trade + sync
+# tstop command: set/remove a trailing stop on an open trade + sync
 # ---------------------------------------------------------------------------
 
 

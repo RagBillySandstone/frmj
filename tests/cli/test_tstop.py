@@ -1,4 +1,4 @@
-"""Tests for ``frmj trail``.
+"""Tests for ``frmj tstop``.
 
 The fake client quotes EUR_USD at bid 1.09990 / ask 1.10010 (5 dp, no
 trailing-stop bounds), and ``_open_trade`` defaults to trade #6368: LONG
@@ -33,11 +33,11 @@ def _invoke(
     args: list[str],
     inputs: str = "",
 ) -> Result:
-    """Run ``frmj trail ARGS`` against *fake*, answering prompts with *inputs*."""
+    """Run ``frmj tstop ARGS`` against *fake*, answering prompts with *inputs*."""
     monkeypatch.setattr(
-        "frmj.cli.trail.get_client", lambda conn, account_name=None: fake
+        "frmj.cli.tstop.get_client", lambda conn, account_name=None: fake
     )
-    return runner.invoke(app, ["trail", *args], input=inputs)
+    return runner.invoke(app, ["tstop", *args], input=inputs)
 
 
 class TestSetTrail:
@@ -222,9 +222,9 @@ class TestAccountOption:
             requested.append(account_name)
             return fake
 
-        monkeypatch.setattr("frmj.cli.trail.get_client", _get_client)
+        monkeypatch.setattr("frmj.cli.tstop.get_client", _get_client)
         result = runner.invoke(
-            app, ["trail", "6368", "15", "--account", "other"], input="n\n"
+            app, ["tstop", "6368", "15", "--account", "other"], input="n\n"
         )
         assert result.exit_code == 0, result.output
         assert requested == ["other"]

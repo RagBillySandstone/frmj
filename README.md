@@ -93,9 +93,9 @@ frmj config check --connectivity   # also calls the Oanda API to verify credenti
 | [`frmj status`](docs/configuration.md#status-at-a-glance) | Active account, its type, and the execution mode |
 | [`frmj sync`](docs/commands.md#frmj-sync) | Pull transactions from Oanda (or an Oanda Hub CSV) into the local database |
 | [`frmj trade`](docs/commands.md#frmj-trade) | Interactive risk-checked sizing, TP/SL (stop-loss defaults to a multiple of daily ATR) and trailing-stop planning, and order placement |
-| [`frmj trail`](docs/commands.md#frmj-trail) | Add, change, or remove the trailing stop on an open trade |
+| [`frmj tstop`](docs/commands.md#frmj-tstop) | Add, change, or remove the trailing stop on an open trade |
 
-`frmj close`, `journal`, `positions`, `stats`, `sync`, `trade`, and `trail` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command; `journal` and `stats` also take `--all-accounts` (`-A`).
+`frmj close`, `journal`, `positions`, `stats`, `sync`, `trade`, and `tstop` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command; `journal` and `stats` also take `--all-accounts` (`-A`).
 
 ## Documentation
 

@@ -424,7 +424,7 @@ def _display_account_summary(summary: AccountSummary) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Account header (shared by close, positions, sync, and trail)
+# Account header (shared by close, positions, sync, and tstop)
 # ---------------------------------------------------------------------------
 
 

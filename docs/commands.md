@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md)
 
-`frmj close`, `journal`, `positions`, `stats`, `sync`, `trade`, and `trail` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command without switching the active account. `close`, `positions`, `sync`, and `trail` always begin their output by naming the account they act on — `Account: NAME  [practice|live, OANDA_ID]` — whether it's the active one or chosen with `--account`. `journal` and `stats` also accept `--all-accounts` (`-A`) to cover every account at once.
+`frmj close`, `journal`, `positions`, `stats`, `sync`, `trade`, and `tstop` act on the active account by default. Pass `--account NAME` (`-a NAME`) to target another configured account for that one command without switching the active account. `close`, `positions`, `sync`, and `tstop` always begin their output by naming the account they act on — `Account: NAME  [practice|live, OANDA_ID]` — whether it's the active one or chosen with `--account`. `journal` and `stats` also accept `--all-accounts` (`-A`) to cover every account at once.
 
 ## `frmj account`
 
@@ -262,20 +262,20 @@ A price that would fill immediately (at or above the ask for a long, at or below
   R:R  2.27
 ```
 
-A fixed stop-loss and a trailing stop can be set together; Oanda closes the trade on whichever triggers first, and R:R is measured against the tighter of the two. A distance outside the instrument's allowed trailing-stop range is rejected and re-prompted. On a market order the trailing stop is attached after the fill, like TP/SL; a limit order carries it and Oanda sets it when the order fills. The distance is saved in the trade plan (shown by `frmj journal`) and in a saved draft. To add, change, or remove a trailing stop after the trade is open, use [`frmj trail`](#frmj-trail). It works with either `--limit` or `--multi` (the same distance on every account, `--opposite` ones included) but cannot be combined with `--resume`, which uses the saved draft's trailing stop.
+A fixed stop-loss and a trailing stop can be set together; Oanda closes the trade on whichever triggers first, and R:R is measured against the tighter of the two. A distance outside the instrument's allowed trailing-stop range is rejected and re-prompted. On a market order the trailing stop is attached after the fill, like TP/SL; a limit order carries it and Oanda sets it when the order fills. The distance is saved in the trade plan (shown by `frmj journal`) and in a saved draft. To add, change, or remove a trailing stop after the trade is open, use [`frmj tstop`](#frmj-tstop). It works with either `--limit` or `--multi` (the same distance on every account, `--opposite` ones included) but cannot be combined with `--resume`, which uses the saved draft's trailing stop.
 
 **`--multi GROUP`** places the same trade on every account in a saved group (see [`frmj account group`](#frmj-account-group) above) instead of just the active account. Risk, sizing, and correlation are evaluated independently per account (each has its own config, NAV, and open positions); the instrument and TP/SL choice are shared, and a single confirmation covers the whole group. Because the group shares one daily ATR and one default stop-loss, every account in it must have the same `atr_period` and `sl_atr_multiple`; if they differ the trade is refused, listing each account's values. Not supported together with `--resume`.
 
 **`--opposite ACCOUNT`** (repeatable), only with `--multi`, names accounts within the group that take the *other* side of the trade — short when the dialog's direction is long, long when short. TP/SL are mirrored automatically (the same pips/%RoM target applied to the opposite direction naturally lands on the mirrored price). Every named account must already be a member of the group.
 
-## `frmj trail`
+## `frmj tstop`
 
 Add, change, or remove the trailing stop on an open trade.
 
 ```sh
-frmj trail 6368 15          # trail trade #6368 by 15 pips (15p also works)
-frmj trail 6368 off         # remove its trailing stop
-frmj trail 6368 15 --account funded
+frmj tstop 6368 15          # trail trade #6368 by 15 pips (15p also works)
+frmj tstop 6368 off         # remove its trailing stop
+frmj tstop 6368 15 --account funded
 ```
 
 `TRADE_ID` is the ID shown by `frmj positions` (tab-completes from the account's open trades). The command shows the trade's current TP, SL, and trail, then the new trail's distance, where it would trigger right now (the pips behind the bid for a long, above the ask for a short), and the P/L from entry at that price. On a trade already in profit that P/L can be positive: the trail locks it in. A distance outside the instrument's allowed range is rejected before any prompt.

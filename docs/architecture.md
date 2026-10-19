@@ -118,7 +118,7 @@ The execution layer (`oanda`, `sync`) handles all network and database I/O. It f
 
 ## Trade flow
 
-`frmj trade` (a plain market order) is the one flow that crosses every layer, so it shows how the pieces fit together. The other commands are slices of it: `sync`, `positions`, `close`, and `trail` each go CLI → `services.py` → `OandaClient` → Oanda, and write any results to SQLite.
+`frmj trade` (a plain market order) is the one flow that crosses every layer, so it shows how the pieces fit together. The other commands are slices of it: `sync`, `positions`, `close`, and `tstop` each go CLI → `services.py` → `OandaClient` → Oanda, and write any results to SQLite.
 
 ```mermaid
 sequenceDiagram
@@ -219,7 +219,7 @@ stateDiagram-v2
     Placing --> Pending: limit order accepted
     Pending --> Open: fills (sync moves journal)
     Pending --> Cancelled: cancelled in Oanda
-    Open --> Open: frmj trail
+    Open --> Open: frmj tstop
     Open --> Closed: TP / SL / trail, or frmj close
 ```
 
@@ -228,7 +228,7 @@ stateDiagram-v2
 - **Draft** is `saved_plan.json` in the data directory: one slot, overwritten by the next save and removed once the order is placed. It records the account, so `--resume` places it on the account it was planned for.
 - **Placing → Open/Pending** is where the journal is written: right after the order, FRoMaJ syncs, saves the trade plan on the fill (market) or on the LIMIT_ORDER transaction (pending limit), and prompts for a note and tags, which go on the same transaction. If that post-order sync fails, the transaction isn't in the ledger yet: the trade plan waits in `deferred_trade_plans` and is attached by the next sync that brings the transaction in, while the note and tags are refused with a hint to add them later with `frmj note` / `frmj tag`.
 - **Pending → Open** happens at Oanda. The next `frmj sync` (or any command that auto-syncs) ingests the ORDER_FILL and moves the plan, notes, and tags from the LIMIT_ORDER transaction onto it (see [Sync flow](#sync-flow)), because `journal` and `stats` look for them on the fill. A **Cancelled** order's journal stays on its LIMIT_ORDER transaction.
-- **Open → Closed** is also an Oanda event (or `frmj close`); the closing ORDER_FILL lands in the ledger on the next sync, and `stats` pairs it with the opening fill by trade ID. `frmj trail` changes the live trailing stop but not the saved trade plan, so the plan keeps what was intended at entry.
+- **Open → Closed** is also an Oanda event (or `frmj close`); the closing ORDER_FILL lands in the ledger on the next sync, and `stats` pairs it with the opening fill by trade ID. `frmj tstop` changes the live trailing stop but not the saved trade plan, so the plan keeps what was intended at entry.
 
 ## Sync flow
 

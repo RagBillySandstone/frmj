@@ -36,7 +36,7 @@ below the ask for a long, above the bid for a short.
 Trailing stops (``compute_trailing_stop``) take a positive pip distance too.
 Unlike a fixed SL they trail the closing side of the book, so their
 projected loss includes the spread. ``trailing_stop_distance`` and
-``trailing_trigger_now`` serve ``frmj trail``, which sets one on a trade
+``trailing_trigger_now`` serve ``frmj tstop``, which sets one on a trade
 that is already open.
 
 ``wilder_atr`` measures daily volatility from completed candles; the trade

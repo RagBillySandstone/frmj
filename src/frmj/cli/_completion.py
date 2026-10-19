@@ -180,7 +180,7 @@ def _complete_open_instrument(ctx: typer.Context, incomplete: str) -> list[str]:
 
 
 def _complete_open_trade_id(ctx: typer.Context, incomplete: str) -> list[str]:
-    """Return IDs of open trades, for ``frmj trail``.
+    """Return IDs of open trades, for ``frmj tstop``.
 
     Same live query and error handling as ``_complete_open_instrument``
     (honours a preceding ``--account``; any failure yields no completions),

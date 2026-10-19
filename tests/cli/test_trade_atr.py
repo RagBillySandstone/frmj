@@ -71,7 +71,7 @@ class TestFetchInstrumentContextAtr:
         assert ctx.daily_atr is None
 
     def test_no_period_skips_candle_fetch(self) -> None:
-        """Callers that don't need ATR (e.g. ``frmj trail``) make no request."""
+        """Callers that don't need ATR (e.g. ``frmj tstop``) make no request."""
         fake = FakeFullClient(candles=_atr_candles())
         ctx = services.fetch_instrument_context(fake, "EUR_USD")  # type: ignore[arg-type]
         assert ctx.daily_atr is None

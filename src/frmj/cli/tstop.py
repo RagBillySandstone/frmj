@@ -1,4 +1,4 @@
-"""``frmj trail`` — add, change, or remove the trailing stop on an open trade."""
+"""``frmj tstop`` — add, change, or remove the trailing stop on an open trade."""
 
 from __future__ import annotations
 
@@ -57,12 +57,12 @@ def _current_exits_str(trade: OpenTrade) -> str:
 
 
 # ---------------------------------------------------------------------------
-# trail command
+# tstop command
 # ---------------------------------------------------------------------------
 
 
 @app.command()
-def trail(
+def tstop(
     trade_id: str = typer.Argument(
         ...,
         help="Open trade ID, as shown by 'frmj positions'.",

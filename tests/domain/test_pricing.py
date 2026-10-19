@@ -789,7 +789,7 @@ class TestComputeTrailingStop:
 
 class TestTrailingStopDistance:
     """The pips→distance conversion shared by ``trade --trail`` and
-    ``frmj trail``. Bounds and rounding are covered in depth through
+    ``frmj tstop``. Bounds and rounding are covered in depth through
     ``compute_trailing_stop`` above; these pin the standalone entry point."""
 
     def test_converts_pips_to_price_units(self) -> None:

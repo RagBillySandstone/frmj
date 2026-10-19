@@ -108,4 +108,4 @@ from frmj.cli import positions as positions  # noqa: E402
 from frmj.cli import stats as stats  # noqa: E402
 from frmj.cli import sync as sync  # noqa: E402
 from frmj.cli import trade as trade  # noqa: E402
-from frmj.cli import trail as trail  # noqa: E402
+from frmj.cli import tstop as tstop  # noqa: E402
