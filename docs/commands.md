@@ -142,7 +142,7 @@ Run `frmj sync` first if the transaction is not yet in the local database. Oanda
 
 Show all open trades with live P/L, margin, TP/SL levels, any trailing stop, and an estimated daily financing charge (in home currency, colored green/red — not the raw annualized rate), plus an account summary footer. Each trade is laid out to fit an 80-column terminal: the trade itself (ID, instrument, direction, units, entry price), then P/L and margin, then financing and open time, then each of its TP, SL, and trailing stop on its own line. Pending orders follow the same pattern, with the current market price, time in force, and placement time on the second line. The footer includes Oanda's margin closeout percent; at 100% Oanda begins closing positions. Trades and pending orders that have notes in the local journal are flagged `[note]`.
 
-Each trade's P/L is followed by its profit in pips and percent, matching Oanda's web portal Trades list: `P/L: $-1,785.79 (-45.4 pips, -0.32%)`. Both measure the price move from entry to the price the trade would close at now (bid for a long, ask for a short); the percent is that move relative to the entry price, so it doesn't depend on position size.
+Each trade's P/L is followed by its profit in pips and percent, matching Oanda's web portal Trades list: `P/L: -$1,785.79 (-45.4 pips, -0.32%)`. Both measure the price move from entry to the price the trade would close at now (bid for a long, ask for a short); the percent is that move relative to the entry price, so it doesn't depend on position size.
 
 A trailing stop shows its current trigger price, the P/L if it triggers there, and the distance it trails by in price units: `Trail: 1.10150 (+$10.00) [0.00200 behind]`. The trigger moves as the trade goes your way, so a positive figure means the stop has locked in profit.
 
@@ -237,7 +237,7 @@ The flow:
   ...
 Stop-loss   (pips, 10%, or 2x ATR; Enter = 1.5x ATR = 75.0p, '-' to skip):
 Exit levels:
-  SL: 1.09260  →  $-681.82  (-34.1% RoM)  [1.5× ATR]
+  SL: 1.09260  →  -$681.82  (-34.1% RoM)  [1.5× ATR]
 ```
 
 If the candles can't be fetched, the plan shows `Daily ATR(14): unavailable (no default stop-loss)` and Enter skips the stop-loss as it does for take-profit. The trade plan records the ATR and the multiple, if the stop was ATR-based (`frmj journal` shows `SL 1.09260 (1.5× ATR)`). A saved draft records them too. The default applies with either `--limit` or `--multi` (one ATR for the whole group, mirrored for `--opposite` accounts).
@@ -259,8 +259,8 @@ A price that would fill immediately (at or above the ask for a long, at or below
 **`--trail`** (`-t`) adds a trailing stop-loss prompt after the stop-loss one, in pips (`20` or `20p`; Enter skips). Oanda keeps the stop that far behind the price and moves it only in the trade's favour. It trails the side of the book the trade would close at (the bid for a long, the ask for a short), so it starts one spread further from entry than a fixed stop-loss of the same pips. The plan's Trail row shows where it starts and the loss there, spread included:
 
 ```
-  SL: 1.09010  →  $-909.09  (-45.5% RoM)
-  Trail: 20.0p  →  starts at 1.09790  →  $-200.00  (-10.0% RoM, incl. spread)
+  SL: 1.09010  →  -$909.09  (-45.5% RoM)
+  Trail: 20.0p  →  starts at 1.09790  →  -$200.00  (-10.0% RoM, incl. spread)
   R:R  2.27
 ```
 
