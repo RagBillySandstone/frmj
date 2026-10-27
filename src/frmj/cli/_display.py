@@ -173,6 +173,8 @@ def _display_transaction(
                 direction = "TP"
             elif reason == "STOP_LOSS_ORDER":
                 direction = "SL"
+            elif reason == "TRAILING_STOP_LOSS_ORDER":
+                direction = "TS"
             elif reason in _MANUAL_CLOSE_REASONS:
                 direction = "CLOSE"
             else:

@@ -439,6 +439,24 @@ class TestJournalCommand:
         assert "SHORT" not in line
         assert "EUR_USD SL SELL" in line
 
+    def test_trailing_stop_fill_shows_ts_label(self, journal_db: Path) -> None:
+        """An ORDER_FILL closed by a trailing stop shows 'TS', not LONG/SHORT."""
+        conn = sqlite3.connect(str(journal_db))
+        conn.execute(
+            "UPDATE transactions SET raw_json = ? WHERE oanda_id = '1001'",
+            (
+                '{"instrument":"EUR_USD","units":"-1000",'
+                '"reason":"TRAILING_STOP_LOSS_ORDER","pl":"5.00"}',
+            ),
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        line = _entry(result.output, "1001")
+        assert "EUR_USD TS SELL" in line
+        assert "SHORT" not in line
+
     @pytest.mark.parametrize(
         "reason", ["MARKET_ORDER_TRADE_CLOSE", "MARKET_ORDER_POSITION_CLOSEOUT"]
     )
