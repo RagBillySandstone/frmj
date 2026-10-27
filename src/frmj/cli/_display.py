@@ -265,10 +265,10 @@ def _display_open_trade(
     financing_rate: FinancingRate | None,
     has_note: bool,
 ) -> None:
-    """Print one open trade in the positions view, as three lines: the trade
-    header (ID, instrument, direction, size, entry, open time), the money
-    figures (P/L with pips and percent, margin, daily financing), and the
-    exit levels (TP, SL, trailing stop).
+    """Print one open trade in the positions view, sized to fit an 80-column
+    terminal: the trade header (ID, instrument, direction, size, entry),
+    then P/L (with pips and percent) and margin, then daily financing and
+    open time, then each exit level (TP, SL, trailing stop) on its own line.
 
     ``quote`` is the live quote for the trade's instrument. Its close-side
     price gives the trade's profit in pips and percent, and its
@@ -294,8 +294,7 @@ def _display_open_trade(
 
     typer.echo(
         f"  #{trade.trade_id}  {trade.instrument}  {trade.direction}"
-        f"  {trade.units:,} units  @ {trade.open_price}"
-        f"  (opened {time_short}){note_flag}"
+        f"  {trade.units:,} units  @ {trade.open_price}{note_flag}"
     )
 
     exits_parts: list[str] = []
@@ -326,7 +325,8 @@ def _display_open_trade(
                 trail_str += f" ({_pl_str(trail_pl)})"
         trail_str += f" [{trade.trailing_stop_distance} behind]"
         exits_parts.append(trail_str)
-    exits_str = "  ".join(exits_parts) if exits_parts else "no TP/SL set"
+    if not exits_parts:
+        exits_parts.append("no TP/SL set")
 
     financing_str = ""
     if financing_rate is not None and quote_to_home is not None:
@@ -341,7 +341,7 @@ def _display_open_trade(
             quote_to_home=quote_to_home,
             rate=rate,
         )
-        financing_str = f"  financing: {_pl_str(daily_financing)}/day"
+        financing_str = f"financing: {_pl_str(daily_financing)}/day  "
 
     # Profit in pips and percent, alongside the dollar P/L. Decimal keeps a
     # negative zero's sign ("-0.0"), so normalize zero before formatting.
@@ -356,21 +356,25 @@ def _display_open_trade(
         profit_parts.append(_signed_colored(f"{pct:+.2f}%", pct))
         profit_str = f" ({', '.join(profit_parts)})"
 
-    # Three lines per trade: the header above, then the money figures, then
-    # the exit levels — one long line was hard to scan.
+    # Short lines under the header so the trade fits an 80-column terminal:
+    # P/L and margin, then financing and open time, then one exit per line.
     typer.echo(
         f"         P/L: {_pl_str(trade.unrealised_pl)}{profit_str}"
         f"  margin: ${trade.margin_used:,.2f}"
-        f"{financing_str}"
     )
-    typer.echo(f"         {exits_str}")
+    typer.echo(f"         {financing_str}opened {time_short}")
+    for exit_str in exits_parts:
+        typer.echo(f"         {exit_str}")
     typer.echo("")
 
 
 def _display_pending_order(
     order: PendingOrder, quote: PriceQuote | None, has_note: bool
 ) -> None:
-    """Print one pending entry order in the positions view.
+    """Print one pending entry order in the positions view, sized to fit an
+    80-column terminal: the order header (ID, instrument, direction, type,
+    size, price), then the market price, time in force, and placement time,
+    then each exit level (TP, SL, trailing stop) on its own line.
 
     ``quote`` is the instrument's live quote, used to show the current price
     on the side the order would fill against (ask for a long, bid for a
@@ -387,17 +391,22 @@ def _display_pending_order(
     order_type = order.order_type.replace("_", " ")
     typer.echo(
         f"  #{order.order_id}  {order.instrument}  {order.direction} {order_type}"
-        f"  {order.units:,} units  @ {order.price}  {order.time_in_force}"
-        f"  (placed {_to_local_str(order.create_time)}){note_flag}"
+        f"  {order.units:,} units  @ {order.price}{note_flag}"
+    )
+
+    # Show the side of the book the order fills against.
+    market_str = ""
+    if quote is not None:
+        if order.direction == "LONG":
+            market_str = f"market: ask {quote.ask}  "
+        else:
+            market_str = f"market: bid {quote.bid}  "
+    typer.echo(
+        f"         {market_str}{order.time_in_force}"
+        f"  placed {_to_local_str(order.create_time)}"
     )
 
     parts: list[str] = []
-    if quote is not None:
-        # Show the side of the book the order fills against.
-        if order.direction == "LONG":
-            parts.append(f"market: ask {quote.ask}")
-        else:
-            parts.append(f"market: bid {quote.bid}")
     if order.take_profit_price is not None:
         parts.append(f"TP: {order.take_profit_price}")
     if order.stop_loss_price is not None:
@@ -410,7 +419,8 @@ def _display_pending_order(
         and order.trailing_stop_distance is None
     ):
         parts.append("no TP/SL set")
-    typer.echo("         " + "  ".join(parts))
+    for part in parts:
+        typer.echo(f"         {part}")
     typer.echo("")
 
 

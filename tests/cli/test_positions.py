@@ -84,23 +84,27 @@ class TestPositionsCommand:
         assert "TP: 1.10550" in result.output
         assert "SL: 1.09750" in result.output
 
-    def test_trade_spans_three_lines(
+    def test_trade_layout_one_exit_per_line(
         self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Each trade prints as header, then P/L + margin, then exit levels."""
+        """Each trade prints as header, then P/L + margin, then financing and
+        open time, then one line per exit level, then a blank line."""
         result = self._invoke(
             monkeypatch,
             [_open_trade(tp_price="1.10550", sl_price="1.09750")],
         )
         assert result.exit_code == 0, result.output
         lines = result.output.splitlines()
-        # Locate the header by its instrument, then check the next two lines.
+        # Locate the header by its instrument, then check the lines below it.
         header_idx = next(i for i, line in enumerate(lines) if "EUR_USD" in line)
-        pl_line, exits_line = lines[header_idx + 1], lines[header_idx + 2]
+        assert "opened" not in lines[header_idx]
+        pl_line, time_line = lines[header_idx + 1], lines[header_idx + 2]
         assert "P/L:" in pl_line and "margin:" in pl_line
         assert "TP:" not in pl_line
-        assert "TP: 1.10550" in exits_line and "SL: 1.09750" in exits_line
-        assert lines[header_idx + 3] == ""
+        assert "opened " in time_line
+        assert lines[header_idx + 3].strip().startswith("TP: 1.10550")
+        assert lines[header_idx + 4].strip().startswith("SL: 1.09750")
+        assert lines[header_idx + 5] == ""
 
     def test_no_tpsl_shows_fallback_text(
         self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
@@ -419,9 +423,10 @@ class TestPositionsPendingOrders:
         assert result.exit_code == 0, result.output
         assert "No open positions." in result.output
         assert "1 pending order" in result.output
-        assert "#7001  EUR_USD  LONG LIMIT  10,000 units  @ 1.09500  GTC" in (
+        assert "#7001  EUR_USD  LONG LIMIT  10,000 units  @ 1.09500\n" in (
             result.output
         )
+        assert "market: ask 1.10010  GTC  placed " in result.output
         assert "market: ask 1.10010" in result.output
         assert "no TP/SL set" in result.output
         assert "Margin Available" in result.output
@@ -447,7 +452,12 @@ class TestPositionsPendingOrders:
         result = self._invoke(monkeypatch, FakeFullClient(pending_orders=[order]))
         assert result.exit_code == 0, result.output
         assert "SHORT MARKET IF TOUCHED" in result.output
-        assert "market: bid 1.09990  TP: 1.10000  SL: 1.10800" in result.output
+        lines = result.output.splitlines()
+        market_idx = next(i for i, ln in enumerate(lines) if "market: bid" in ln)
+        assert "market: bid 1.09990  GTC" in lines[market_idx]
+        # Each exit level gets its own line under the market line.
+        assert lines[market_idx + 1].strip() == "TP: 1.10000"
+        assert lines[market_idx + 2].strip() == "SL: 1.10800"
 
     def test_open_trades_and_pending_orders_both_listed(
         self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
