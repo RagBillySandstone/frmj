@@ -130,27 +130,30 @@ def _to_local_str(ts: str) -> str:
 # Transaction row display (shared by journal.py and sync.py's _watch_loop)
 # ---------------------------------------------------------------------------
 
-# Fixed widths for the variable-length "extra" (instrument/direction/units)
-# and P/L segments of a journal row, so the trailing time column lands in the
-# same place regardless of how long those segments are for a given row.
-_JOURNAL_EXTRA_W = 46
-_JOURNAL_PL_W = 12
+# Indent for the detail lines under a transaction's header line, shared with
+# the Plan/Note/Tags lines journal.py prints beneath it.
+_JOURNAL_INDENT = "    "
 
 
-def _display_transaction(txn: sqlite3.Row, account_label: str | None = None) -> None:
-    """Format one transaction row for journal display.
+def _display_transaction(
+    txn: sqlite3.Row, account_label: str | None = None, id_width: int = 0
+) -> None:
+    """Print one transaction for the journal as a header line plus details.
 
-    *account_label*, when given, is printed as a column after the transaction
-    number so rows from different accounts can be told apart (used by
-    ``frmj journal --all-accounts``).  Callers pass it pre-padded to a common
-    width so the remaining columns stay aligned.
+    The header is ``#ID  TIME  [ACCOUNT  ]TYPE`` — short enough to fit an
+    80-column terminal.  Fills and financing rows add one indented detail
+    line beneath it (instrument, direction, units, price, and any P/L or
+    financing amount); other transaction types are header-only.
+
+    *account_label*, when given, is printed after the time so rows from
+    different accounts can be told apart (used by ``frmj journal
+    --all-accounts``).  Callers pass it pre-padded to a common width so the
+    type column stays aligned.  *id_width* pads the ID the same way, so the
+    time column lines up when IDs in one listing differ in length.
     """
-    # Trim the ISO-8601 timestamp to seconds for readability.
     time_short = _to_local_str(txn["time"])
 
-    extra = ""
-    pl: Decimal | None = None
-
+    detail = ""
     if txn["type"] == "ORDER_FILL":
         try:
             data = json.loads(txn["raw_json"])
@@ -158,48 +161,44 @@ def _display_transaction(txn: sqlite3.Row, account_label: str | None = None) -> 
             units = int(Decimal(data.get("units", "0")))
             reason = data.get("reason", "")
             side = "BUY" if units >= 0 else "SELL"
+            # A fill triggered by a TP/SL order is labelled by that order.
             if reason == "TAKE_PROFIT_ORDER":
                 direction = "TP"
             elif reason == "STOP_LOSS_ORDER":
                 direction = "SL"
             else:
                 direction = "LONG" if units >= 0 else "SHORT"
-            extra = f"  {instrument} {direction} {side} {abs(units):,} units"
+            detail = f"{instrument} {direction} {side} {abs(units):,} units"
             price = data.get("price")
             if price:
-                extra += f" @ {price}"
+                detail += f" @ {price}"
             # pl is non-zero only on closing fills; opening fills carry "0".
             pl_val = Decimal(data.get("pl", "0") or "0")
             if pl_val != 0:
-                pl = pl_val
+                detail += f"  P/L {_color_pl(pl_val)}"
         except Exception:
             pass
 
     elif txn["type"] == "DAILY_FINANCING":
         try:
             data = json.loads(txn["raw_json"])
-            instrument = data.get("instrument", "")
-            if instrument:
-                extra = f"  {instrument}"
             # Parent has "financing"; per-instrument children have "amount".
             raw_amount = data.get("amount") or data.get("financing") or "0"
             amount_val = Decimal(raw_amount)
+            instrument = data.get("instrument", "")
+            prefix = f"{instrument}  " if instrument else ""
             if amount_val != 0:
-                pl = amount_val
+                detail = f"{prefix}Financing {_color_pl(amount_val)}"
+            else:
+                detail = instrument
         except Exception:
             pass
 
-    extra = extra.ljust(_JOURNAL_EXTRA_W)
-    pl_str = (
-        f"  {_color_pl_padded(pl, _JOURNAL_PL_W)}"
-        if pl is not None
-        else " " * (_JOURNAL_PL_W + 2)
-    )
+    oanda_id = f"#{txn['oanda_id']}".ljust(id_width + 1)
     account_col = f"{account_label}  " if account_label is not None else ""
-    typer.echo(
-        f"#{txn['oanda_id']:<12}  {account_col}{txn['type']:<24}"
-        f"{extra}{pl_str}  {time_short}"
-    )
+    typer.echo(f"{oanda_id}  {time_short}  {account_col}{txn['type']}")
+    if detail:
+        typer.echo(f"{_JOURNAL_INDENT}{detail}")
 
 
 # ---------------------------------------------------------------------------

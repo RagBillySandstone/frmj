@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
+import textwrap
 
 import typer
 
@@ -15,7 +17,7 @@ from frmj.cli._completion import (
     _complete_instrument,
     _complete_txn_type,
 )
-from frmj.cli._display import _display_transaction
+from frmj.cli._display import _JOURNAL_INDENT, _display_transaction
 from frmj.cli.sync import _auto_sync, _report_sync_targets
 
 # ---------------------------------------------------------------------------
@@ -125,6 +127,26 @@ def _resolve_transaction(conn: sqlite3.Connection, oanda_id: str) -> int:
         )
         raise typer.Exit(1)
     return ids[0]
+
+
+def _echo_wrapped(label: str, text: str, width: int) -> None:
+    """Print ``label: text`` as an indented journal detail, wrapped to *width*.
+
+    Continuation lines hang under the start of *text*, so a long note reads
+    as one block instead of running back to the left margin.  Words longer
+    than a line (e.g. a URL) are left whole rather than split mid-word.
+    """
+    first = f"{_JOURNAL_INDENT}{label}: "
+    typer.echo(
+        textwrap.fill(
+            text,
+            width=width,
+            initial_indent=first,
+            subsequent_indent=" " * len(first),
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -321,13 +343,18 @@ def journal(
             typer.echo("No transactions in local database.")
             return
 
+        # Pad IDs to a common width so the time column lines up, and wrap
+        # notes and tags to the terminal so long ones stay readable.
+        id_w = max(len(t["oanda_id"]) for t in txns)
+        wrap_w = shutil.get_terminal_size().columns
+
         for txn in txns:
             label = (
                 None
                 if account is not None
                 else labels.get(txn["account_id"], txn["account_id"]).ljust(label_w)
             )
-            _display_transaction(txn, label)
+            _display_transaction(txn, label, id_w)
             if txn["type"] == "ORDER_FILL":
                 plan = queries.get_trade_plan(conn, txn["id"])
                 if plan:
@@ -345,11 +372,11 @@ def journal(
                     if plan["trail_pips"]:
                         parts.append(f"Trail {plan['trail_pips']}p")
                     if parts:
-                        typer.echo(f"    Plan: {'  '.join(parts)}")
+                        _echo_wrapped("Plan", "  ".join(parts), wrap_w)
             for body in queries.list_notes(conn, txn["id"]):
-                typer.echo(f"    Note: {body}")
+                _echo_wrapped("Note", body, wrap_w)
             txn_tags = queries.list_transaction_tags(conn, txn["id"])
             if txn_tags:
-                typer.echo(f"    Tags: {'  '.join(txn_tags)}")
+                _echo_wrapped("Tags", "  ".join(txn_tags), wrap_w)
     finally:
         conn.close()

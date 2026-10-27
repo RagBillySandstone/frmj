@@ -25,6 +25,16 @@ from .conftest import FakeClient, _row
 runner = CliRunner()
 
 
+def _entry(output: str, oanda_id: str) -> str:
+    """Return one journal entry: its ``#ID`` header plus the indented lines under it."""
+    lines = output.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith(f"#{oanda_id} "))
+    end = start + 1
+    while end < len(lines) and lines[end].startswith(" "):
+        end += 1
+    return "\n".join(lines[start:end])
+
+
 def _seed_transaction(
     path: Path,
     oanda_id: str = "12345",
@@ -348,7 +358,7 @@ class TestJournalCommand:
         """An opening fill with positive units shows 'BUY' alongside LONG."""
         result = runner.invoke(app, ["journal"])
         assert result.exit_code == 0, result.output
-        line = next(line for line in result.output.splitlines() if "1001" in line)
+        line = _entry(result.output, "1001")
         assert "EUR_USD LONG BUY" in line
 
     def test_sell_shown_for_short_opening_fill(self, journal_db: Path) -> None:
@@ -362,7 +372,7 @@ class TestJournalCommand:
         conn.close()
         result = runner.invoke(app, ["journal"])
         assert result.exit_code == 0, result.output
-        line = next(line for line in result.output.splitlines() if "1001" in line)
+        line = _entry(result.output, "1001")
         assert "EUR_USD SHORT SELL" in line
 
     def test_fill_price_shown_for_order_fill(self, journal_db: Path) -> None:
@@ -379,14 +389,14 @@ class TestJournalCommand:
         conn.close()
         result = runner.invoke(app, ["journal"])
         assert result.exit_code == 0, result.output
-        line = next(line for line in result.output.splitlines() if "1001" in line)
+        line = _entry(result.output, "1001")
         assert "EUR_USD LONG BUY 1,000 units @ 1.08542" in line
 
     def test_no_price_suffix_when_price_missing(self, journal_db: Path) -> None:
         """ORDER_FILL rows without a 'price' field show no ' @ ' suffix."""
         result = runner.invoke(app, ["journal"])
         assert result.exit_code == 0, result.output
-        line = next(line for line in result.output.splitlines() if "1001" in line)
+        line = _entry(result.output, "1001")
         assert " @ " not in line
 
     def test_take_profit_fill_shows_tp_label(self, journal_db: Path) -> None:
@@ -403,7 +413,7 @@ class TestJournalCommand:
         conn.close()
         result = runner.invoke(app, ["journal"])
         assert result.exit_code == 0, result.output
-        line = next(line for line in result.output.splitlines() if "1001" in line)
+        line = _entry(result.output, "1001")
         assert "EUR_USD TP" in line
         assert "LONG" not in line
         assert "SHORT" not in line
@@ -423,7 +433,7 @@ class TestJournalCommand:
         conn.close()
         result = runner.invoke(app, ["journal"])
         assert result.exit_code == 0, result.output
-        line = next(line for line in result.output.splitlines() if "1001" in line)
+        line = _entry(result.output, "1001")
         assert "EUR_USD SL" in line
         assert "LONG" not in line
         assert "SHORT" not in line
@@ -590,47 +600,54 @@ class TestJournalCommand:
         assert result.exit_code == 0, result.output
         assert "18.40" in result.output
 
-    def test_columns_align_across_rows_of_differing_content(
-        self, journal_db: Path
-    ) -> None:
-        """The time column must start at the same offset on every row, even
-        when the instrument/direction/units/P-L text differs in length."""
+    def test_every_line_fits_80_columns(self, journal_db: Path) -> None:
+        """A wide closing fill with P/L and a plan still fits an 80-column
+        terminal: the details go on their own line under the header."""
         conn = sqlite3.connect(str(journal_db))
-        # Give the seeded rows deliberately mismatched extra/P-L lengths:
-        # a bare fill, a long instrument+direction+units combo with P/L, and
-        # a financing row with no direction/units at all.
-        conn.execute(
-            "UPDATE transactions SET raw_json = ? WHERE oanda_id = '1001'",
-            ('{"instrument":"EUR_USD","units":"1000"}',),
-        )
         conn.execute(
             "UPDATE transactions SET raw_json = ? WHERE oanda_id = '1002'",
             (
-                '{"instrument":"GBP_USD","units":"-250000",'
-                '"reason":"STOP_LOSS_ORDER","pl":"-1234.56"}',
+                '{"instrument":"GBP_USD","units":"-1250000","price":"1.33765",'
+                '"reason":"STOP_LOSS_ORDER","pl":"-12345.67"}',
             ),
         )
-        conn.execute(
-            "UPDATE transactions SET type = ?, raw_json = ? WHERE oanda_id = '1003'",
-            ("DAILY_FINANCING", '{"instrument":"EUR_USD","amount":"-1.23"}'),
-        )
+        conn.commit()
+        conn.close()
+
+        result = runner.invoke(app, ["journal"], env={"COLUMNS": "80"})
+        assert result.exit_code == 0, result.output
+        entry = _entry(result.output, "1002").splitlines()
+        assert entry[0].endswith("ORDER_FILL")
+        assert "GBP_USD SL SELL 1,250,000 units @ 1.33765  P/L -$12,345.67" in entry[1]
+        assert all(len(line) <= 80 for line in result.output.splitlines())
+
+    def test_time_column_aligns_across_id_lengths(self, journal_db: Path) -> None:
+        """IDs of different lengths are padded so the timestamps line up."""
+        conn = sqlite3.connect(str(journal_db))
+        conn.execute("UPDATE transactions SET oanda_id = '7' WHERE oanda_id = '1001'")
         conn.commit()
         conn.close()
 
         result = runner.invoke(app, ["journal"])
         assert result.exit_code == 0, result.output
-        lines = [
-            line
-            for line in result.output.splitlines()
-            if line.startswith("#1001")
-            or line.startswith("#1002")
-            or line.startswith("#1003")
-        ]
-        assert len(lines) == 3
-        # The trailing "YYYY-MM-DD HH:MM:SS" timestamp is a fixed-width token,
-        # so if every row's time column starts at the same index the rows
-        # must all be the same total length.
-        assert len({len(line) for line in lines}) == 1
+        headers = [ln for ln in result.output.splitlines() if ln.startswith("#")]
+        assert len({ln.index("2026-") for ln in headers}) == 1
+
+    def test_long_note_wraps_with_hanging_indent(self, journal_db: Path) -> None:
+        """A note longer than the terminal wraps, continuing under its text."""
+        body = " ".join(["word"] * 40)
+        runner.invoke(app, ["note", "1001", body])
+
+        result = runner.invoke(app, ["journal"], env={"COLUMNS": "60"})
+        assert result.exit_code == 0, result.output
+        entry = _entry(result.output, "1001").splitlines()
+        note_lines = entry[entry.index(next(ln for ln in entry if "Note:" in ln)) :]
+        assert len(note_lines) > 1
+        assert all(len(ln) <= 60 for ln in note_lines)
+        # Continuation lines start where the note text starts.
+        text_col = note_lines[0].index("word")
+        assert all(ln.index("word") == text_col for ln in note_lines[1:])
+        assert " ".join(ln.strip() for ln in note_lines).endswith(body)
 
     def test_daily_financing_amount_shown(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
