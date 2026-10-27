@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
+import httpx
 import typer
 
 from frmj import queries
@@ -13,6 +16,55 @@ from frmj.cli import app
 from frmj.cli._completion import _FINANCING_PAIRS, _pair_tier
 from frmj.cli._display import _color_financing_pct, _fmt_financing_pct
 from frmj.execution.oanda import FinancingRate
+
+# ---------------------------------------------------------------------------
+# --quiet retry
+# ---------------------------------------------------------------------------
+
+# Seconds to wait before each retry of a failed --quiet fetch: up to four
+# attempts spread over ~21 minutes. A missed day can never be backfilled
+# (Oanda has no historical-rate API), so an unattended run is worth waiting
+# for; interactive runs fail immediately since the user can just rerun.
+_QUIET_RETRY_DELAYS: tuple[int, ...] = (60, 300, 900)
+
+
+def _is_transient_fetch_error(exc: Exception) -> bool:
+    """Return True if *exc* is a fetch failure worth retrying.
+
+    Retried: network/timeout errors, 5xx, 429 (rate limited), and 401 —
+    Oanda's practice API has been seen to reject a valid token with 401 for
+    a single request and accept it again later. Everything else (e.g. the
+    404 Oanda returns for an untradeable instrument in the list) is
+    permanent, so retrying would only delay the error.
+    """
+    # Connection refused, DNS failure, timeouts, etc.
+    if isinstance(exc, httpx.TransportError):
+        return True
+    # Only specific HTTP statuses are transient; anything else is final.
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status in (401, 429) or status >= 500
+    return False
+
+
+def _fetch_with_retry(client: Any, delays: tuple[int, ...]) -> list[FinancingRate]:
+    """Fetch financing rates, retrying transient failures after each of *delays*.
+
+    Makes ``len(delays) + 1`` attempts at most. Retries are silent so a
+    ``--quiet`` run that eventually succeeds still prints nothing; the
+    last error (or the first non-transient one) is re-raised to the caller.
+    """
+    # Each delay is the wait *before* the next attempt; the final attempt
+    # has no delay after it, so it is made outside the loop.
+    for delay in delays:
+        try:
+            return client.get_financing_rates(list(_FINANCING_PAIRS))
+        except Exception as exc:
+            if not _is_transient_fetch_error(exc):
+                raise
+            time.sleep(delay)
+    return client.get_financing_rates(list(_FINANCING_PAIRS))
+
 
 # ---------------------------------------------------------------------------
 # financing command
@@ -115,6 +167,9 @@ def financing(
     on will have data. ``--quiet`` still fetches and records live but prints
     nothing on success, for unattended use (e.g. a daily cron job that just
     wants the snapshot recorded); it cannot be combined with ``--date``.
+    Because a missed day can't be backfilled, ``--quiet`` also retries
+    network errors, 5xx, 429, and 401 responses up to three times (after
+    1, 5, and 15 minutes) before giving up.
     """
     conn = get_db()
 
@@ -157,8 +212,11 @@ def financing(
         conn.close()
         raise typer.Exit(1)
 
+    # Unattended (--quiet) runs retry transient failures; interactive runs
+    # make a single attempt (an empty delay tuple).
+    delays = _QUIET_RETRY_DELAYS if quiet else ()
     try:
-        rates = client.get_financing_rates(list(_FINANCING_PAIRS))
+        rates = _fetch_with_retry(client, delays)
     except Exception as exc:
         typer.echo(f"Error fetching financing rates: {exc}", err=True)
         conn.close()

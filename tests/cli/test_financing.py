@@ -6,6 +6,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+import httpx
 import pytest
 from click.testing import Result
 from typer.testing import CliRunner
@@ -23,6 +24,39 @@ from frmj.execution.oanda import FinancingRate
 from .conftest import FakeFullClient
 
 runner = CliRunner()
+
+
+def _http_error(status: int) -> httpx.HTTPStatusError:
+    """Build the error ``raise_for_status`` raises for an HTTP *status*."""
+    request = httpx.Request("GET", "https://api-fxpractice.oanda.com/v3/x")
+    response = httpx.Response(status, request=request)
+    return httpx.HTTPStatusError(f"{status}", request=request, response=response)
+
+
+class _FlakyFinancingClient(FakeFullClient):
+    """Fake client that raises each of *failures* in turn, then returns *rates*."""
+
+    def __init__(
+        self,
+        failures: list[Exception],
+        rates: list[FinancingRate] | None = None,
+    ) -> None:
+        super().__init__(financing_rates=rates or [])
+        self.failures = list(failures)
+        self.calls = 0
+
+    def get_financing_rates(self, instruments: list[str]) -> list[FinancingRate]:
+        self.calls += 1
+        if self.failures:
+            raise self.failures.pop(0)
+        return self.financing_rates
+
+
+def _patch_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Replace the retry sleep with a recorder; return the list of delays."""
+    sleeps: list[float] = []
+    monkeypatch.setattr("frmj.cli.financing.time.sleep", sleeps.append)
+    return sleeps
 
 
 class TestFinancingHelpers:
@@ -159,6 +193,20 @@ class TestFinancingCommand:
         result = runner.invoke(app, ["financing"])
         assert result.exit_code == 1
         assert "Error" in result.output + result.stderr
+
+    def test_interactive_run_does_not_retry(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without --quiet a transient error fails at once — the user is there
+        to rerun it, and a silent multi-minute wait would look like a hang."""
+        fake = _FlakyFinancingClient(failures=[_http_error(401)])
+        sleeps = _patch_sleep(monkeypatch)
+        monkeypatch.setattr("frmj.cli.financing.get_client", lambda conn: fake)
+
+        result = runner.invoke(app, ["financing"])
+        assert result.exit_code == 1
+        assert fake.calls == 1
+        assert sleeps == []
 
 
 class TestFinancingSnapshotRecording:
@@ -406,6 +454,66 @@ class TestFinancingQuietOption:
         result = runner.invoke(app, ["financing", "--quiet"])
         assert result.exit_code == 1
         assert "Error" in result.output + result.stderr
+
+    def test_retries_transient_error_then_records_silently(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A one-off 401 (seen from Oanda's practice API) is retried after the
+        first delay; the eventual success records the snapshot with no output."""
+        rates = [FinancingRate("EUR_USD", Decimal("-0.0049"), Decimal("0.0009"))]
+        fake = _FlakyFinancingClient(failures=[_http_error(401)], rates=rates)
+        sleeps = _patch_sleep(monkeypatch)
+        monkeypatch.setattr("frmj.cli.financing.get_client", lambda conn: fake)
+
+        result = runner.invoke(app, ["financing", "--quiet"])
+        assert result.exit_code == 0, result.output
+        assert result.output == ""
+        assert fake.calls == 2
+        assert sleeps == [60]
+
+        conn = get_db(path=fin_db)
+        snapshot = queries.load_financing_snapshot(
+            conn, "acct-1", date.today().isoformat()
+        )
+        conn.close()
+        assert snapshot == rates
+
+    def test_gives_up_after_all_retries_and_exits_1(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _FlakyFinancingClient(failures=[_http_error(503)] * 4)
+        sleeps = _patch_sleep(monkeypatch)
+        monkeypatch.setattr("frmj.cli.financing.get_client", lambda conn: fake)
+
+        result = runner.invoke(app, ["financing", "--quiet"])
+        assert result.exit_code == 1
+        assert "503" in result.output + result.stderr
+        assert fake.calls == 4
+        assert sleeps == [60, 300, 900]
+
+    def test_retries_network_error(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _FlakyFinancingClient(failures=[httpx.ConnectError("refused")])
+        _patch_sleep(monkeypatch)
+        monkeypatch.setattr("frmj.cli.financing.get_client", lambda conn: fake)
+
+        result = runner.invoke(app, ["financing", "--quiet"])
+        assert result.exit_code == 0, result.output
+        assert fake.calls == 2
+
+    def test_permanent_http_error_is_not_retried(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 404 (an untradeable instrument in the list) won't fix itself."""
+        fake = _FlakyFinancingClient(failures=[_http_error(404)])
+        sleeps = _patch_sleep(monkeypatch)
+        monkeypatch.setattr("frmj.cli.financing.get_client", lambda conn: fake)
+
+        result = runner.invoke(app, ["financing", "--quiet"])
+        assert result.exit_code == 1
+        assert fake.calls == 1
+        assert sleeps == []
 
     def test_combined_with_date_exits_1(
         self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
