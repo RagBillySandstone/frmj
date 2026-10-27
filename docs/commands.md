@@ -91,7 +91,7 @@ Each live fetch also records that day's rates locally, since Oanda's API only ex
 frmj financing --date 2026-04-01
 ```
 
-Snapshots are recorded and looked up per account, using the active account. Only dates `frmj financing` was actually run on have data — there's no way to backfill earlier dates. Use `--quiet` to fetch and record silently (no output on success; errors still print and exit 1) for an unattended daily cron job (it cannot be combined with `--date`):
+Snapshots are recorded and looked up per account, using the active account. Only dates `frmj financing` was actually run on have data — there's no way to backfill earlier dates. Use `--quiet` to fetch and record silently (no output on success; errors still print and exit 1) for an unattended daily cron job (it cannot be combined with `--date`). Since a missed day can't be backfilled, `--quiet` also retries network errors, 5xx, 429, and 401 responses (Oanda occasionally rejects a valid token once) up to three times — after 1, 5, and 15 minutes — before giving up:
 
 ```sh
 frmj financing --quiet
