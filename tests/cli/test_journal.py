@@ -668,6 +668,44 @@ class TestJournalCommand:
         assert "GBP_USD SL SELL 1,250,000 units @ 1.33765  P/L -$12,345.67" in entry[1]
         assert all(len(line) <= 80 for line in result.output.splitlines())
 
+    def test_blank_line_separates_groups_of_nearby_transactions(
+        self, journal_db: Path
+    ) -> None:
+        """Transactions within a couple of seconds (a trade's order, fill,
+        and TP order) form one block; a blank line starts the next block."""
+        conn = sqlite3.connect(str(journal_db))
+        # 1004 and 1005 land within 2s of each other (and of a 1006 TP order),
+        # while the rest stay an hour apart.
+        conn.execute(
+            "UPDATE transactions SET time = '2026-04-25T15:00:01.900000Z'"
+            " WHERE oanda_id = '1005'"
+        )
+        conn.execute(
+            "UPDATE transactions SET time = '2026-04-25T15:00:00.100000Z'"
+            " WHERE oanda_id = '1004'"
+        )
+        conn.execute(
+            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json)"
+            " VALUES ('1006', 'acct-1', 'TAKE_PROFIT_ORDER',"
+            " '2026-04-25T15:00:02.000000Z', '{}')"
+        )
+        conn.commit()
+        conn.close()
+
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        # Collapse each block to its IDs, splitting on blank lines.
+        blocks = [
+            [ln.split()[0] for ln in block.splitlines() if ln.startswith("#")]
+            for block in result.output.strip().split("\n\n")
+        ]
+        assert blocks == [
+            ["#1006", "#1005", "#1004"],
+            ["#1003"],
+            ["#1002"],
+            ["#1001"],
+        ]
+
     def test_time_column_aligns_across_id_lengths(self, journal_db: Path) -> None:
         """IDs of different lengths are padded so the timestamps line up."""
         conn = sqlite3.connect(str(journal_db))

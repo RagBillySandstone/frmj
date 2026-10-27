@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import sqlite3
 import textwrap
+from datetime import datetime, timedelta
 
 import typer
 
@@ -127,6 +128,27 @@ def _resolve_transaction(conn: sqlite3.Connection, oanda_id: str) -> int:
         )
         raise typer.Exit(1)
     return ids[0]
+
+
+#: Transactions this close together (in one account) are shown as one group:
+#: a trade's market order, fill, and the TP/SL orders frmj attaches just
+#: after the fill land within a second or so of each other.
+_GROUP_GAP = timedelta(seconds=2)
+
+
+def _same_group(a: sqlite3.Row, b: sqlite3.Row) -> bool:
+    """Return True if transactions *a* and *b* belong in one journal group.
+
+    Oanda's batch IDs can't be used for this: frmj attaches TP/SL in a
+    separate request after a market fill, so they get a batch of their own.
+    Closeness in time is the reliable signal instead.
+    """
+    if a["account_id"] != b["account_id"]:
+        return False
+    # Seconds precision is enough; Oanda's fractional digits vary in length.
+    ta = datetime.fromisoformat(a["time"][:19])
+    tb = datetime.fromisoformat(b["time"][:19])
+    return abs(ta - tb) <= _GROUP_GAP
 
 
 def _echo_wrapped(label: str, text: str, width: int) -> None:
@@ -348,7 +370,14 @@ def journal(
         id_w = max(len(t["oanda_id"]) for t in txns)
         wrap_w = shutil.get_terminal_size().columns
 
+        prev: sqlite3.Row | None = None
         for txn in txns:
+            # A blank line starts each group of related transactions, so a
+            # trade's order, fill, and TP/SL orders read as one block.
+            if prev is not None and not _same_group(prev, txn):
+                typer.echo("")
+            prev = txn
+
             label = (
                 None
                 if account is not None
