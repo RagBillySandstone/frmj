@@ -79,14 +79,16 @@ def _daily_financing_home(
 
 
 def _pl_str(amount: Decimal) -> str:
-    """Return a sign-prefixed, coloured P/L string: green ≥0, red <0."""
-    sign = "+" if amount >= 0 else ""
+    """Return a sign-prefixed, coloured P/L string: green ≥0, red <0.
+
+    The sign goes before the dollar sign (``+$12.00``, ``-$3.50``), matching
+    ``_color_pl`` so every command writes amounts the same way.
+    """
+    sign = "+" if amount >= 0 else "-"
     color = typer.colors.GREEN if amount >= 0 else typer.colors.RED
-    # Decimal preserves a negative zero's sign in formatting (e.g. "-0.00"),
-    # which would double up with the "+" prefix above; normalize it away.
-    if amount == 0:
-        amount = abs(amount)
-    return typer.style(f"{sign}${amount:,.2f}", fg=color)
+    # abs() also drops a negative zero's sign, which Decimal would otherwise
+    # keep in formatting (e.g. "-0.00") and double up with the "+" prefix.
+    return typer.style(f"{sign}${abs(amount):,.2f}", fg=color)
 
 
 def _color_pl(pl: Decimal) -> str:

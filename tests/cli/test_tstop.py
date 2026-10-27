@@ -49,7 +49,7 @@ class TestSetTrail:
         assert result.exit_code == 0, result.output
         assert "15.0p (0.00150)" in result.output
         assert "triggers now at 1.09840" in result.output
-        assert "$-21.00 from entry" in result.output
+        assert "-$21.00 from entry" in result.output
         assert fake.trail_changes == [("6368", Decimal("0.00150"))]
         assert "Trailing stop set (txn #100004)" in result.output
 
@@ -60,7 +60,7 @@ class TestSetTrail:
         fake = FakeFullClient(open_trades=[_open_trade(direction="SHORT")])
         result = _invoke(monkeypatch, fake, ["6368", "15"], "n\n")
         assert "triggers now at 1.10160" in result.output
-        assert "$-11.00 from entry" in result.output
+        assert "-$11.00 from entry" in result.output
 
     def test_winning_trade_shows_locked_in_profit(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch

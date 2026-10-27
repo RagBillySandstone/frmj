@@ -119,7 +119,7 @@ class TestPositionsCommand:
 
         FakeFullClient.get_price returns quote_to_home=1, so for this LONG
         10,000-unit EUR_USD trade: TP is 500 pips (+$50.00) above entry,
-        SL is 300 pips ($-30.00) below entry.
+        SL is 300 pips (-$30.00) below entry.
         """
         result = self._invoke(
             monkeypatch,
@@ -134,7 +134,7 @@ class TestPositionsCommand:
             ],
         )
         assert "TP: 1.10550 (+$50.00)" in result.output
-        assert "SL: 1.09750 ($-30.00)" in result.output
+        assert "SL: 1.09750 (-$30.00)" in result.output
 
     def test_shows_trailing_stop_with_dollar_amount(
         self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
@@ -200,7 +200,8 @@ class TestPositionsCommand:
             quote_to_home=Decimal("1"),
             rate=Decimal("-0.0365"),
         )
-        assert f"financing: ${expected:,.2f}/day" in result.output
+        # The rate is negative, so the sign leads the dollar sign.
+        assert f"financing: -${abs(expected):,.2f}/day" in result.output
 
     def test_financing_omitted_when_no_rate_available(
         self, pos_db: Path, monkeypatch: pytest.MonkeyPatch
