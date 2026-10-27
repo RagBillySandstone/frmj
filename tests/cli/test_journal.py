@@ -439,6 +439,35 @@ class TestJournalCommand:
         assert "SHORT" not in line
         assert "EUR_USD SL SELL" in line
 
+    @pytest.mark.parametrize(
+        "reason", ["MARKET_ORDER_TRADE_CLOSE", "MARKET_ORDER_POSITION_CLOSEOUT"]
+    )
+    def test_manual_close_fill_shows_close_label(
+        self, journal_db: Path, reason: str
+    ) -> None:
+        """A manual close of a short is a BUY but must not be labelled LONG."""
+        conn = sqlite3.connect(str(journal_db))
+        conn.execute(
+            "UPDATE transactions SET raw_json = ? WHERE oanda_id = '1001'",
+            (
+                json.dumps(
+                    {
+                        "instrument": "USD_JPY",
+                        "units": "1000",
+                        "reason": reason,
+                        "pl": "-3.47",
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+        conn.close()
+        result = runner.invoke(app, ["journal"])
+        assert result.exit_code == 0, result.output
+        line = _entry(result.output, "1001")
+        assert "USD_JPY CLOSE BUY" in line
+        assert "LONG" not in line
+
     def test_plan_shown_under_order_fill(self, journal_db: Path) -> None:
         """A trade plan row is shown as '    Plan: TP ...  SL ...' under its fill."""
         conn = sqlite3.connect(str(journal_db))

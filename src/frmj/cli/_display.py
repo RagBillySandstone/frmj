@@ -134,6 +134,12 @@ def _to_local_str(ts: str) -> str:
 # the Plan/Note/Tags lines journal.py prints beneath it.
 _JOURNAL_INDENT = "    "
 
+# Oanda fill reasons for a market order that closed a trade or a whole
+# position by hand (e.g. ``frmj close`` or the Oanda web portal).
+_MANUAL_CLOSE_REASONS = frozenset(
+    {"MARKET_ORDER_TRADE_CLOSE", "MARKET_ORDER_POSITION_CLOSEOUT"}
+)
+
 
 def _display_transaction(
     txn: sqlite3.Row, account_label: str | None = None, id_width: int = 0
@@ -161,11 +167,14 @@ def _display_transaction(
             units = int(Decimal(data.get("units", "0")))
             reason = data.get("reason", "")
             side = "BUY" if units >= 0 else "SELL"
-            # A fill triggered by a TP/SL order is labelled by that order.
+            # A closing fill is labelled by what closed it, not by its own
+            # units' sign — closing a short is a BUY but not a LONG.
             if reason == "TAKE_PROFIT_ORDER":
                 direction = "TP"
             elif reason == "STOP_LOSS_ORDER":
                 direction = "SL"
+            elif reason in _MANUAL_CLOSE_REASONS:
+                direction = "CLOSE"
             else:
                 direction = "LONG" if units >= 0 else "SHORT"
             detail = f"{instrument} {direction} {side} {abs(units):,} units"
