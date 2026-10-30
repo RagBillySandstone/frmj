@@ -34,7 +34,7 @@ reads ``OANDA_API_TOKEN`` and passes it in.
 Base URLs
 ---------
     Practice : https://api-fxpractice.oanda.com/v3
-    Live     : https://api-oanda.com/v3
+    Live     : https://api-fxtrade.oanda.com/v3
 
 Retry policy
 ------------
@@ -83,7 +83,7 @@ from .parsing import (
 # ---------------------------------------------------------------------------
 
 PRACTICE_BASE_URL: str = "https://api-fxpractice.oanda.com/v3"
-LIVE_BASE_URL: str = "https://api-oanda.com/v3"
+LIVE_BASE_URL: str = "https://api-fxtrade.oanda.com/v3"
 
 # Oanda's documented per-call limit for the /sinceid endpoint.  When a
 # response contains exactly this many rows there may be more; we loop.

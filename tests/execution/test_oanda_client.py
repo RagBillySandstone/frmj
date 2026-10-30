@@ -145,6 +145,21 @@ def _make_client(
 # ---------------------------------------------------------------------------
 
 
+class TestBaseUrls:
+    """The API token goes to these hosts, so they must be Oanda's own."""
+
+    @pytest.mark.parametrize(
+        ("base_url", "host"),
+        [
+            (oanda_client.PRACTICE_BASE_URL, "api-fxpractice.oanda.com"),
+            (oanda_client.LIVE_BASE_URL, "api-fxtrade.oanda.com"),
+        ],
+    )
+    def test_base_url_is_oandas_documented_host(self, base_url: str, host: str) -> None:
+        assert httpx.URL(base_url).host == host
+        assert httpx.URL(base_url).scheme == "https"
+
+
 class TestGetAccountSummary:
     def test_returns_parsed_summary(self) -> None:
         """A summary response is parsed into an ``AccountSummary`` and the
