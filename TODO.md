@@ -10,6 +10,8 @@ Items are grouped by priority. Within each group, order reflects logical build s
 
 `GET /v3/accounts/{id}/transactions/stream` opens a persistent HTTP connection; Oanda pushes transaction events as they happen. This eliminates polling lag and API quota waste from `sync --watch`. Should be an optional upgrade to `--watch` mode, falling back to polling if the stream drops. Requires keeping the `httpx` client alive as a streaming context.
 
+Lifetime: don't stream 24/7. Streaming should start when the first `frmj shell` opens and stop when the last local shell closes. Several shells will often be open at once, each on a different account. So this needs one shared background streamer, not one per shell: a single process (or a lock-file-elected shell) that streams every account the open shells are using. Shells register and deregister with it, for example through a lock or PID file next to the database. It must handle a shell that crashes without deregistering (stale PIDs) and a shell that switches accounts while running.
+
 ---
 
 ## P2 — UX and extensibility
