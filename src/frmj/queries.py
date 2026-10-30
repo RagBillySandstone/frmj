@@ -10,7 +10,8 @@ prints, or exits; validation messages and output formatting stay in the
 ``accounts.py`` is the equivalent for account profiles and their config;
 ``services.py`` holds the multi-step flows that also call Oanda. This module
 covers everything else the CLI reads from or writes to the ledger:
-transactions, notes, tags, trade plans, and financing snapshots.
+transactions, notes, tags, trade plans, financing snapshots, and the
+stream notices ``frmj shell`` announces.
 
 Oanda transaction IDs are only unique within one account, so functions that
 look a transaction up by its Oanda ID take the account's Oanda ID too —
@@ -454,6 +455,62 @@ def list_transactions_after(
         """,
         (account_id, after_oanda_id),
     ).fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Stream notices (background streamer -> frmj shell)
+# ---------------------------------------------------------------------------
+
+
+def add_stream_notices(conn: sqlite3.Connection, transaction_ids: list[int]) -> None:
+    """Record a notice for each transaction (local ``transactions.id``), in order."""
+    conn.executemany(
+        "INSERT INTO stream_notices (transaction_id) VALUES (?)",
+        [(tid,) for tid in transaction_ids],
+    )
+    conn.commit()
+
+
+def latest_stream_notice_id(conn: sqlite3.Connection) -> int:
+    """Return the highest notice id so far, or 0 if there are none.
+
+    A shell starts from here, so it only announces what arrives after it
+    opened.
+    """
+    row = conn.execute("SELECT MAX(id) FROM stream_notices").fetchone()
+    return int(row[0] or 0)
+
+
+def list_stream_notices_after(
+    conn: sqlite3.Connection, after_id: int
+) -> list[sqlite3.Row]:
+    """Return notices newer than *after_id*, oldest first, with their transaction.
+
+    Each row has the notice's ``notice_id`` and the transaction's
+    ``account_id`` plus the columns ``list_transactions_after`` returns
+    (``id``, ``oanda_id``, ``type``, ``time``, ``raw_json``), so it can be
+    displayed the same way. Covers every account; callers filter.
+    """
+    return conn.execute(
+        """
+        SELECT n.id AS notice_id, t.account_id,
+               t.id, t.oanda_id, t.type, t.time, t.raw_json
+        FROM stream_notices n
+        JOIN transactions t ON t.id = n.transaction_id
+        WHERE n.id > ?
+        ORDER BY n.id ASC
+        """,
+        (after_id,),
+    ).fetchall()
+
+
+def prune_stream_notices(conn: sqlite3.Connection, older_than: str) -> int:
+    """Delete notices created before *older_than* (ISO-8601 UTC); return the count."""
+    cursor = conn.execute(
+        "DELETE FROM stream_notices WHERE created_at < ?", (older_than,)
+    )
+    conn.commit()
+    return cursor.rowcount
 
 
 # ---------------------------------------------------------------------------

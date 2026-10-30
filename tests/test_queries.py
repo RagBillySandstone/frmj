@@ -353,3 +353,44 @@ class TestPositionsAndWatch:
         rows = queries.list_transactions_after(conn, "acct-1", "9")
         # Numeric comparison (11 > 9), ordered by time.
         assert _ids(rows) == ["10", "11"]
+
+
+# ---------------------------------------------------------------------------
+# Stream notices
+# ---------------------------------------------------------------------------
+
+
+class TestStreamNotices:
+    def test_no_notices_means_latest_id_zero(self, conn: sqlite3.Connection) -> None:
+        assert queries.latest_stream_notice_id(conn) == 0
+        assert queries.list_stream_notices_after(conn, 0) == []
+
+    def test_notices_list_after_id_with_their_transactions(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        first = _add_txn(conn, "10", account_id="acct-1")
+        second = _add_txn(conn, "11", account_id="acct-2", txn_type="DAILY_FINANCING")
+        queries.add_stream_notices(conn, [first, second])
+
+        rows = queries.list_stream_notices_after(conn, 0)
+        assert [(r["account_id"], r["oanda_id"], r["type"]) for r in rows] == [
+            ("acct-1", "10", "ORDER_FILL"),
+            ("acct-2", "11", "DAILY_FINANCING"),
+        ]
+        latest = queries.latest_stream_notice_id(conn)
+        assert latest == rows[-1]["notice_id"]
+        # Only notices after the given id.
+        later = queries.list_stream_notices_after(conn, rows[0]["notice_id"])
+        assert [r["oanda_id"] for r in later] == ["11"]
+        assert queries.list_stream_notices_after(conn, latest) == []
+
+    def test_prune_removes_only_older_notices(self, conn: sqlite3.Connection) -> None:
+        txn = _add_txn(conn, "10")
+        queries.add_stream_notices(conn, [txn, txn])
+        conn.execute(
+            "UPDATE stream_notices SET created_at = '2026-01-01T00:00:00.000Z' "
+            "WHERE id = (SELECT MIN(id) FROM stream_notices)"
+        )
+        conn.commit()
+        assert queries.prune_stream_notices(conn, "2026-06-01T00:00:00.000Z") == 1
+        assert len(queries.list_stream_notices_after(conn, 0)) == 1

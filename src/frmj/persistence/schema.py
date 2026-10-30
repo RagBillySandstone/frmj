@@ -335,6 +335,23 @@ CREATE TABLE IF NOT EXISTS financing_rate_snapshots (
 
 
 -- -------------------------------------------------------------------------
+-- Stream notices — transactions to announce in open `frmj shell`s
+-- -------------------------------------------------------------------------
+-- While any frmj shell is open, a background streamer follows every
+-- account's Oanda transaction stream and adds a row here for each
+-- transaction it ingests. Each shell remembers the last notice id it has
+-- seen and prints newer notices for its own account. Rows ingested any other
+-- way (`frmj sync`, a command's own auto-sync) get no notice. The streamer
+-- deletes notices older than a day, so the table stays small.
+CREATE TABLE IF NOT EXISTS stream_notices (
+    -- Increasing; shells track the highest id they have seen.
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    transaction_id  INTEGER NOT NULL REFERENCES transactions(id),
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+
+-- -------------------------------------------------------------------------
 -- Config — flat key/value store for installation-wide settings
 -- -------------------------------------------------------------------------
 -- Per-account trading settings live in account_config above.
