@@ -11,6 +11,8 @@ Endpoints implemented
   GET  /accounts/{id}/trades                   (open ticket count per instrument)
   GET  /accounts/{id}/pendingOrders            (pending entry orders)
   POST /accounts/{id}/orders                   (place market / limit order)
+  GET  /accounts/{id}/transactions/stream       (live transaction stream, on
+                                                 the separate stream host)
 
 We deliberately avoid the official v20 Python SDK so that:
 
@@ -36,6 +38,11 @@ Base URLs
     Practice : https://api-fxpractice.oanda.com/v3
     Live     : https://api-fxtrade.oanda.com/v3
 
+Streaming endpoints live on their own hosts:
+
+    Practice : https://stream-fxpractice.oanda.com/v3
+    Live     : https://stream-fxtrade.oanda.com/v3
+
 Retry policy
 ------------
 None — deliberately. If a request fails we let the exception propagate to
@@ -47,6 +54,7 @@ the "abort" path unreachable.
 from __future__ import annotations
 
 import json
+from collections.abc import Generator, Iterator
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -84,6 +92,8 @@ from .parsing import (
 
 PRACTICE_BASE_URL: str = "https://api-fxpractice.oanda.com/v3"
 LIVE_BASE_URL: str = "https://api-fxtrade.oanda.com/v3"
+PRACTICE_STREAM_URL: str = "https://stream-fxpractice.oanda.com/v3"
+LIVE_STREAM_URL: str = "https://stream-fxtrade.oanda.com/v3"
 
 # Oanda's documented per-call limit for the /sinceid endpoint.  When a
 # response contains exactly this many rows there may be more; we loop.
@@ -93,6 +103,9 @@ _CONNECT_TIMEOUT: float = 5.0  # seconds — fail fast on broken network
 _READ_TIMEOUT: float = 15.0  # seconds — cold pages can be large
 _WRITE_TIMEOUT: float = 5.0  # seconds — tiny uploads
 _POOL_TIMEOUT: float = 5.0  # seconds — connection pool wait
+# Oanda sends a stream heartbeat every 5 s; four missed in a row means the
+# connection is dead and should be dropped (the caller reconnects).
+_STREAM_READ_TIMEOUT: float = 20.0
 
 # Pending order types that open a position when triggered. Everything else
 # in /pendingOrders (TAKE_PROFIT, STOP_LOSS, TRAILING_STOP_LOSS, ...) is an
@@ -140,6 +153,24 @@ class ClientProtocol(Protocol):
         ...
 
 
+class StreamingClientProtocol(ClientProtocol, Protocol):
+    """A ``ClientProtocol`` that can also stream transactions as they happen.
+
+    Needed by ``follow_transactions`` (``sync.py``), which syncs on each
+    streamed event; ``OandaClient`` satisfies it.
+    """
+
+    def stream_transactions(self) -> Iterator[dict[str, Any]]:
+        """Yield each message on the account's transaction stream, in order.
+
+        Messages are Oanda's JSON objects: transactions, plus a
+        ``{"type": "HEARTBEAT", "lastTransactionID": ...}`` every few
+        seconds. Blocks between messages; raises when the connection fails
+        or goes quiet for too long, and never retries itself.
+        """
+        ...
+
+
 # ---------------------------------------------------------------------------
 # Real HTTP client
 # ---------------------------------------------------------------------------
@@ -171,6 +202,7 @@ class OandaClient:
 
         self.account_id = account_id
         self._base_url = PRACTICE_BASE_URL if practice else LIVE_BASE_URL
+        self._stream_url = PRACTICE_STREAM_URL if practice else LIVE_STREAM_URL
         self._http = httpx.Client(
             headers={"Authorization": f"Bearer {token}"},
             timeout=httpx.Timeout(
@@ -567,6 +599,38 @@ class OandaClient:
         if not txn or "id" not in txn:
             raise RuntimeError(f"No {key} in Oanda response for trade {trade_id}")
         return str(txn["id"])
+
+    def stream_transactions(self) -> Generator[dict[str, Any], None, None]:
+        """
+        Yield each message on this account's transaction stream as a dict.
+
+        Opens ``GET /accounts/{id}/transactions/stream`` on the stream host
+        and yields every newline-delimited JSON message: a transaction as
+        soon as Oanda records it, or a ``HEARTBEAT`` (with
+        ``lastTransactionID``) every 5 seconds when nothing is happening.
+
+        The stream never ends on its own. It raises
+        ``httpx.HTTPStatusError`` on a 4xx / 5xx when opening, and
+        ``httpx.ReadTimeout`` after ``_STREAM_READ_TIMEOUT`` seconds without
+        a message (several missed heartbeats). Stopping early (``break`` or
+        closing the generator) closes the connection.
+        """
+        import httpx
+
+        url = f"{self._stream_url}/accounts/{self.account_id}/transactions/stream"
+        # Same limits as other calls, except reads wait out heartbeat gaps.
+        timeout = httpx.Timeout(
+            connect=_CONNECT_TIMEOUT,
+            read=_STREAM_READ_TIMEOUT,
+            write=_WRITE_TIMEOUT,
+            pool=_POOL_TIMEOUT,
+        )
+        with self._http.stream("GET", url, timeout=timeout) as resp:
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                # Skip keep-alive blank lines between messages.
+                if line.strip():
+                    yield json.loads(line)
 
     def close(self) -> None:
         """Release the underlying httpx connection pool."""

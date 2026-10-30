@@ -31,9 +31,12 @@ from __future__ import annotations
 
 from .client import (
     LIVE_BASE_URL,
+    LIVE_STREAM_URL,
     PRACTICE_BASE_URL,
+    PRACTICE_STREAM_URL,
     ClientProtocol,
     OandaClient,
+    StreamingClientProtocol,
 )
 from .models import (
     AccountSummary,
@@ -63,7 +66,10 @@ from .parsing import (
 __all__ = [
     "PRACTICE_BASE_URL",
     "LIVE_BASE_URL",
+    "PRACTICE_STREAM_URL",
+    "LIVE_STREAM_URL",
     "ClientProtocol",
+    "StreamingClientProtocol",
     "OandaClient",
     "TransactionRow",
     "OpenTrade",

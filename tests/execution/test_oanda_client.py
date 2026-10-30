@@ -153,6 +153,8 @@ class TestBaseUrls:
         [
             (oanda_client.PRACTICE_BASE_URL, "api-fxpractice.oanda.com"),
             (oanda_client.LIVE_BASE_URL, "api-fxtrade.oanda.com"),
+            (oanda_client.PRACTICE_STREAM_URL, "stream-fxpractice.oanda.com"),
+            (oanda_client.LIVE_STREAM_URL, "stream-fxtrade.oanda.com"),
         ],
     )
     def test_base_url_is_oandas_documented_host(self, base_url: str, host: str) -> None:
@@ -850,3 +852,103 @@ class TestLifecycle:
             assert ctx is client
             assert http.closed is False
         assert http.closed is True
+
+
+# ---------------------------------------------------------------------------
+# stream_transactions
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _FakeStreamResponse:
+    """Stand-in for the streaming ``httpx.Response`` used as a context manager."""
+
+    lines: list[str]
+    status_code: int = 200
+    closed: bool = False
+
+    def __enter__(self) -> _FakeStreamResponse:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.closed = True
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            _ErrorResponse(self.status_code).raise_for_status()
+
+    def iter_lines(self) -> Any:
+        yield from self.lines
+
+
+@dataclass
+class _FakeStreamHttp:
+    """Replaces ``OandaClient._http`` for ``stream_transactions``."""
+
+    response: _FakeStreamResponse
+    calls: list[_RecordedCall] = field(default_factory=list)
+
+    def stream(self, method: str, url: str, **kwargs: Any) -> _FakeStreamResponse:
+        self.calls.append(_RecordedCall(method, url, kwargs))
+        return self.response
+
+
+def _stream_client(
+    response: _FakeStreamResponse, practice: bool = True
+) -> tuple[OandaClient, _FakeStreamHttp]:
+    client = OandaClient(
+        token="dummy-token", account_id="101-001-test-001", practice=practice
+    )
+    http = _FakeStreamHttp(response)
+    client._http = http  # type: ignore[assignment]
+    return client, http
+
+
+class TestStreamTransactions:
+    def test_yields_each_message_and_skips_blank_lines(self) -> None:
+        response = _FakeStreamResponse(
+            [
+                '{"type": "HEARTBEAT", "lastTransactionID": "41"}',
+                "",
+                '{"id": "42", "type": "ORDER_FILL"}',
+            ]
+        )
+        client, _ = _stream_client(response)
+        messages = list(client.stream_transactions())
+        assert messages == [
+            {"type": "HEARTBEAT", "lastTransactionID": "41"},
+            {"id": "42", "type": "ORDER_FILL"},
+        ]
+        assert response.closed
+
+    @pytest.mark.parametrize(
+        ("practice", "host"),
+        [(True, "stream-fxpractice.oanda.com"), (False, "stream-fxtrade.oanda.com")],
+    )
+    def test_uses_the_stream_host(self, practice: bool, host: str) -> None:
+        client, http = _stream_client(_FakeStreamResponse([]), practice=practice)
+        list(client.stream_transactions())
+        call = http.calls[0]
+        assert call.method == "GET"
+        assert call.url == (
+            f"https://{host}/v3/accounts/101-001-test-001/transactions/stream"
+        )
+
+    def test_read_timeout_outlasts_heartbeats(self) -> None:
+        """Heartbeats come every 5 s, so reads must wait well beyond that."""
+        client, http = _stream_client(_FakeStreamResponse([]))
+        list(client.stream_transactions())
+        assert http.calls[0].kwargs["timeout"].read == 20.0
+
+    def test_error_status_raises(self) -> None:
+        client, _ = _stream_client(_FakeStreamResponse([], status_code=401))
+        with pytest.raises(httpx.HTTPStatusError):
+            list(client.stream_transactions())
+
+    def test_closing_early_closes_the_connection(self) -> None:
+        response = _FakeStreamResponse(['{"id": "1"}', '{"id": "2"}'])
+        client, _ = _stream_client(response)
+        stream = client.stream_transactions()
+        assert next(stream) == {"id": "1"}
+        stream.close()
+        assert response.closed
