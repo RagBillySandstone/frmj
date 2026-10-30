@@ -175,6 +175,16 @@ Each line runs exactly as it would after `frmj`, with the same options, prompts,
 - Ctrl+C at the prompt discards the line. Ctrl+C during a command (including at one of its prompts) cancels that command and returns to the shell prompt.
 - An error never ends the session. That includes a usage error, a command failing, or an unexpected crash, which prints its traceback.
 
+**Live transactions.** While at least one shell is open in a terminal, a background process follows Oanda's transaction stream for every configured account. It syncs each new transaction (a fill, a TP/SL/trailing-stop hit, financing) into the journal as soon as Oanda records it. Each shell prints the new transactions for its own account in the journal format, for example:
+
+```
+#6402  2026-10-30 15:30:00  ORDER_FILL
+    EUR_USD SL SELL 10,000 units @ 1.09900  P/L -$45.20
+frmj [practice PRACTICE]> posi
+```
+
+At an idle prompt they appear straight away, above the prompt, and anything you'd half-typed is redrawn. While a command is running, they wait for the next prompt. Transactions a command syncs itself, such as the fill from your own `trade`, aren't announced again. The background process starts with the first shell and stops a couple of seconds after the last one closes, including one that crashed. If the stream drops, it reconnects and syncs every 15 seconds until the stream is back. Errors, such as a missing API token for an account's environment, are logged to `stream/streamer.log` next to the database. Streaming isn't available on Windows, and a shell with piped input doesn't start it.
+
 Tab completion works the same as `frmj <TAB>` in bash after `frmj --install-completion`. It offers the same candidates (instruments, open trade IDs, accounts, groups, tags, config keys and values) and falls back to filenames where bash does (`sync --csv`, `export --output`). Unlike bash, it doesn't need `--install-completion` first.
 
 Up/down arrows recall earlier commands, including those from previous sessions. The history is kept in `frmj_history` next to the database, capped at 1,000 lines. Only the lines typed at the shell prompt are recorded. Answers to a command's own prompts, such as confirmations, notes, and API tokens, are never recorded.

@@ -89,7 +89,7 @@ frmj config check --connectivity   # also calls the Oanda API to verify credenti
 | [`frmj mode`](docs/commands.md#frmj-mode) | Enable or disable live order placement |
 | [`frmj note`](docs/commands.md#frmj-note) / [`tag`](docs/commands.md#frmj-tag) | Annotate a transaction |
 | [`frmj positions`](docs/commands.md#frmj-positions) | Open trades and pending orders with live P/L, TP/SL, financing, and an account summary |
-| [`frmj shell`](docs/commands.md#frmj-shell) | Interactive prompt: type `trade` instead of `frmj trade`, with history and the same tab completion |
+| [`frmj shell`](docs/commands.md#frmj-shell) | Interactive prompt: type `trade` instead of `frmj trade`, with history, the same tab completion, a separate active account per shell, and live notices of new transactions |
 | [`frmj stats`](docs/commands.md#frmj-stats) | Performance statistics from the local journal |
 | [`frmj status`](docs/configuration.md#status-at-a-glance) | Active account, its type, and the execution mode |
 | [`frmj sync`](docs/commands.md#frmj-sync) | Pull transactions from Oanda (or an Oanda Hub CSV) into the local database |

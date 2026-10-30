@@ -10,7 +10,9 @@ src/frmj/
 │   ├── _trade_helpers.py, _trade_multi.py     # TP/SL prompts and the --multi flow for trade
 │   └── _display.py, _completion.py            # Output formatting and tab completion shared across commands
 ├── services.py         # Multi-step flows (trade planning, post-fill, positions, close) — no Typer dependency
-├── queries.py          # Plain SQL reads/writes on the ledger: transactions, notes, tags, plans, snapshots
+├── queries.py          # Plain SQL reads/writes on the ledger: transactions, notes, tags, plans, snapshots, stream notices
+├── streaming.py        # Background streamer while `frmj shell` is open: shell registry, locks, one stream per account
+├── __main__.py         # `python -m frmj`, used to start the streamer as a detached process
 ├── app.py              # Wiring: DB factory, client factory, config helpers, keychain
 ├── accounts.py         # Pure SQLite CRUD for named account profiles and live-mode flag
 ├── domain/
@@ -24,7 +26,7 @@ src/frmj/
 │   │   ├── parsing.py  # Pure functions: Oanda API dicts → dataclasses
 │   │   └── models.py   # Dataclasses shared by client.py and parsing.py
 │   ├── csv_import.py   # Parser for Oanda Hub transaction-history CSV exports (`sync --csv`)
-│   └── sync.py         # Ingestion: Oanda rows → SQLite, cursor management
+│   └── sync.py         # Ingestion: Oanda rows → SQLite, cursor management; follow_transactions (live stream)
 └── persistence/
     └── schema.py       # SQLite DDL and ensure_schema()
 ```
@@ -46,6 +48,7 @@ flowchart TB
         queries["queries.py<br/>ledger reads + writes"]
         accounts["accounts.py<br/>account profiles + config CRUD"]
         app["app.py<br/>wiring: DB, client, config, tokens"]
+        streaming["streaming.py<br/>background streamer"]
     end
 
     subgraph EXEC["Execution layer"]
@@ -64,14 +67,14 @@ flowchart TB
     persistence["persistence/schema.py<br/>DDL + migrations"]
 
     subgraph EXT["External"]
-        api[("Oanda v20 REST API<br/>via httpx")]
+        api[("Oanda v20 REST + stream API<br/>via httpx")]
         db[("SQLite database")]
         keychain[("OS keychain<br/>via keyring")]
-        files[("Files: saved_plan.json,<br/>export output, Hub CSV")]
+        files[("Files: saved_plan.json,<br/>export output, Hub CSV,<br/>shell history, stream/")]
     end
 
     user --> cli
-    cli --> services & queries & accounts & app
+    cli --> services & queries & accounts & app & streaming
     cli --> sync & oanda
     cli --> DOMAIN
 
@@ -79,6 +82,7 @@ flowchart TB
     services --> risk & sizing & pricing
     queries --> oanda
     app --> accounts & persistence & oanda & risk
+    streaming --> app & accounts & queries & sync
 
     sync --> csvimp & oanda
     csvimp --> oanda
@@ -88,11 +92,11 @@ flowchart TB
 
     oanda --> api
     app --> keychain
-    app & cli & csvimp --> files
+    app & cli & csvimp & streaming --> files
     persistence & app & accounts & sync & services & queries --> db
 ```
 
-The CLI imports all four domain modules, drawn as one arrow to the layer. Its file access is `export --output`; `csv_import.py` reads the Hub CSV for `sync --csv`; `app.py` owns `saved_plan.json`.
+The CLI imports all four domain modules, drawn as one arrow to the layer. Its file access is `export --output` and the shell's history file; `csv_import.py` reads the Hub CSV for `sync --csv`; `app.py` owns `saved_plan.json`; `streaming.py` owns the `stream/` directory (shell registry, locks, log), whose location `app.py` resolves.
 
 - **Dependencies point inward, with no cycles.** The domain layer imports only itself, and nothing outside `cli/` imports `cli/`. `services.py` does not import `app.py`: it is handed an open connection and client, which is what keeps it free of Typer and reusable from another front end.
 - **`sizing.py` is the core.** `risk.py`, `pricing.py`, and the Oanda models all import it for `InstrumentSpec`, `PriceQuote`, and `Direction`.
@@ -108,7 +112,7 @@ The execution layer (`oanda`, `sync`) handles all network and database I/O. It f
 
 `accounts.py` is pure SQLite CRUD — no I/O beyond the database connection. All keychain access and environment-variable resolution happens in `app.py`.
 
-`app.py` is the only place that resolves configuration from the environment, touches the database file or draft plan, or accesses the OS keychain. The exceptions are files the user names on the command line (`export --output` writes one, `sync --csv` reads one) and `config get`/`config check`, which look at the token environment variables only to report where the token comes from. The CLI commands call `app.py` to obtain wired-up dependencies, then pass them into `services.py` and the domain layer.
+`app.py` is the only place that resolves configuration from the environment, touches the database file or draft plan, or accesses the OS keychain. It also resolves where `frmj shell` keeps its history and where `streaming.py` keeps its files, though those modules read and write them. The exceptions are files the user names on the command line (`export --output` writes one, `sync --csv` reads one) and `config get`/`config check`, which look at the token environment variables only to report where the token comes from. The CLI commands call `app.py` to obtain wired-up dependencies, then pass them into `services.py` and the domain layer.
 
 `services.py` holds multi-step operations that combine several Oanda API calls and/or domain calls into one unit — fetching the market data needed to plan a trade, evaluating risk and correlation, attaching TP/SL and syncing after a fill, fetching the data behind `positions`, and closing tickets for `close`. It takes an already-open connection and client as arguments and has no Typer dependency, so it's reusable from any future non-CLI interface. Prompting, confirmation, and terminal output stay in the `cli/` package.
 
@@ -275,6 +279,40 @@ flowchart TD
 - **Entry-order journals** move to the fill only for LIMIT, STOP and MARKET_IF_TOUCHED orders, so notes on other transactions an ORDER_FILL refers to stay put. This runs after all rows in the batch are inserted, and after deferred plans are attached, so an order and its fill arriving together still link, even if the order's plan was deferred.
 - **`sync --csv`** joins at the insert step. CSV rows carry no parent links or order IDs, so it only ever inserts and skips, and it never moves the cursor backwards: importing old history doesn't make the next API sync re-fetch it.
 
+## Live streaming
+
+Two things follow Oanda's transaction stream (`GET /accounts/{id}/transactions/stream`, on the separate `stream-fx…` hosts): `frmj sync --watch`, for one account in the foreground, and the background streamer behind `frmj shell`. Both run `follow_transactions` in `execution/sync.py`, which doesn't ingest the streamed messages itself. It starts each round with a catch-up `sync_incremental`, then opens the stream. Every transaction message triggers another `sync_incremental`, and so does any heartbeat whose `lastTransactionID` is past the cursor. So the sync flow above stays the only way rows enter the ledger. When the stream or a sync fails, `follow_transactions` waits `retry_interval` seconds and starts a new round. The round's catch-up sync makes that a polling fallback.
+
+```mermaid
+sequenceDiagram
+    participant Sh as frmj shell (each one)
+    participant Reg as stream/ (registry + locks)
+    participant St as frmj streamer
+    participant O as Oanda stream
+    participant DB as SQLite
+
+    Sh->>Reg: register PID (registry.lock)
+    Reg-->>Sh: no one holds streamer.lock?
+    Sh->>St: spawn detached `python -m frmj streamer`
+    St->>Reg: hold streamer.lock
+    loop every 2 s
+        St->>Reg: any registered PID alive? (drop stale ones)
+        St->>DB: list accounts; start/stop one thread each
+    end
+    O-->>St: transaction (or heartbeat past cursor)
+    St->>DB: sync_incremental + stream_notices row
+    loop every 1 s
+        Sh->>DB: notices newer than last seen, for this shell's account
+    end
+    Sh->>Reg: unregister PID on exit
+    St->>Reg: no live PIDs: release streamer.lock under registry.lock, exit
+```
+
+- **One streamer for all shells.** `streamer.lock` (`flock`) is held for the streamer's lifetime, so a second one exits at once and shells can tell whether one is running. `registry.lock` serialises a shell registering against the streamer deciding to exit. The streamer releases `streamer.lock` before `registry.lock`, so a shell that registers just then always starts a fresh streamer.
+- **Crashed shells** leave a PID file whose process is gone. The streamer deletes it on its next check, instead of streaming forever.
+- **Notices, not transactions**, drive the shells' messages. Only the streamer writes `stream_notices`, so what a command in a shell syncs itself (a `trade`'s fill, a `journal` auto-sync) isn't announced back to it. Notices older than a day are pruned when the streamer starts.
+- **POSIX only.** Without `fcntl` (Windows), shells run without streaming.
+
 ## Planning data types
 
 Almost every class in FRoMaJ is a frozen data container (dataclass, enum, or exception); the logic lives in functions. The one class with real behavior is `OandaClient`. So a class diagram is most useful for showing how data moves through trade planning, the middle of the [trade flow](#trade-flow) above:
@@ -411,7 +449,7 @@ classDiagram
 
 Solid diamonds are "contains"; dotted arrows are the `services.py` functions that build one bundle from another, not methods. Each step produces an immutable bundle the next one reads: `fetch_instrument_context` and `fetch_account_context` turn API data into `InstrumentContext` and `AccountContext`, and `plan_account_sizing` combines them with the account's `RiskConfig` into an `AccountSizing`. With `trade --multi` the group shares one `InstrumentContext`, while each account has its own `AccountContext` and `RiskConfig`.
 
-`ClientProtocol` is the only inheritance-like relationship: `sync.py` needs just `get_transactions_since`, so tests pass any object with that method, without subclassing.
+`ClientProtocol` is the only inheritance-like relationship: `sync.py` needs just `get_transactions_since`, so tests pass any object with that method, without subclassing. `StreamingClientProtocol` adds `stream_transactions` for `follow_transactions`.
 
 Not shown: the post-trade result types (`PostFillResult`, `CloseResult`, `TrailResult`, `PositionsView`), TP/SL pricing (`TPSLSpec`, `ExitLevels`, `TrailingStopLevels`), analytics (`ClosedTrade`, `TradeSummary`, `DirectionStats`), and the risk-check exceptions (`MaxTradesExceeded`, `ScaleInForbidden`, `CorrelatedPositionForbidden`, `BelowMinimumUnits`).
 
@@ -429,6 +467,7 @@ SQLite at the platform default path (see [`FRMJ_DB_PATH`](configuration.md#envir
 | `tags` | Short labels attached to transactions; used in journal filters and stats breakdowns. |
 | `trade_plans` | Intended TP/SL prices recorded at order time; shown in `journal` alongside fills. For a limit order the plan (and any notes/tags) sits on the pending order's transaction until sync moves it to the fill. |
 | `deferred_trade_plans` | Trade plans whose transaction wasn't in the ledger yet because the post-order sync failed, keyed by Oanda account + transaction ID. Sync moves each into `trade_plans` when its transaction arrives. |
+| `stream_notices` | One row per transaction the background streamer ingested, pointing at its `transactions` row. Open shells print the new ones for their account. Pruned after a day. |
 | `financing_rate_snapshots` | Daily captures of Oanda's long/short financing rates, recorded by each live `frmj financing` run; read back by `financing --date`. |
 | `sync_cursors` | One row per account; tracks the last ingested Oanda transaction ID for incremental sync. |
 | `config` | Flat key/value store for installation-wide settings: `active_account` and `live_mode`. |
