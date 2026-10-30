@@ -38,6 +38,13 @@ Three public entry points
     ``execution.csv_import`` for the file format and ``sync_csv``'s own
     docstring for cursor behaviour.
 
+``follow_transactions(conn, client, ...)``
+    Keeps an account's journal current until told to stop: an incremental
+    sync whenever Oanda's transaction stream reports something new, and a
+    plain incremental sync every ``retry_interval`` seconds while the stream
+    is down. Used by ``sync --watch`` and the background streamer behind
+    ``frmj shell``.
+
 Design notes
 ------------
 * Both functions accept ``conn`` with FK enforcement already on (set by
@@ -55,11 +62,17 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from frmj.execution.csv_import import load_csv_file
-from frmj.execution.oanda import ClientProtocol, TransactionRow
+from frmj.execution.oanda import (
+    ClientProtocol,
+    StreamingClientProtocol,
+    TransactionRow,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -470,3 +483,89 @@ def sync_incremental(
         rows_skipped=skipped,
         last_oanda_id=last_oanda_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Following an account live (stream + polling fallback)
+# ---------------------------------------------------------------------------
+
+# The stream's keep-alive message; carries lastTransactionID, not a transaction.
+_HEARTBEAT_TYPE: str = "HEARTBEAT"
+
+
+def _sync_and_report(
+    conn: sqlite3.Connection,
+    client: ClientProtocol,
+    on_ingested: Callable[[str], None],
+) -> None:
+    """Run ``sync_incremental``; if it added rows, tell *on_ingested*.
+
+    *on_ingested* receives the cursor from before the sync, so the caller can
+    list exactly the new rows (``queries.list_transactions_after``). It isn't
+    called after a first-ever sync (no earlier cursor): that pulls the whole
+    history, which is nothing new to report.
+    """
+    previous = _read_cursor(conn, client.account_id)
+    result = sync_incremental(conn, client)
+    if result.rows_ingested and previous is not None:
+        on_ingested(previous)
+
+
+def _is_behind(conn: sqlite3.Connection, account_id: str, last_id: object) -> bool:
+    """Return ``True`` when a heartbeat's *last_id* is past the local cursor.
+
+    That means a transaction was missed (e.g. it happened while the stream
+    was reconnecting), so a catch-up sync is needed.
+    """
+    cursor = _read_cursor(conn, account_id)
+    try:
+        return cursor is None or int(str(last_id)) > int(cursor)
+    except ValueError:
+        # A malformed ID can't be compared; sync to be safe.
+        return True
+
+
+def follow_transactions(
+    conn: sqlite3.Connection,
+    client: StreamingClientProtocol,
+    *,
+    on_ingested: Callable[[str], None],
+    on_error: Callable[[Exception], None],
+    stop: threading.Event,
+    retry_interval: float,
+) -> None:
+    """
+    Keep *client*'s account synced into *conn* until *stop* is set.
+
+    Each round: an incremental sync to catch up, then Oanda's transaction
+    stream, with another incremental sync for every transaction it reports
+    and for any heartbeat showing a transaction the cursor hasn't reached.
+    Syncing (rather than ingesting the streamed message itself) reuses all
+    of ``sync_incremental``'s ordering, dedup, and journal-linking rules.
+
+    When the stream (or a sync) fails, *on_error* gets the exception and the
+    round restarts after *retry_interval* seconds. Its catch-up sync makes
+    this a polling fallback while the stream is down. *on_ingested* is
+    called as for ``_sync_and_report``.
+
+    *stop* is checked between messages. With heartbeats every 5 seconds, a
+    healthy stream returns within about 5 seconds of *stop* being set; a
+    stalled one within its read timeout.
+    """
+    while not stop.is_set():
+        try:
+            _sync_and_report(conn, client, on_ingested)
+            for message in client.stream_transactions():
+                if stop.is_set():
+                    return
+                if message.get("type") != _HEARTBEAT_TYPE:
+                    # A new transaction: fetch it (and anything before it).
+                    _sync_and_report(conn, client, on_ingested)
+                elif _is_behind(
+                    conn, client.account_id, message.get("lastTransactionID")
+                ):
+                    _sync_and_report(conn, client, on_ingested)
+        except Exception as exc:
+            on_error(exc)
+        # Stream ended or failed: wait (or stop), then reconnect.
+        stop.wait(retry_interval)

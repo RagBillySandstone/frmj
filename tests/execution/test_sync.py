@@ -28,13 +28,22 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from frmj.execution.oanda import TransactionRow
-from frmj.execution.sync import SyncResult, sync_cold, sync_csv, sync_incremental
+from frmj.execution.sync import (
+    SyncResult,
+    follow_transactions,
+    sync_cold,
+    sync_csv,
+    sync_incremental,
+)
 from frmj.persistence.schema import ensure_schema
 
 
@@ -686,3 +695,166 @@ class TestDeferredTradePlans:
         _defer_plan(db, "105")
         sync_cold(db, FakeClient("acct-1", responses=[[_row("105")]]))
         assert db.execute("SELECT tp_price FROM trade_plans").fetchone()[0] == "9.9"
+
+
+# ---------------------------------------------------------------------------
+# follow_transactions
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class FakeStreamingClient(FakeClient):
+    """``FakeClient`` plus a scripted ``stream_transactions``.
+
+    Each call to ``stream_transactions`` plays the next script in
+    ``streams``: its messages in order, then raises the script's exception
+    if any (else the stream simply ends). ``stop`` is set once the scripts
+    run out, so ``follow_transactions`` always terminates in tests.
+    """
+
+    streams: list[tuple[list[dict[str, Any]], Exception | None]] = field(
+        default_factory=list
+    )
+    stop: threading.Event = field(default_factory=threading.Event)
+
+    def stream_transactions(self) -> Iterator[dict[str, Any]]:
+        if not self.streams:
+            self.stop.set()
+            return
+        messages, error = self.streams.pop(0)
+        yield from messages
+        if error is not None:
+            raise error
+
+
+@dataclass
+class _Recorder:
+    """Collects follow_transactions' callbacks."""
+
+    ingested_after: list[str] = field(default_factory=list)
+    errors: list[Exception] = field(default_factory=list)
+
+
+def _follow(db: sqlite3.Connection, client: FakeStreamingClient) -> _Recorder:
+    """Run follow_transactions until the client's scripts are exhausted."""
+    recorder = _Recorder()
+    follow_transactions(
+        db,
+        client,
+        on_ingested=recorder.ingested_after.append,
+        on_error=recorder.errors.append,
+        stop=client.stop,
+        retry_interval=0,
+    )
+    return recorder
+
+
+def _heartbeat(last_id: str) -> dict[str, Any]:
+    return {"type": "HEARTBEAT", "lastTransactionID": last_id}
+
+
+class TestFollowTransactions:
+    def test_first_sync_is_not_reported_as_new(self, db: sqlite3.Connection) -> None:
+        """The initial cold sync pulls history, which isn't news."""
+        client = FakeStreamingClient("acct-1", responses=[[_row("1"), _row("2")]])
+        recorder = _follow(db, client)
+        assert _read_cursor(db, "acct-1") == "2"
+        assert recorder.ingested_after == []
+
+    def test_streamed_transaction_triggers_sync_and_report(
+        self, db: sqlite3.Connection
+    ) -> None:
+        client = FakeStreamingClient(
+            "acct-1",
+            responses=[[_row("1")], [], [_row("2")]],
+            streams=[([{"id": "2", "type": "ORDER_FILL"}], None)],
+        )
+        recorder = _follow(db, client)
+        assert _read_cursor(db, "acct-1") == "2"
+        # Reported with the cursor from before that sync.
+        assert recorder.ingested_after == ["1"]
+        assert recorder.errors == []
+
+    def test_heartbeat_at_cursor_does_not_sync(self, db: sqlite3.Connection) -> None:
+        client = FakeStreamingClient(
+            "acct-1",
+            responses=[[_row("1")], []],
+            streams=[([_heartbeat("1"), _heartbeat("1")], None)],
+        )
+        _follow(db, client)
+        # Cold sync + the catch-up sync of the second round; no heartbeat syncs.
+        assert client.calls == [None, "1"]
+
+    def test_heartbeat_past_cursor_catches_up(self, db: sqlite3.Connection) -> None:
+        """A transaction missed by the stream is fetched from the heartbeat."""
+        client = FakeStreamingClient(
+            "acct-1",
+            responses=[[_row("1")], [], [_row("2")]],
+            streams=[([_heartbeat("2")], None)],
+        )
+        recorder = _follow(db, client)
+        assert _read_cursor(db, "acct-1") == "2"
+        assert recorder.ingested_after == ["1"]
+
+    def test_stream_error_is_reported_then_polls_and_reconnects(
+        self, db: sqlite3.Connection
+    ) -> None:
+        """After a dropped stream, the next round's catch-up sync polls."""
+        client = FakeStreamingClient(
+            "acct-1",
+            responses=[[_row("1")], [], [_row("2")]],
+            streams=[([], ConnectionError("dropped")), ([], None)],
+        )
+        recorder = _follow(db, client)
+        assert [str(e) for e in recorder.errors] == ["dropped"]
+        # Second round's catch-up sync found the transaction.
+        assert _read_cursor(db, "acct-1") == "2"
+        assert recorder.ingested_after == ["1"]
+
+    def test_sync_error_is_reported_and_retried(self, db: sqlite3.Connection) -> None:
+        @dataclass
+        class FailingOnceClient(FakeStreamingClient):
+            failed: bool = False
+
+            def get_transactions_since(
+                self, from_id: str | None = None
+            ) -> list[TransactionRow]:
+                if not self.failed:
+                    self.failed = True
+                    raise TimeoutError("timeout")
+                return super().get_transactions_since(from_id)
+
+        client = FailingOnceClient("acct-1", responses=[[_row("1")]])
+        recorder = _follow(db, client)
+        assert [str(e) for e in recorder.errors] == ["timeout"]
+        assert _read_cursor(db, "acct-1") == "1"
+
+    def test_stop_set_before_start_does_nothing(self, db: sqlite3.Connection) -> None:
+        client = FakeStreamingClient("acct-1", responses=[[_row("1")]])
+        client.stop.set()
+        _follow(db, client)
+        assert client.calls == []
+
+    def test_stop_during_stream_returns_at_next_message(
+        self, db: sqlite3.Connection
+    ) -> None:
+        stop = threading.Event()
+
+        @dataclass
+        class StoppingClient(FakeStreamingClient):
+            def stream_transactions(self) -> Iterator[dict[str, Any]]:
+                stop.set()
+                yield {"id": "2", "type": "ORDER_FILL"}
+                raise AssertionError("read past the stop")
+
+        client = StoppingClient("acct-1", responses=[[_row("1")]])
+        follow_transactions(
+            db,
+            client,
+            on_ingested=lambda after: None,
+            on_error=lambda exc: (_ for _ in ()).throw(exc),
+            stop=stop,
+            retry_interval=0,
+        )
+        # The streamed transaction arrived after stop, so it isn't synced.
+        assert client.calls == [None]
