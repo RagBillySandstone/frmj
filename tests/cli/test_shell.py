@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import io
+import os
+import sqlite3
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,11 +22,13 @@ from frmj.accounts import (
     in_shell_session,
     set_live_mode,
 )
-from frmj.app import get_db, get_shell_history_path
+from frmj.app import get_db, get_shell_history_path, get_stream_dir
 from frmj.cli import app
+from frmj import queries
 from frmj.cli.shell import (
     _complete_path,
     _make_completer,
+    _Notifier,
     _prompt,
     _shell_completions,
 )
@@ -476,3 +482,114 @@ class TestReadlineCompleter:
         cli = typer.main.get_command(app)
         complete = _make_completer(cli, buffer)  # type: ignore[arg-type]
         assert complete("tr", 0) == "trade "
+
+
+# ---------------------------------------------------------------------------
+# Streaming: registration and notices
+# ---------------------------------------------------------------------------
+
+
+class TestShellStreaming:
+    def test_interactive_shell_registers_and_unregisters(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A terminal shell registers its PID while open, starting the streamer."""
+        pid_file = get_stream_dir() / "shells" / str(os.getpid())
+        # Whether this shell was registered when it asked for a streamer.
+        registered_at_spawn: list[bool] = []
+        monkeypatch.setattr(
+            "frmj.streaming._spawn_streamer",
+            lambda: registered_at_spawn.append(pid_file.exists()),
+        )
+        monkeypatch.setattr("frmj.cli.shell._load_readline", lambda: FakeReadline())
+        _shell("status\n")
+        assert registered_at_spawn == [True]
+        assert not pid_file.exists()
+
+    def test_piped_shell_does_not_register(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        spawned: list[bool] = []
+        monkeypatch.setattr(
+            "frmj.streaming._spawn_streamer", lambda: spawned.append(True)
+        )
+        _shell("status\n")
+        assert spawned == []
+
+
+@dataclass
+class FakeTypedLine:
+    """The one readline call the notifier makes: the partly typed line."""
+
+    typed: str = ""
+
+    def get_line_buffer(self) -> str:
+        return self.typed
+
+
+def _add_streamed(conn: sqlite3.Connection, oanda_id: str, account_id: str) -> None:
+    """Insert a transaction plus the stream notice the streamer would add."""
+    cur = conn.execute(
+        "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+        "VALUES (?, ?, 'ORDER_FILL', '2026-04-25T12:00:00.000000Z', ?)",
+        (
+            oanda_id,
+            account_id,
+            '{"instrument":"EUR_USD","units":"-10000","price":"1.09900",'
+            '"pl":"-45.20","reason":"STOP_LOSS_ORDER"}',
+        ),
+    )
+    conn.commit()
+    assert cur.lastrowid is not None
+    queries.add_stream_notices(conn, [cur.lastrowid])
+
+
+class TestNotifier:
+    @pytest.fixture()
+    def conn(self, db_path: Path) -> Iterator[sqlite3.Connection]:
+        conn = get_db()
+        yield conn
+        conn.close()
+
+    def test_notice_at_prompt_is_printed_above_a_redrawn_prompt(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        out = io.StringIO()
+        notifier = _Notifier(FakeTypedLine("posi"), out)  # type: ignore[arg-type]
+        notifier.prompt_shown("frmj [practice \001\033[1;31m\002LIVE\001\033[0m\002]> ")
+        _add_streamed(conn, "201", "acct-1")
+        notifier.check(conn)
+        text = out.getvalue()
+        assert text.startswith("\r\033[K#201")
+        assert "EUR_USD SL SELL 10,000 units @ 1.09900" in text
+        # Prompt (without readline's markers) and the typed text come back.
+        assert text.endswith("\nfrmj [practice \033[1;31mLIVE\033[0m]> posi")
+
+    def test_notice_during_a_command_waits_for_the_next_prompt(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        out = io.StringIO()
+        notifier = _Notifier(FakeTypedLine(), out)  # type: ignore[arg-type]
+        notifier.prompt_shown("> ")
+        notifier.prompt_done()  # a command is running now
+        _add_streamed(conn, "201", "acct-1")
+        notifier.check(conn)
+        assert out.getvalue() == ""
+        notifier.prompt_shown("> ")
+        assert out.getvalue().startswith("#201")
+
+    def test_other_accounts_and_earlier_notices_are_not_shown(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        _add_streamed(conn, "100", "acct-1")  # before this shell started
+        out = io.StringIO()
+        notifier = _Notifier(FakeTypedLine(), out)  # type: ignore[arg-type]
+        notifier.prompt_shown("> ")
+        _add_streamed(conn, "300", "acct-other")
+        notifier.check(conn)
+        assert out.getvalue() == ""
+        _add_streamed(conn, "201", "acct-1")
+        notifier.check(conn)
+        assert "#201" in out.getvalue()
+        assert "#100" not in out.getvalue()
+        assert "#300" not in out.getvalue()

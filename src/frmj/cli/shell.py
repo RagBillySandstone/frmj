@@ -26,16 +26,26 @@ filename completion when there are none (``complete -o default``); the shell
 asks Click the same way, with the same word splitting, so every existing
 completer (instruments, trade IDs, accounts, tags, config keys, ...) works
 unchanged and the same filename fallback applies (``sync --csv ~/Dow<TAB>``).
+
+While an interactive shell is open, it is registered with the background
+streamer (``frmj.streaming``), which follows every account's Oanda
+transaction stream; the last shell to close stops it. A ``_Notifier``
+thread prints each new transaction on this shell's account. At an idle
+prompt it appears above the prompt at once; while a command runs it waits
+for the next prompt.
 """
 
 from __future__ import annotations
 
 import os
 import shlex
+import sqlite3
 import sys
+import threading
 import traceback
 from collections.abc import Callable
 from types import ModuleType
+from typing import TextIO
 
 import click
 import typer
@@ -49,10 +59,17 @@ from frmj.accounts import (
     get_default_account_name,
     is_live_mode,
 )
+from frmj import queries
 from frmj.app import get_db, get_shell_history_path
 from frmj.cli import app
 from frmj.cli._completion import _complete_account_name
-from frmj.streaming import run_streamer
+from frmj.cli._display import _format_transaction
+from frmj.streaming import (
+    register_shell,
+    run_streamer,
+    streaming_supported,
+    unregister_shell,
+)
 
 # Lines that leave the shell.
 _EXIT_WORDS: frozenset[str] = frozenset({"exit", "quit"})
@@ -62,6 +79,8 @@ _HELP_WORDS: frozenset[str] = frozenset({"help", "?"})
 _CTRL_C_EXIT_CODE: int = 130
 # Most lines kept in the history file.
 _HISTORY_LENGTH: int = 1000
+# How often the notifier checks for new stream notices, in seconds.
+_NOTICE_POLL_SECONDS: float = 1.0
 # Readline splits words for completion on whitespace only, as bash's
 # COMP_WORDS does here, so eur_usd, --flag and paths stay whole words.
 _COMPLETER_DELIMS: str = " \t\n"
@@ -199,6 +218,136 @@ def _save_history(readline: ModuleType) -> None:
         typer.echo(f"Warning: shell history not saved: {exc}", err=True)
 
 
+class _Notifier:
+    """Prints stream notices for this shell's account as they arrive.
+
+    A background thread checks ``stream_notices`` every
+    ``_NOTICE_POLL_SECONDS``. The main loop tells it when the shell's own
+    prompt is showing (``prompt_shown`` / ``prompt_done``). At that moment
+    new notices are written above the prompt, and the prompt and the
+    partly typed line are redrawn beneath them. At any other time (a
+    command is running, maybe at one of its own prompts) they are held and
+    printed just before the next shell prompt. Only notices newer than the
+    shell's start are shown, and only those for the shell's active account
+    at the time they arrive.
+    """
+
+    def __init__(self, readline: ModuleType | None, out: TextIO = sys.stdout) -> None:
+        self._readline = readline
+        self._out = out
+        # Guards everything below, shared with the background thread.
+        self._lock = threading.Lock()
+        self._at_prompt = False
+        self._prompt = ""
+        self._held: list[str] = []
+        self._stop = threading.Event()
+        conn = get_db()
+        try:
+            self._last_notice_id = queries.latest_stream_notice_id(conn)
+        finally:
+            conn.close()
+        self._thread = threading.Thread(target=self._run, name="notifier", daemon=True)
+
+    def start(self) -> None:
+        """Start checking for notices in the background."""
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stop the background thread (it exits at its next check)."""
+        self._stop.set()
+
+    def _run(self) -> None:
+        """Thread body: check for notices until stopped."""
+        # sqlite3 connections can't be shared across threads; this is ours.
+        conn = get_db()
+        try:
+            while not self._stop.wait(_NOTICE_POLL_SECONDS):
+                try:
+                    self.check(conn)
+                except sqlite3.Error:
+                    # A busy or briefly locked database: try next time.
+                    continue
+        finally:
+            conn.close()
+
+    def check(self, conn: sqlite3.Connection) -> None:
+        """Fetch new notices and show (or hold) those for this shell's account."""
+        rows = queries.list_stream_notices_after(conn, self._last_notice_id)
+        if not rows:
+            return
+        self._last_notice_id = rows[-1]["notice_id"]
+        account = get_active_account(conn)
+        if account is None:
+            return
+        lines: list[str] = []
+        for row in rows:
+            if row["account_id"] == account.oanda_id:
+                lines.extend(_format_transaction(row))
+        if lines:
+            self._show(lines)
+
+    def _show(self, lines: list[str]) -> None:
+        """Write *lines* above the prompt now, or hold them for the next prompt."""
+        with self._lock:
+            if not self._at_prompt:
+                self._held.extend(lines)
+                return
+            # Clear the prompt line, print the notice, then redraw the
+            # prompt (minus readline's zero-width markers) and typed text.
+            typed = self._readline.get_line_buffer() if self._readline else ""
+            visible_prompt = self._prompt.replace("\001", "").replace("\002", "")
+            self._out.write("\r\033[K" + "\n".join(lines) + "\n")
+            self._out.write(visible_prompt + typed)
+            self._out.flush()
+
+    def prompt_shown(self, prompt: str) -> None:
+        """Called just before the shell prompt: print held notices, then go live."""
+        with self._lock:
+            if self._held:
+                self._out.write("\n".join(self._held) + "\n")
+                self._out.flush()
+                self._held.clear()
+            self._at_prompt = True
+            self._prompt = prompt
+
+    def prompt_done(self) -> None:
+        """Called once the prompt returns a line: hold notices from now on."""
+        with self._lock:
+            self._at_prompt = False
+
+
+def _start_streaming(readline: ModuleType | None) -> _Notifier | None:
+    """Register with the background streamer and start this shell's notifier.
+
+    Only interactive shells (readline active, i.e. a terminal) on a
+    platform with streaming take part; otherwise returns ``None``. Failing
+    to register (e.g. an unwritable data directory) only warns: the shell
+    works without streaming.
+    """
+    if readline is None or not streaming_supported():
+        return None
+    try:
+        register_shell(os.getpid())
+    except OSError as exc:
+        typer.echo(f"Warning: live transaction stream unavailable: {exc}", err=True)
+        return None
+    notifier = _Notifier(readline)
+    notifier.start()
+    return notifier
+
+
+def _stop_streaming(notifier: _Notifier | None) -> None:
+    """Stop the notifier and unregister, letting the streamer exit if last."""
+    if notifier is None:
+        return
+    notifier.stop()
+    try:
+        unregister_shell(os.getpid())
+    except OSError:
+        # The streamer drops our PID file anyway once this process is gone.
+        pass
+
+
 def _prompt(color: bool) -> str:
     """Return the shell prompt, e.g. ``frmj [practice PRACTICE]> ``.
 
@@ -320,10 +469,14 @@ def shell(
 
     typer.echo("frmj shell — type a command without 'frmj'; 'help', or 'exit'.")
     begin_shell_session(start_account)
+    notifier = _start_streaming(readline)
     try:
         while True:
+            prompt = _prompt(color)
+            if notifier is not None:
+                notifier.prompt_shown(prompt)
             try:
-                line = input(_prompt(color))
+                line = input(prompt)
             except EOFError:
                 # Ctrl+D: end the prompt line before leaving.
                 typer.echo("")
@@ -332,11 +485,15 @@ def shell(
                 # Ctrl+C at the prompt discards the line, as in bash.
                 typer.echo("")
                 continue
+            finally:
+                if notifier is not None:
+                    notifier.prompt_done()
             if readline is not None and line.strip():
                 readline.add_history(line)
             if not _run_line(cli, line):
                 break
     finally:
+        _stop_streaming(notifier)
         end_shell_session()
         if readline is not None:
             _save_history(readline)

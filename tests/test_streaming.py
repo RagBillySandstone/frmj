@@ -34,7 +34,7 @@ def stream_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture()
 def spawned(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
-    """Record streamer spawns instead of starting a real process."""
+    """Record streamer spawns (the autouse ``_no_real_streamer`` blocks real ones)."""
     calls: list[bool] = []
     monkeypatch.setattr(streaming, "_spawn_streamer", lambda: calls.append(True))
     return calls

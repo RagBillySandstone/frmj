@@ -7,6 +7,10 @@ stub returns ``None`` from ``get_password`` (simulating "nothing stored").
 
 Tests that want a keyring-sourced token can override with their own
 ``monkeypatch.setattr("frmj.app.keyring.get_password", ...)``.
+
+The ``_no_real_streamer`` autouse fixture keeps any test from starting the
+background ``frmj streamer`` process, which would outlive the test and
+stream from Oanda.
 """
 
 from __future__ import annotations
@@ -20,3 +24,9 @@ def _no_real_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("frmj.app.keyring.get_password", lambda svc, usr: None)
     monkeypatch.setattr("frmj.app.keyring.set_password", lambda svc, usr, pwd: None)
     monkeypatch.setattr("frmj.app.keyring.delete_password", lambda svc, usr: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_streamer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make starting the background streamer a no-op for every test."""
+    monkeypatch.setattr("frmj.streaming._spawn_streamer", lambda: None)
