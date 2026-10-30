@@ -5,13 +5,23 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import click
 import pytest
+import typer
+from typer._completion_classes import BashComplete
 from typer.testing import CliRunner
 
-from frmj.accounts import set_live_mode
+from frmj.accounts import add_group_member, set_live_mode
 from frmj.app import get_db, get_shell_history_path
 from frmj.cli import app
-from frmj.cli.shell import _prompt
+from frmj.cli.shell import (
+    _complete_path,
+    _make_completer,
+    _prompt,
+    _shell_completions,
+)
+
+from .conftest import FakeFullClient, _open_trade
 
 runner = CliRunner()
 
@@ -131,6 +141,16 @@ class FakeReadline:
     def add_history(self, line: str) -> None:
         self.history.append(line)
 
+    # Completion setup, a no-op here.
+    def set_completer(self, completer: object) -> None:
+        pass
+
+    def set_completer_delims(self, delims: str) -> None:
+        pass
+
+    def parse_and_bind(self, binding: str) -> None:
+        pass
+
 
 class TestShellHistory:
     @pytest.fixture()
@@ -157,3 +177,231 @@ class TestShellHistory:
         _shell("status\n\nmode live\nnope\nexit\n")
         assert fake_readline.auto_history is False
         assert fake_readline.history == ["status", "mode live", "exit"]
+
+
+# ---------------------------------------------------------------------------
+# Tab completion
+# ---------------------------------------------------------------------------
+
+
+def _bash_completions(line: str, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Return what ``frmj <line><TAB>`` offers in bash.
+
+    Reproduces the installed completion script (``frmj --install-completion``):
+    bash splits the line into COMP_WORDS (with an empty last word after a
+    trailing space), joins them with newlines, and runs Typer's
+    ``BashComplete``; COMPREPLY is its output split on newlines. An empty
+    COMPREPLY makes bash fall back to filename completion (``-o default``).
+    """
+    words = ["frmj", *line.split()]
+    if not line or line[-1].isspace():
+        words.append("")
+    monkeypatch.setenv("COMP_WORDS", "\n".join(words))
+    monkeypatch.setenv("COMP_CWORD", str(len(words) - 1))
+    cli = typer.main.get_command(app)
+    output = BashComplete(cli, {}, "frmj", "_FRMJ_COMPLETE").complete()
+    return [value for value in output.split("\n") if value]
+
+
+def _all_command_lines() -> list[str]:
+    """Return partial lines reaching every command, argument and option.
+
+    For every command and sub-app: the line just after its name (first
+    argument or subcommand), after ``--`` (its options), and after each
+    option that takes a value (that option's completer).
+    """
+    lines: list[str] = []
+
+    def walk(cmd: click.Command, path: list[str]) -> None:
+        prefix = " ".join(path)
+        lines.append(f"{prefix} " if path else "")
+        lines.append(f"{prefix} --" if path else "--")
+        for param in cmd.params:
+            if isinstance(param, click.Option) and not param.is_flag:
+                lines.append(f"{prefix} {param.opts[0]} ".lstrip())
+        if isinstance(cmd, click.Group):
+            for name, sub in cmd.commands.items():
+                walk(sub, path + [name])
+
+    walk(typer.main.get_command(app), [])
+    return lines
+
+
+# Hand-picked partial words, on top of _all_command_lines().
+_PARTIAL_LINES: list[str] = [
+    "t",
+    "tr",
+    "acc",
+    "account g",
+    "account group ",
+    "account group show ",
+    "account use pra",
+    "config get ",
+    "config set risk_strategy ",
+    "trade eur_u",
+    "trade EUR_US",
+    "trade EUR_USD ",
+    "trade EUR_USD lo",
+    "trade EUR_USD long --account ",
+    "tstop ",
+    "tstop 63",
+    "tstop --account practice ",
+    "close ",
+    "close eu",
+    "export --format j",
+    "journal --instrument gbp",
+    "mode ",
+    "mode l",
+]
+
+
+class TestShellCompletion:
+    @pytest.fixture()
+    def completion_data(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Give the dynamic completers something to offer.
+
+        Open trades for ``tstop``/``close``, a saved group for ``account
+        group``, and a known working directory for the filename fallback.
+        """
+        fake = FakeFullClient(
+            open_trades=[
+                _open_trade("6368", "EUR_USD"),
+                _open_trade("6371", "GBP_USD"),
+            ]
+        )
+        monkeypatch.setattr(
+            "frmj.cli._completion.get_client", lambda conn, account_name=None: fake
+        )
+        conn = get_db()
+        add_group_member(conn, "majors", "practice")
+        conn.close()
+        (tmp_path / "work").mkdir()
+        (tmp_path / "work" / "fills.csv").write_text("")
+        monkeypatch.chdir(tmp_path / "work")
+
+    @pytest.mark.parametrize("line", _all_command_lines() + _PARTIAL_LINES)
+    def test_matches_bash(
+        self,
+        line: str,
+        completion_data: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The shell offers exactly what ``frmj <line><TAB>`` offers in bash."""
+        cli = typer.main.get_command(app)
+        expected = _bash_completions(line, monkeypatch)
+        if not expected:
+            # Bash falls back to filename completion of the current word.
+            incomplete = "" if not line or line[-1].isspace() else line.split()[-1]
+            expected = _complete_path(incomplete)
+        assert _shell_completions(cli, line) == expected
+
+    def test_frmj_prefix_completes_the_same(self, completion_data: None) -> None:
+        cli = typer.main.get_command(app)
+        assert _shell_completions(cli, "frmj tr") == ["trade"]
+        assert _shell_completions(cli, "frmj tstop ") == ["6368", "6371"]
+
+    def test_dynamic_completers_run(self, completion_data: None) -> None:
+        """Sanity check that the parity cases really exercise live data."""
+        cli = typer.main.get_command(app)
+        assert _shell_completions(cli, "tstop ") == ["6368", "6371"]
+        assert _shell_completions(cli, "close g") == ["gbp_usd"]
+        assert _shell_completions(cli, "account group show ") == ["majors"]
+
+    def test_failing_completer_offers_nothing_but_files(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A completer that raises is swallowed, as in bash."""
+
+        def boom(*args: object, **kwargs: object) -> list[str]:
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(
+            "click.shell_completion.ShellComplete.get_completions", boom
+        )
+        monkeypatch.chdir(tmp_path)
+        cli = typer.main.get_command(app)
+        assert _shell_completions(cli, "tr") == []
+
+
+class TestCompletePath:
+    def test_lists_matching_files_and_marks_directories(self, tmp_path: Path) -> None:
+        (tmp_path / "fills.csv").write_text("")
+        (tmp_path / "fx").mkdir()
+        (tmp_path / "other.txt").write_text("")
+        assert _complete_path(f"{tmp_path}/f") == [
+            f"{tmp_path}/fills.csv",
+            f"{tmp_path}/fx/",
+        ]
+
+    def test_hidden_files_only_when_asked_for(self, tmp_path: Path) -> None:
+        (tmp_path / ".hidden").write_text("")
+        (tmp_path / "shown").write_text("")
+        assert _complete_path(f"{tmp_path}/") == [f"{tmp_path}/shown"]
+        assert _complete_path(f"{tmp_path}/.h") == [f"{tmp_path}/.hidden"]
+
+    def test_keeps_tilde_as_typed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / "Downloads").mkdir()
+        assert _complete_path("~/Dow") == ["~/Downloads/"]
+
+    def test_relative_to_working_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "fills.csv").write_text("")
+        monkeypatch.chdir(tmp_path)
+        assert _complete_path("fi") == ["fills.csv"]
+
+    def test_missing_directory_offers_nothing(self, tmp_path: Path) -> None:
+        assert _complete_path(f"{tmp_path}/nope/x") == []
+
+
+@dataclass
+class FakeLineBuffer:
+    """The parts of ``readline`` the completer reads: line and cursor."""
+
+    line: str
+
+    def get_line_buffer(self) -> str:
+        return self.line
+
+    def get_endidx(self) -> int:
+        return len(self.line)
+
+
+def _tab(line: str) -> list[str]:
+    """Return every candidate readline would get from the completer for *line*."""
+    cli = typer.main.get_command(app)
+    complete = _make_completer(cli, FakeLineBuffer(line))  # type: ignore[arg-type]
+    text = "" if not line or line[-1].isspace() else line.split()[-1]
+    results: list[str] = []
+    while (candidate := complete(text, len(results))) is not None:
+        results.append(candidate)
+    return results
+
+
+class TestReadlineCompleter:
+    def test_unique_match_gets_a_trailing_space(self, db_path: Path) -> None:
+        """As in bash; Python's readline doesn't add it itself."""
+        assert _tab("tr") == ["trade "]
+
+    def test_several_matches_are_left_bare(self, db_path: Path) -> None:
+        assert _tab("export --format ") == ["csv", "json"]
+
+    def test_unique_directory_gets_no_space(
+        self, db_path: Path, tmp_path: Path
+    ) -> None:
+        """So the next TAB continues into the directory, as in bash."""
+        (tmp_path / "statements").mkdir()
+        assert _tab(f"sync --csv {tmp_path}/sta") == [f"{tmp_path}/statements/"]
+
+    def test_completes_up_to_the_cursor(self, db_path: Path) -> None:
+        """Text after the cursor is ignored, as bash does."""
+        buffer = FakeLineBuffer("tr status")
+        buffer.get_endidx = lambda: 2  # type: ignore[method-assign]
+        cli = typer.main.get_command(app)
+        complete = _make_completer(cli, buffer)  # type: ignore[arg-type]
+        assert complete("tr", 0) == "trade "
