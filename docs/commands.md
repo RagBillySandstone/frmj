@@ -152,6 +152,33 @@ Pending entry orders (limit, stop, and market-if-touched — e.g. from `frmj tra
 frmj positions
 ```
 
+## `frmj shell`
+
+Run frmj commands interactively, without typing `frmj` each time.
+
+```
+$ frmj shell
+frmj shell — type a command without 'frmj'; 'help', or 'exit'.
+frmj [practice PRACTICE]> positions
+...
+frmj [practice PRACTICE]> tstop 6368 15
+...
+frmj [practice PRACTICE]> exit
+```
+
+Each line runs exactly as it would after `frmj`, with the same options, prompts, and output. A leading `frmj` is accepted too, so `frmj positions` also works. The prompt shows the active account and the execution mode (`LIVE` in bold red), and it updates as soon as `account use` or `mode` changes either one.
+
+- `help` (or `?`) lists the commands; `help COMMAND` shows that command's `--help`.
+- `exit`, `quit`, or Ctrl+D leaves the shell.
+- Ctrl+C at the prompt discards the line. Ctrl+C during a command (including at one of its prompts) cancels that command and returns to the shell prompt.
+- An error never ends the session. That includes a usage error, a command failing, or an unexpected crash, which prints its traceback.
+
+Tab completion works the same as `frmj <TAB>` in bash after `frmj --install-completion`. It offers the same candidates (instruments, open trade IDs, accounts, groups, tags, config keys and values) and falls back to filenames where bash does (`sync --csv`, `export --output`). Unlike bash, it doesn't need `--install-completion` first.
+
+Up/down arrows recall earlier commands, including those from previous sessions. The history is kept in `frmj_history` next to the database, capped at 1,000 lines. Only the lines typed at the shell prompt are recorded. Answers to a command's own prompts, such as confirmations, notes, and API tokens, are never recorded.
+
+Line editing, history, and completion use Python's `readline` module. Python builds that link libedit instead of GNU readline (including uv-managed ones) ring the terminal bell on every TAB. The project's venv uses the system Python to avoid this.
+
 ## `frmj stats`
 
 Show trade performance statistics from the local journal. Auto-syncs before displaying, the same way as [`journal`](#frmj-journal). Only the active account's trades are counted unless `--account NAME` or `--all-accounts` is given (not both); with no active account configured, every account is combined. The report begins with `Account: NAME` or `Accounts: all` so combined figures can't be mistaken for one account's.
