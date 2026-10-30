@@ -122,12 +122,13 @@ def _read_cursor(conn: sqlite3.Connection, account_id: str) -> str | None:
 
 
 @pytest.fixture()
-def db() -> sqlite3.Connection:
-    """Fresh in-memory database with FRoMaJ schema applied."""
+def db() -> Iterator[sqlite3.Connection]:
+    """Fresh in-memory database with FRoMaJ schema applied, closed afterwards."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     ensure_schema(conn)
-    return conn
+    yield conn
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
