@@ -6,6 +6,11 @@ handed to the same Typer app the ``frmj`` executable runs, so ``trade``,
 would.  Every command already opens and closes the database itself, so the
 shell holds no state of its own between commands.
 
+Each shell has its own active account, so several terminals can each work
+on a different one.  A shell starts on the default account (the one ``frmj
+account use`` sets outside a shell) or on ``--account NAME``; ``account use``
+inside the shell switches only that shell.  Live/practice mode stays shared.
+
 Nothing a command does ends the shell: usage errors are shown, ``typer.Exit``
 and Ctrl+C return to the prompt, and an unexpected exception prints its
 traceback and returns to the prompt.  ``exit``, ``quit`` or Ctrl+D leave.
@@ -36,9 +41,17 @@ import click
 import typer
 from click.shell_completion import ShellComplete, split_arg_string
 
-from frmj.accounts import get_active_account, is_live_mode
+from frmj.accounts import (
+    begin_shell_session,
+    end_shell_session,
+    get_account,
+    get_active_account,
+    get_default_account_name,
+    is_live_mode,
+)
 from frmj.app import get_db, get_shell_history_path
 from frmj.cli import app
+from frmj.cli._completion import _complete_account_name
 
 # Lines that leave the shell.
 _EXIT_WORDS: frozenset[str] = frozenset({"exit", "quit"})
@@ -188,7 +201,8 @@ def _save_history(readline: ModuleType) -> None:
 def _prompt(color: bool) -> str:
     """Return the shell prompt, e.g. ``frmj [practice PRACTICE]> ``.
 
-    Re-read on every line so ``account use`` and ``mode`` show at once.  With
+    Re-read on every line so ``account use`` and ``mode`` (which may be
+    changed from another terminal) show at once.  With
     *color*, LIVE is bold red (as in ``frmj status``) and the escape codes are
     wrapped in ``\\001``/``\\002`` so readline doesn't count them towards the
     line width.
@@ -265,8 +279,36 @@ def _run_line(cli: click.Command, line: str) -> bool:
 
 
 @app.command()
-def shell() -> None:
-    """Run frmj commands interactively: type `trade` instead of `frmj trade`."""
+def shell(
+    account: str | None = typer.Option(
+        None,
+        "--account",
+        "-a",
+        help="Start on this account instead of the default (see 'frmj account list').",
+        autocompletion=_complete_account_name,
+        show_default=False,
+    ),
+) -> None:
+    """Run frmj commands interactively: type `trade` instead of `frmj trade`.
+
+    Each shell keeps its own active account, so several terminals can trade
+    different accounts at once.
+    """
+    # Pin this shell's account now, so a later `frmj account use` in another
+    # terminal doesn't move it.
+    conn = get_db()
+    try:
+        if account is not None and get_account(conn, account) is None:
+            typer.echo(
+                f"Error: account '{account}' not found. "
+                "Run 'frmj account list' to see available accounts.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        start_account = account or get_default_account_name(conn)
+    finally:
+        conn.close()
+
     cli = typer.main.get_command(app)
     color = sys.stdout.isatty()
 
@@ -276,6 +318,7 @@ def shell() -> None:
         _start_completion(cli, readline)
 
     typer.echo("frmj shell — type a command without 'frmj'; 'help', or 'exit'.")
+    begin_shell_session(start_account)
     try:
         while True:
             try:
@@ -293,5 +336,6 @@ def shell() -> None:
             if not _run_line(cli, line):
                 break
     finally:
+        end_shell_session()
         if readline is not None:
             _save_history(readline)

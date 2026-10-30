@@ -6,7 +6,10 @@ has a user-chosen name, the raw Oanda account ID, and a flag that determines
 which Oanda API environment (practice or live) the profile connects to.
 
 Two scalar settings live in the existing ``config`` table:
-* ``active_account``  — name of the currently selected profile.
+* ``active_account``  — name of the currently selected profile.  A running
+                        ``frmj shell`` can override it for its own process
+                        only (see "Shell session account" below), so several
+                        terminals can each work on a different account.
 * ``live_mode``       — "true" when live order execution is permitted;
                         "false" (the default) keeps the system in safe
                         read-only mode even for live accounts.
@@ -165,7 +168,7 @@ def rename_account(conn: sqlite3.Connection, old_name: str, new_name: str) -> bo
     account's group memberships, its ``account_config`` rows, and — when
     *old_name* is the active account —
     the ``active_account`` config key, so nothing is left pointing at the old
-    name.
+    name. A shell session working on *old_name* switches to *new_name* too.
 
     Returns ``True`` when the rename succeeded, ``False`` when *old_name* was
     not found.  Raises ``sqlite3.IntegrityError`` when *new_name* already
@@ -175,9 +178,10 @@ def rename_account(conn: sqlite3.Connection, old_name: str, new_name: str) -> bo
     Does **not** touch the OS keychain — callers that need to migrate the
     stored token should call ``rename_account_token`` from ``app.py``.
     """
-    # Read current active name before modifying the accounts table so all
-    # writes can be committed atomically.
-    active_name = get_active_account_name(conn)
+    # Read the stored active name before modifying the accounts table so all
+    # writes can be committed atomically. (A shell session's own account is
+    # updated separately, below.)
+    active_name = get_default_account_name(conn)
 
     # account_groups and account_config reference accounts(name) with no ON
     # UPDATE action, so whichever table is updated first briefly violates the
@@ -209,6 +213,10 @@ def rename_account(conn: sqlite3.Connection, old_name: str, new_name: str) -> bo
         )
 
     conn.commit()
+
+    # A shell session working on the renamed account follows it.
+    if _shell_session is not None and _shell_session.account_name == old_name:
+        _shell_session.account_name = new_name
     return True
 
 
@@ -217,12 +225,85 @@ def rename_account(conn: sqlite3.Connection, old_name: str, new_name: str) -> bo
 # ---------------------------------------------------------------------------
 
 
-def get_active_account_name(conn: sqlite3.Connection) -> str | None:
-    """Return the name stored in config under ``active_account``, or ``None``."""
+# ---------------------------------------------------------------------------
+# Shell session account
+#
+# ``frmj shell`` runs every command in one long-lived process. While it runs,
+# the account it is working on is held here, in memory, instead of in the
+# shared ``active_account`` config key. Every read of the active account goes
+# through ``get_active_account_name``, which prefers this override, so all
+# commands run inside one shell act on that shell's account, and shells in
+# other terminals are unaffected. Outside a shell nothing here is set and
+# the config key is used as before.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class _ShellSession:
+    """The account a running ``frmj shell`` is working on."""
+
+    # None until an account is chosen; reads then fall back to the config key.
+    account_name: str | None
+
+
+# The running shell's session, or None outside ``frmj shell``.
+_shell_session: _ShellSession | None = None
+
+
+def begin_shell_session(account_name: str | None) -> None:
+    """Start a shell session whose active account is *account_name*.
+
+    From now until ``end_shell_session``, ``get_active_account_name`` returns
+    *account_name* (when not ``None``) and ``account use`` should call
+    ``set_shell_session_account`` rather than ``set_active_account``.
+    """
+    global _shell_session
+    _shell_session = _ShellSession(account_name=account_name)
+
+
+def end_shell_session() -> None:
+    """End the shell session; the ``active_account`` config key applies again."""
+    global _shell_session
+    _shell_session = None
+
+
+def in_shell_session() -> bool:
+    """Return ``True`` while a ``frmj shell`` session is running."""
+    return _shell_session is not None
+
+
+def set_shell_session_account(name: str) -> None:
+    """Make *name* the active account for the running shell session only.
+
+    Does not validate *name*; callers check it exists first, as for
+    ``set_active_account``. Raises ``RuntimeError`` outside a session.
+    """
+    if _shell_session is None:
+        raise RuntimeError("no frmj shell session is running")
+    _shell_session.account_name = name
+
+
+def get_default_account_name(conn: sqlite3.Connection) -> str | None:
+    """Return the default active account: the ``active_account`` config key.
+
+    This is what ``frmj`` uses outside a shell and what a new shell starts
+    on, ignoring any running shell session's own account. ``None`` if unset.
+    """
     row = conn.execute(
         "SELECT value FROM config WHERE key = ?", (_ACTIVE_ACCOUNT_KEY,)
     ).fetchone()
     return row[0] if row else None
+
+
+def get_active_account_name(conn: sqlite3.Connection) -> str | None:
+    """Return the active account's name, or ``None`` if none is selected.
+
+    Inside a ``frmj shell`` session that has chosen an account, that is the
+    session's account; otherwise it is the ``active_account`` config key.
+    """
+    if _shell_session is not None and _shell_session.account_name is not None:
+        return _shell_session.account_name
+    return get_default_account_name(conn)
 
 
 def get_active_account(conn: sqlite3.Connection) -> AccountRecord | None:
@@ -255,6 +336,9 @@ def resolve_account(conn: sqlite3.Connection, name: str | None) -> AccountRecord
 def set_active_account(conn: sqlite3.Connection, name: str) -> None:
     """
     Write *name* as the active account in the config table.
+
+    This is the shared default used outside ``frmj shell`` and by shells
+    started afterwards; a running shell keeps its own session account.
 
     Does not validate that *name* actually exists in the ``accounts`` table.
     Callers should verify before calling.

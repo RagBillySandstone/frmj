@@ -11,7 +11,13 @@ import typer
 from typer._completion_classes import BashComplete
 from typer.testing import CliRunner
 
-from frmj.accounts import add_group_member, set_live_mode
+from frmj.accounts import (
+    add_account,
+    add_group_member,
+    get_default_account_name,
+    in_shell_session,
+    set_live_mode,
+)
 from frmj.app import get_db, get_shell_history_path
 from frmj.cli import app
 from frmj.cli.shell import (
@@ -102,6 +108,71 @@ class TestShellLoop:
         output = _shell("status\nhelp\n")
         assert "Aborted." in output
         assert "positions" in output
+
+
+class TestShellAccount:
+    """Each shell has its own active account; the shared default is untouched."""
+
+    @pytest.fixture()
+    def funded(self, db_path: Path) -> None:
+        """A second account, "funded", alongside the default "practice"."""
+        conn = get_db()
+        add_account(conn, "funded", "acct-2", is_practice=True)
+        conn.close()
+
+    @staticmethod
+    def _default_account() -> str | None:
+        conn = get_db()
+        try:
+            return get_default_account_name(conn)
+        finally:
+            conn.close()
+
+    def test_starts_on_the_default_account(self, funded: None) -> None:
+        assert "Account: practice" in _shell("status\n")
+
+    def test_account_option_picks_the_shells_account(self, funded: None) -> None:
+        result = runner.invoke(app, ["shell", "--account", "funded"], input="status\n")
+        assert result.exit_code == 0, result.output
+        assert "Account: funded" in result.output
+        assert "frmj [funded PRACTICE]> " in result.output
+        assert self._default_account() == "practice"
+
+    def test_unknown_account_option_is_an_error(self, funded: None) -> None:
+        result = runner.invoke(app, ["shell", "-a", "nope"], input="status\n")
+        assert result.exit_code == 1
+        assert "account 'nope' not found" in result.output
+
+    def test_account_use_switches_only_this_shell(self, funded: None) -> None:
+        output = _shell("account use funded\nstatus\naccount list\n")
+        assert "Active account for this shell set to 'funded'." in output
+        assert "Account: funded" in output
+        assert "* funded" in output
+        assert "frmj [funded PRACTICE]> " in output
+        # Outside the shell, and in the next shell, the default still applies.
+        assert self._default_account() == "practice"
+        assert "Account: practice" in _shell("status\n")
+
+    def test_account_use_unknown_keeps_current_account(self, funded: None) -> None:
+        output = _shell("account use nope\nstatus\n")
+        assert "account 'nope' not found" in output
+        assert "Account: practice" in output
+
+    def test_session_ends_with_the_shell(self, funded: None) -> None:
+        _shell("account use funded\n")
+        assert not in_shell_session()
+        result = runner.invoke(app, ["status"])
+        assert "Account: practice" in result.output
+
+    def test_cannot_remove_the_default_from_another_account(self, funded: None) -> None:
+        """Removing the shared default would leave other terminals pointing nowhere."""
+        output = _shell("account use funded\naccount remove practice\n")
+        assert "'practice' is the active account" in output
+        assert self._default_account() == "practice"
+
+    def test_cannot_remove_this_shells_account(self, funded: None) -> None:
+        output = _shell("account use funded\naccount remove funded\n")
+        assert "'funded' is the active account" in output
 
 
 class TestShellPrompt:

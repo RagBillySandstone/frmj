@@ -11,6 +11,8 @@ from frmj.accounts import (
     get_account,
     get_active_account,
     get_active_account_name,
+    get_default_account_name,
+    in_shell_session,
     list_accounts,
     list_group_members,
     list_group_names,
@@ -19,6 +21,7 @@ from frmj.accounts import (
     remove_group_member,
     rename_account,
     set_active_account,
+    set_shell_session_account,
 )
 from frmj.app import get_db, get_token, store_token
 from frmj.cli import account_app, group_app
@@ -152,10 +155,17 @@ def account_use(
             )
             conn.close()
             raise typer.Exit(1)
-        set_active_account(conn, name)
+        # Inside frmj shell, switch only this shell; other terminals keep theirs.
+        if in_shell_session():
+            set_shell_session_account(name)
+        else:
+            set_active_account(conn, name)
     finally:
         conn.close()
-    typer.echo(f"Active account set to '{name}'.")
+    if in_shell_session():
+        typer.echo(f"Active account for this shell set to '{name}'.")
+    else:
+        typer.echo(f"Active account set to '{name}'.")
 
 
 @account_app.command("current")
@@ -185,8 +195,9 @@ def account_remove(
     the associated token)."""
     conn = get_db()
     try:
-        active_name = get_active_account_name(conn)
-        if name == active_name:
+        # Refuse this shell's account and the shared default alike, so
+        # neither is left pointing at a missing account.
+        if name in (get_active_account_name(conn), get_default_account_name(conn)):
             typer.echo(
                 f"Error: '{name}' is the active account. "
                 "Switch to another account first with: frmj account use NAME",

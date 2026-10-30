@@ -20,7 +20,9 @@ from frmj.accounts import (
     AccountRecord,
     add_account,
     add_group_member,
+    begin_shell_session,
     delete_account_config,
+    end_shell_session,
     delete_group,
     get_account,
     get_account_config,
@@ -28,6 +30,8 @@ from frmj.accounts import (
     get_active_account,
     get_active_account_name,
     get_all_account_config,
+    get_default_account_name,
+    in_shell_session,
     is_live_mode,
     list_accounts,
     list_group_members,
@@ -41,6 +45,7 @@ from frmj.accounts import (
     set_account_config,
     set_active_account,
     set_live_mode,
+    set_shell_session_account,
 )
 from frmj.app import (
     get_all_config,
@@ -813,3 +818,90 @@ class TestMigrateSharedConfig:
         assert {k for k, _ in get_all_account_config(conn, "a")} == set(
             ACCOUNT_CONFIG_KEYS
         )
+
+
+# ---------------------------------------------------------------------------
+# Shell session account
+# ---------------------------------------------------------------------------
+
+
+class TestShellSessionAccount:
+    @pytest.fixture()
+    def two_accounts(self, conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+        """Two accounts, "practice" the stored default; always ends the session."""
+        add_account(conn, "practice", "acct-1", is_practice=True)
+        add_account(conn, "funded", "acct-2", is_practice=True)
+        set_active_account(conn, "practice")
+        yield conn
+        end_shell_session()
+
+    def test_no_session_uses_stored_default(
+        self, two_accounts: sqlite3.Connection
+    ) -> None:
+        assert not in_shell_session()
+        assert get_active_account_name(two_accounts) == "practice"
+
+    def test_session_account_overrides_default(
+        self, two_accounts: sqlite3.Connection
+    ) -> None:
+        begin_shell_session("funded")
+        assert in_shell_session()
+        assert get_active_account_name(two_accounts) == "funded"
+        account = get_active_account(two_accounts)
+        assert account is not None and account.oanda_id == "acct-2"
+        # resolve_account (the --account default) follows it too.
+        resolved = resolve_account(two_accounts, None)
+        assert resolved is not None and resolved.name == "funded"
+        # The shared default is untouched.
+        assert get_default_account_name(two_accounts) == "practice"
+
+    def test_session_is_pinned_against_default_changes(
+        self, two_accounts: sqlite3.Connection
+    ) -> None:
+        """Another terminal's `frmj account use` doesn't move a running shell."""
+        begin_shell_session("practice")
+        set_active_account(two_accounts, "funded")
+        assert get_active_account_name(two_accounts) == "practice"
+
+    def test_session_without_account_falls_back_to_default(
+        self, two_accounts: sqlite3.Connection
+    ) -> None:
+        begin_shell_session(None)
+        assert get_active_account_name(two_accounts) == "practice"
+
+    def test_set_session_account_switches_only_the_session(
+        self, two_accounts: sqlite3.Connection
+    ) -> None:
+        begin_shell_session("practice")
+        set_shell_session_account("funded")
+        assert get_active_account_name(two_accounts) == "funded"
+        assert get_default_account_name(two_accounts) == "practice"
+
+    def test_set_session_account_outside_session_raises(self) -> None:
+        with pytest.raises(RuntimeError):
+            set_shell_session_account("funded")
+
+    def test_end_session_restores_default(
+        self, two_accounts: sqlite3.Connection
+    ) -> None:
+        begin_shell_session("funded")
+        end_shell_session()
+        assert not in_shell_session()
+        assert get_active_account_name(two_accounts) == "practice"
+
+    def test_rename_follows_session_account(
+        self, two_accounts: sqlite3.Connection
+    ) -> None:
+        begin_shell_session("funded")
+        assert rename_account(two_accounts, "funded", "prop")
+        assert get_active_account_name(two_accounts) == "prop"
+        # The stored default (a different account) is left alone.
+        assert get_default_account_name(two_accounts) == "practice"
+
+    def test_rename_of_default_does_not_change_session(
+        self, two_accounts: sqlite3.Connection
+    ) -> None:
+        begin_shell_session("funded")
+        assert rename_account(two_accounts, "practice", "demo")
+        assert get_default_account_name(two_accounts) == "demo"
+        assert get_active_account_name(two_accounts) == "funded"
