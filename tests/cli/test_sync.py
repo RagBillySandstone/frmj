@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-import sqlite3
+from collections.abc import Iterator
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -12,7 +14,7 @@ from typer.testing import CliRunner
 from frmj.accounts import add_account
 from frmj.app import get_db
 from frmj.cli import app
-from frmj.execution.sync import SyncResult
+from frmj.execution.oanda import TransactionRow
 
 from .conftest import FakeClient, _row
 
@@ -179,15 +181,11 @@ class TestSyncAccountOption:
     ) -> None:
         requested: list[str | None] = []
 
-        def _get_client(conn: object, account_name: str | None = None) -> FakeClient:
+        def _get_client(conn: object, account_name: str | None = None) -> WatchClient:
             requested.append(account_name)
-            return FakeClient(account_id="acct-2")
-
-        def _interrupt(conn: object, client: object) -> None:
-            raise KeyboardInterrupt
+            return WatchClient(account_id="acct-2")
 
         monkeypatch.setattr("frmj.cli.sync.get_client", _get_client)
-        monkeypatch.setattr("frmj.cli.sync.sync_incremental", _interrupt)
         result = runner.invoke(app, ["sync", "--watch", "--account", "other"])
         assert result.exit_code == 0, result.output
         assert requested == ["other"]
@@ -198,8 +196,68 @@ class TestSyncAccountOption:
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class WatchClient(FakeClient):
+    """``FakeClient`` with a scripted transaction stream, for ``--watch``.
+
+    Each ``stream_transactions`` call plays the next script: its messages,
+    then its exception if any (else the stream ends). Once the scripts run
+    out it raises ``KeyboardInterrupt``, standing in for the user's Ctrl+C.
+    """
+
+    streams: list[tuple[list[dict[str, Any]], Exception | None]] = field(
+        default_factory=list
+    )
+    # The from_id of every sync, in order.
+    calls: list[str | None] = field(default_factory=list)
+
+    def get_transactions_since(
+        self, from_id: str | None = None
+    ) -> list[TransactionRow]:
+        self.calls.append(from_id)
+        return super().get_transactions_since(from_id)
+
+    def stream_transactions(self) -> Iterator[dict[str, Any]]:
+        if not self.streams:
+            raise KeyboardInterrupt
+        messages, error = self.streams.pop(0)
+        yield from messages
+        if error is not None:
+            raise error
+
+
+def _seed_cursor(db_path: Path, last_oanda_id: str = "100") -> None:
+    """Give acct-1 a cursor, so --watch starts in incremental mode."""
+    conn = get_db(path=db_path)
+    conn.execute(
+        "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
+        "VALUES (?, 'acct-1', 'ORDER_FILL', '2026-04-25T09:00:00.000000Z', '{}')",
+        (last_oanda_id,),
+    )
+    conn.execute(
+        "INSERT INTO sync_cursors (account_id, last_oanda_id, synced_at) "
+        "VALUES ('acct-1', ?, '2026-04-25T09:00:00.000000Z')",
+        (last_oanda_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _watch(monkeypatch: pytest.MonkeyPatch, client: WatchClient, *args: str) -> Any:
+    """Run ``frmj sync --watch`` against *client*; waits are skipped."""
+    monkeypatch.setattr(
+        "frmj.cli.sync.get_client", lambda conn, account_name=None: client
+    )
+    waits: list[float] = []
+    monkeypatch.setattr(
+        "threading.Event.wait", lambda self, timeout=None: waits.append(timeout)
+    )
+    result = runner.invoke(app, ["sync", "--watch", *args])
+    return result, waits
+
+
 class TestSyncWatch:
-    """Tests for ``frmj sync --watch`` continuous polling mode."""
+    """Tests for ``frmj sync --watch``: streaming, with polling fallback."""
 
     def test_watch_cold_incompatible(
         self,
@@ -223,83 +281,33 @@ class TestSyncWatch:
         assert result.exit_code == 1
 
     def test_watch_exits_cleanly_on_keyboard_interrupt(
-        self,
-        db_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """KeyboardInterrupt causes the loop to print 'Stopped.' and exit 0."""
-
-        def fake_sync(conn: sqlite3.Connection, client: object) -> SyncResult:
-            raise KeyboardInterrupt
-
-        monkeypatch.setattr(
-            "frmj.cli.sync.get_client",
-            lambda conn, account_name=None: FakeClient(account_id="acct-1"),
-        )
-        monkeypatch.setattr("frmj.cli.sync.sync_incremental", fake_sync)
-        monkeypatch.setattr("frmj.cli.sync.time.sleep", lambda _: None)
-
-        result = runner.invoke(app, ["sync", "--watch"])
-        assert result.exit_code == 0
+        """Ctrl+C prints 'Stopped.' and exits 0."""
+        _seed_cursor(db_path)
+        result, waits = _watch(monkeypatch, WatchClient(account_id="acct-1"))
+        assert result.exit_code == 0, result.output
         assert "Stopped" in result.output
 
-    def test_watch_header_mentions_interval(
-        self,
-        db_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_watch_header_mentions_streaming_and_interval(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The opening message includes the configured interval."""
-
-        def fake_sync(conn: sqlite3.Connection, client: object) -> SyncResult:
-            raise KeyboardInterrupt
-
-        monkeypatch.setattr(
-            "frmj.cli.sync.get_client",
-            lambda conn, account_name=None: FakeClient(account_id="acct-1"),
+        _seed_cursor(db_path)
+        result, waits = _watch(
+            monkeypatch, WatchClient(account_id="acct-1"), "-i", "30"
         )
-        monkeypatch.setattr("frmj.cli.sync.sync_incremental", fake_sync)
-        monkeypatch.setattr("frmj.cli.sync.time.sleep", lambda _: None)
+        assert "streaming" in result.output
+        assert "polling every 30s" in result.output
 
-        result = runner.invoke(app, ["sync", "--watch", "--interval", "30"])
-        assert result.exit_code == 0
-        assert "30" in result.output
-
-    def test_watch_silent_when_no_new_transactions(
-        self,
-        db_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_watch_silent_on_heartbeats(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When rows_ingested == 0, no transaction lines appear after the header."""
-        # Seed a cursor so the loop is in incremental mode.
-        conn = get_db(path=db_path)
-        conn.execute(
-            "INSERT INTO sync_cursors (account_id, last_oanda_id, synced_at) "
-            "VALUES ('acct-1', '100', '2026-04-25T09:00:00.000000Z')"
-        )
-        conn.commit()
-        conn.close()
-
-        call_count = 0
-
-        def fake_sync(conn: sqlite3.Connection, client: object) -> SyncResult:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return SyncResult(rows_ingested=0, rows_skipped=0, last_oanda_id="100")
-            raise KeyboardInterrupt
-
-        monkeypatch.setattr(
-            "frmj.cli.sync.get_client",
-            lambda conn, account_name=None: FakeClient(account_id="acct-1"),
-        )
-        monkeypatch.setattr("frmj.cli.sync.sync_incremental", fake_sync)
-        monkeypatch.setattr("frmj.cli.sync.time.sleep", lambda _: None)
-
-        result = runner.invoke(app, ["sync", "--watch"])
-        assert result.exit_code == 0
-        # Only the account and "Watching" headers and the "Stopped." line;
-        # no transaction rows.
-        body_lines = [
+        """Heartbeats at the cursor print nothing."""
+        _seed_cursor(db_path, "100")
+        heartbeat = {"type": "HEARTBEAT", "lastTransactionID": "100"}
+        client = WatchClient(account_id="acct-1", streams=[([heartbeat] * 3, None)])
+        result, waits = _watch(monkeypatch, client)
+        body = [
             ln
             for ln in result.output.splitlines()
             if ln.strip()
@@ -307,135 +315,60 @@ class TestSyncWatch:
             and "Watching" not in ln
             and "Stopped" not in ln
         ]
-        assert body_lines == []
+        assert body == []
 
-    def test_watch_shows_new_transactions(
-        self,
-        db_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_watch_shows_streamed_transactions(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When rows_ingested > 0, newly arrived transactions are displayed."""
-        # Seed: existing transaction at id=100, cursor=100.
-        conn = get_db(path=db_path)
-        conn.execute(
-            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
-            "VALUES ('100', 'acct-1', 'ORDER_FILL', '2026-04-25T09:00:00.000000Z', '{}')"
+        """A streamed transaction is synced and displayed straight away."""
+        _seed_cursor(db_path, "100")
+        new_fill = replace(
+            _row("101"),
+            time="2026-04-25T10:00:00.000000Z",
+            raw_json='{"instrument":"EUR_USD","units":"10000","pl":"25.00"}',
         )
-        conn.execute(
-            "INSERT INTO sync_cursors (account_id, last_oanda_id, synced_at) "
-            "VALUES ('acct-1', '100', '2026-04-25T09:00:00.000000Z')"
+        client = WatchClient(
+            account_id="acct-1",
+            # Catch-up sync finds nothing; the streamed fill's sync gets it.
+            responses=[[], [new_fill]],
+            streams=[([{"id": "101", "type": "ORDER_FILL"}], None)],
         )
-        # Pre-insert the "new" transaction the watch loop should display.
-        conn.execute(
-            "INSERT INTO transactions (oanda_id, account_id, type, time, raw_json) "
-            "VALUES ('101', 'acct-1', 'ORDER_FILL', '2026-04-25T10:00:00.000000Z', "
-            """'{"instrument":"EUR_USD","units":"10000","pl":"25.00"}')"""
-        )
-        conn.commit()
-        conn.close()
-
-        call_count = 0
-
-        def fake_sync(conn: sqlite3.Connection, client: object) -> SyncResult:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return SyncResult(rows_ingested=1, rows_skipped=0, last_oanda_id="101")
-            raise KeyboardInterrupt
-
-        monkeypatch.setattr(
-            "frmj.cli.sync.get_client",
-            lambda conn, account_name=None: FakeClient(account_id="acct-1"),
-        )
-        monkeypatch.setattr("frmj.cli.sync.sync_incremental", fake_sync)
-        monkeypatch.setattr("frmj.cli.sync.time.sleep", lambda _: None)
-
-        result = runner.invoke(app, ["sync", "--watch"])
-        assert result.exit_code == 0
-        assert "EUR_USD" in result.output
+        result, waits = _watch(monkeypatch, client)
+        assert result.exit_code == 0, result.output
         assert "+1 new" in result.output
+        assert "EUR_USD" in result.output
 
     def test_watch_initial_sync_message(
-        self,
-        db_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """First run (no cursor) shows a count + journal hint instead of all rows."""
-        call_count = 0
-
-        def fake_sync(conn: sqlite3.Connection, client: object) -> SyncResult:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return SyncResult(rows_ingested=50, rows_skipped=0, last_oanda_id="50")
-            raise KeyboardInterrupt
-
-        monkeypatch.setattr(
-            "frmj.cli.sync.get_client",
-            lambda conn, account_name=None: FakeClient(account_id="acct-1"),
-        )
-        monkeypatch.setattr("frmj.cli.sync.sync_incremental", fake_sync)
-        monkeypatch.setattr("frmj.cli.sync.time.sleep", lambda _: None)
-
-        result = runner.invoke(app, ["sync", "--watch"])
-        assert result.exit_code == 0
-        assert "Initial sync" in result.output
-        assert "50" in result.output
+        rows = [_row(str(i)) for i in range(1, 51)]
+        client = WatchClient(account_id="acct-1", responses=[rows])
+        result, waits = _watch(monkeypatch, client)
+        assert result.exit_code == 0, result.output
+        assert "Initial sync: 50 transactions" in result.output
         assert "frmj journal" in result.output
+        assert "new:" not in result.output
 
-    def test_watch_sync_error_continues_loop(
-        self,
-        db_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_watch_stream_error_polls_after_interval(
+        self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A sync exception is printed to stderr and the loop keeps running."""
-        call_count = 0
-
-        def fake_sync(conn: sqlite3.Connection, client: object) -> SyncResult:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise ValueError("network blip")
-            raise KeyboardInterrupt
-
-        monkeypatch.setattr(
-            "frmj.cli.sync.get_client",
-            lambda conn, account_name=None: FakeClient(account_id="acct-1"),
+        """A dropped stream is reported; after --interval it syncs and reconnects."""
+        _seed_cursor(db_path, "100")
+        client = WatchClient(
+            account_id="acct-1",
+            # Second round's catch-up sync (the poll) finds a transaction.
+            responses=[[], [_row("101")]],
+            streams=[([], ConnectionError("stream dropped"))],
         )
-        monkeypatch.setattr("frmj.cli.sync.sync_incremental", fake_sync)
-        monkeypatch.setattr("frmj.cli.sync.time.sleep", lambda _: None)
-
-        result = runner.invoke(app, ["sync", "--watch"])
-        assert result.exit_code == 0
-        assert "Sync error" in result.output + result.stderr
-        assert call_count == 2  # loop continued after error
-
-    def test_watch_custom_interval_passed_to_sleep(
-        self,
-        db_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """--interval N causes time.sleep(N) to be called between polls."""
-        sleep_calls: list[int] = []
-
-        call_count = 0
-
-        def fake_sync(conn: sqlite3.Connection, client: object) -> SyncResult:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return SyncResult(rows_ingested=0, rows_skipped=0, last_oanda_id="100")
-            raise KeyboardInterrupt
-
-        monkeypatch.setattr(
-            "frmj.cli.sync.get_client",
-            lambda conn, account_name=None: FakeClient(account_id="acct-1"),
-        )
-        monkeypatch.setattr("frmj.cli.sync.sync_incremental", fake_sync)
-        monkeypatch.setattr("frmj.cli.sync.time.sleep", lambda s: sleep_calls.append(s))
-
-        runner.invoke(app, ["sync", "--watch", "--interval", "30"])
-        assert sleep_calls == [30]
+        result, waits = _watch(monkeypatch, client, "--interval", "30")
+        assert result.exit_code == 0, result.output
+        assert "Connection error: stream dropped" in result.output + result.stderr
+        assert "retrying in 30s" in result.output + result.stderr
+        assert waits == [30]
+        assert "+1 new" in result.output
+        # Polled twice from the cursor: before each stream connection.
+        assert client.calls == ["100", "100"]
 
 
 # ---------------------------------------------------------------------------

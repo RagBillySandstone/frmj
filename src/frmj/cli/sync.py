@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-import time
+import threading
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +19,7 @@ from frmj.cli._display import _display_account_header, _display_transaction
 from frmj.execution.oanda import ClientProtocol
 from frmj.execution.sync import (
     _read_cursor,
+    follow_transactions,
     sync_cold,
     sync_csv,
     sync_incremental,
@@ -98,13 +99,13 @@ def sync(
         False,
         "--watch",
         "-w",
-        help="Poll for new transactions continuously (incremental only).",
+        help="Follow new transactions live (Oanda's stream; polls while it is down).",
     ),
     interval: int = typer.Option(
         60,
         "--interval",
         "-i",
-        help="Polling interval in seconds when --watch is active.",
+        help="With --watch, seconds between polls while the stream is down.",
     ),
     csv_path: Path | None = typer.Option(
         None,
@@ -172,15 +173,17 @@ def sync(
 
 
 def _watch_loop(interval: int, account: str | None = None) -> None:
-    """Poll ``sync_incremental`` every *interval* seconds until Ctrl+C.
+    """Follow the account's transaction stream until Ctrl+C.
 
     Watches *account* (the ``--account`` override), or the active account
-    when it is ``None``.
+    when it is ``None``, via ``follow_transactions``: new transactions are
+    synced and printed with ``_display_transaction`` as soon as Oanda's
+    stream reports them. If the stream drops, the error is printed and
+    *interval* seconds later it syncs (polling) and reconnects, repeating
+    until the stream is back.
 
-    New transactions are printed as they arrive using ``_display_transaction``.
-    When no cursor exists (first run), only the count is reported to avoid
-    flooding the terminal with historical rows.
-    Sync errors are printed to stderr but the loop continues.
+    When no cursor exists (first run), the initial sync only reports a
+    count, to avoid flooding the terminal with historical rows.
     """
     conn = get_db()
     try:
@@ -191,37 +194,50 @@ def _watch_loop(interval: int, account: str | None = None) -> None:
         raise typer.Exit(1)
 
     _display_account_header(conn, account)
-    typer.echo(f"Watching for new transactions (every {interval}s) — Ctrl+C to stop.")
+    typer.echo(
+        "Watching for new transactions (streaming; polling every "
+        f"{interval}s while the stream is down) — Ctrl+C to stop."
+    )
+
+    def now_str() -> str:
+        return datetime.now(tz=timezone.utc).strftime("%H:%M:%S")
+
+    def show_new(after_oanda_id: str) -> None:
+        # Print the rows the last sync added after the previous cursor.
+        new_txns = queries.list_transactions_after(
+            conn, client.account_id, after_oanda_id
+        )
+        typer.echo(f"[{now_str()}] +{len(new_txns)} new:")
+        for txn in new_txns:
+            _display_transaction(txn)
+
+    def show_error(exc: Exception) -> None:
+        typer.echo(
+            f"[{now_str()}] Connection error: {exc} — retrying in {interval}s",
+            err=True,
+        )
 
     try:
-        while True:
-            now_str = datetime.now(tz=timezone.utc).strftime("%H:%M:%S")
-            # Read cursor before sync so we can identify new rows afterwards.
-            prev_id: str | None = _read_cursor(conn, client.account_id)
-
+        # First run: report the cold sync's size here, since
+        # follow_transactions (rightly) doesn't treat history as new.
+        if _read_cursor(conn, client.account_id) is None:
             try:
                 result = sync_incremental(conn, client)
+                typer.echo(
+                    f"[{now_str()}] Initial sync: {result.rows_ingested} "
+                    "transactions loaded. Run 'frmj journal' to view."
+                )
             except Exception as exc:
-                typer.echo(f"[{now_str}] Sync error: {exc}", err=True)
-                time.sleep(interval)
-                continue
-
-            if result.rows_ingested:
-                if prev_id is not None:
-                    new_txns = queries.list_transactions_after(
-                        conn, client.account_id, prev_id
-                    )
-                    typer.echo(f"[{now_str}] +{result.rows_ingested} new:")
-                    for txn in new_txns:
-                        _display_transaction(txn)
-                else:
-                    # First run was a cold sync — don't flood the terminal.
-                    typer.echo(
-                        f"[{now_str}] Initial sync: {result.rows_ingested} "
-                        "transactions loaded. Run 'frmj journal' to view."
-                    )
-
-            time.sleep(interval)
+                # follow_transactions retries the cold sync itself.
+                show_error(exc)
+        follow_transactions(
+            conn,
+            client,
+            on_ingested=show_new,
+            on_error=show_error,
+            stop=threading.Event(),
+            retry_interval=interval,
+        )
     except KeyboardInterrupt:
         typer.echo("\nStopped.")
     finally:
