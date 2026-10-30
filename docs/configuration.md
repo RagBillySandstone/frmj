@@ -45,7 +45,7 @@ Live mode is a single switch for the whole installation, not a per-account setti
 frmj status
 ```
 
-Shows the active account name, type (practice / live), Oanda account ID, and current execution mode.
+Shows the active account name, type (practice / live), Oanda account ID, and current execution mode. Inside [`frmj shell`](commands.md#frmj-shell), the active account is that shell's own account.
 
 ## Environment Variables
 

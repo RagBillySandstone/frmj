@@ -11,7 +11,7 @@ Manage named Oanda account profiles.
 ```sh
 frmj account add NAME              # add a new account profile (prompts for Oanda ID and type)
 frmj account list                  # list all configured accounts
-frmj account use NAME              # set NAME as the active account
+frmj account use NAME              # set NAME as the active account (inside frmj shell: for that shell only)
 frmj account current               # show the currently active account
 frmj account rename OLD NEW        # rename a profile (keeps its Oanda ID, config, groups, and active status)
 frmj account remove NAME           # remove a profile, its config, and its group memberships (not the active one; its token is kept)
@@ -19,7 +19,7 @@ frmj account set-token practice    # store or update the practice API token
 frmj account set-token live        # store or update the live API token
 ```
 
-The first account added becomes the active account automatically; later ones need `frmj account use NAME`. API tokens belong to an environment (practice or live), not to one account — see [API tokens](configuration.md#api-tokens).
+The first account added becomes the active account automatically; later ones need `frmj account use NAME`. Inside [`frmj shell`](#frmj-shell), `account use` switches only that shell. Outside a shell, it sets the default account that plain `frmj` commands and newly opened shells use. `account remove` refuses both the shell's own account and the default. API tokens belong to an environment (practice or live), not to one account — see [API tokens](configuration.md#api-tokens).
 
 ### `frmj account group`
 
@@ -157,7 +157,7 @@ frmj positions
 Run frmj commands interactively, without typing `frmj` each time.
 
 ```
-$ frmj shell
+$ frmj shell                 # or: frmj shell --account funded
 frmj shell — type a command without 'frmj'; 'help', or 'exit'.
 frmj [practice PRACTICE]> positions
 ...
@@ -166,7 +166,9 @@ frmj [practice PRACTICE]> tstop 6368 15
 frmj [practice PRACTICE]> exit
 ```
 
-Each line runs exactly as it would after `frmj`, with the same options, prompts, and output. A leading `frmj` is accepted too, so `frmj positions` also works. The prompt shows the active account and the execution mode (`LIVE` in bold red), and it updates as soon as `account use` or `mode` changes either one.
+Each line runs exactly as it would after `frmj`, with the same options, prompts, and output. A leading `frmj` is accepted too, so `frmj positions` also works. The prompt shows the shell's active account and the execution mode (`LIVE` in bold red), and it updates as soon as `account use` or `mode` changes either one.
+
+**Each shell has its own active account**, so several terminals can each trade a different account at once. A shell starts on the default account, or on `--account NAME` (`-a NAME`). `account use NAME` inside it switches only that shell. Other open shells keep their accounts, and the default stays the same for plain `frmj` commands and new shells. Running `frmj account use` outside a shell changes the default without moving any shell that's already open. Within a shell, `--account` on a single command still overrides the shell's account for that command. Live/practice mode (`frmj mode`) is shared by all shells and terminals.
 
 - `help` (or `?`) lists the commands; `help COMMAND` shows that command's `--help`.
 - `exit`, `quit`, or Ctrl+D leaves the shell.
