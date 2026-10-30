@@ -105,6 +105,7 @@ from frmj.cli import financing as financing  # noqa: E402
 from frmj.cli import journal as journal  # noqa: E402
 from frmj.cli import mode as mode  # noqa: E402
 from frmj.cli import positions as positions  # noqa: E402
+from frmj.cli import shell as shell  # noqa: E402
 from frmj.cli import stats as stats  # noqa: E402
 from frmj.cli import sync as sync  # noqa: E402
 from frmj.cli import trade as trade  # noqa: E402
