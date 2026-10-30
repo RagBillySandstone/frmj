@@ -35,3 +35,7 @@ Unlike the REST API's ORDER_FILL transactions, the Oanda Hub CSV export never st
 ### 15. ATR-multiple take-profit (`3x` at the TP prompt)
 
 `trade` accepts `2x` / `2atr` only at the stop-loss prompt (see the ATR stop-loss in `docs/commands.md`). Allowing it at the take-profit prompt too would let a plan be set up fully in ATR terms (e.g. 1.5× ATR stop, 3× ATR target). This needs `_prompt_tpsl` to take the ATR, and a `tp_atr_multiple` in `trade_plans` and the draft, next to `sl_atr_multiple`. There should be no default: Enter still skips the TP.
+
+### 16. Saved trade drafts collide between concurrent shells
+
+`trade` saves a failed order's plan to a single `saved_plan.json` in the default data directory, and `trade --resume` reads it back. With several `frmj shell` instances trading different accounts, a second failure overwrites the first shell's draft. `--resume` would then resume the other account's plan: it places the order on the account recorded in the draft, not on the shell's account. Key drafts by account (e.g. `saved_plan-<oanda_id>.json`) and have `--resume` pick the active account's draft, or list the drafts when it's ambiguous.
