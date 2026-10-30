@@ -21,6 +21,11 @@ frmj = "frmj.cli:app"
 requires = ["uv_build>=0.9.26,<0.10.0"]
 build-backend = "uv_build"
 
+[tool.uv]
+# Prefer the OS Python: distro builds link GNU readline, while uv-managed
+# builds link libedit, which beeps on every TAB in `frmj shell`.
+python-preference = "system"
+
 [dependency-groups]
 dev = [
     "hypothesis>=6.152.2",
