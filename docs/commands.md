@@ -202,11 +202,13 @@ Pull transactions from Oanda into the local database.
 ```sh
 frmj sync               # incremental (only new transactions since last sync)
 frmj sync --cold        # full history re-fetch (safe to re-run; duplicates are skipped)
-frmj sync --watch       # poll for new transactions continuously (Ctrl+C to stop; not with --cold)
-frmj sync --watch --interval 30   # poll every 30 seconds (default: 60)
+frmj sync --watch       # follow new transactions live (Ctrl+C to stop; not with --cold)
+frmj sync --watch --interval 30   # poll every 30 seconds while the stream is down (default: 60)
 frmj sync --csv history.csv       # import an Oanda Hub CSV export instead of hitting the API
 frmj sync --account funded        # sync a non-active account
 ```
+
+`--watch` follows Oanda's transaction stream, so a new transaction (a fill, a TP/SL hit, financing) is synced and printed as soon as Oanda records it. If the stream drops, the error is printed. Every `--interval` seconds after that, `--watch` syncs (so nothing is missed) and tries to reconnect, until the stream is back.
 
 `--csv` imports a transaction-history export from the Oanda account hub (Reports → Transaction History → Export to csv). Set the export dialog's Timezone to UTC before downloading — any other timezone is rejected. Useful for backfilling history the REST API can no longer return (old accounts truncate `/transactions`) and for cross-checking an API sync against the account's own records; duplicate rows are skipped the same way `--cold` re-runs are. Cannot be combined with `--cold` or `--watch`. The CSV itself carries no account ID, so rows are filed under the active account, or under `--account NAME` when given.
 
