@@ -348,6 +348,23 @@ def migrate_v1_accounts(conn: sqlite3.Connection) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shell history
+# ---------------------------------------------------------------------------
+
+
+def get_shell_history_path() -> Path:
+    """Return the path of the ``frmj shell`` command-history file.
+
+    The history lives next to the database, so it follows ``FRMJ_DB_PATH``
+    the same way ``get_db`` does (a test or alternate database gets its own
+    history rather than sharing the real one).
+    """
+    env_path = os.environ.get("FRMJ_DB_PATH")
+    db_path = Path(env_path) if env_path else _DEFAULT_DB_PATH
+    return db_path.parent / "frmj_history"
+
+
+# ---------------------------------------------------------------------------
 # Draft plan helpers (order-failure recovery)
 # ---------------------------------------------------------------------------
 

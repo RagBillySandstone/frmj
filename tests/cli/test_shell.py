@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from frmj.accounts import set_live_mode
-from frmj.app import get_db
+from frmj.app import get_db, get_shell_history_path
 from frmj.cli import app
 from frmj.cli.shell import _prompt
 
@@ -104,3 +105,55 @@ class TestShellPrompt:
         assert _prompt(color=False) == "frmj [practice LIVE]> "
         # Colour codes are wrapped as zero-width for readline.
         assert "\001\033[1;31m\002LIVE\001\033[0m\002" in _prompt(color=True)
+
+
+@dataclass
+class FakeReadline:
+    """Records the calls ``frmj shell`` makes on the ``readline`` module."""
+
+    history: list[str] = field(default_factory=list)
+    auto_history: bool = True
+    read_from: str | None = None
+    written_to: str | None = None
+
+    def set_auto_history(self, enabled: bool) -> None:
+        self.auto_history = enabled
+
+    def read_history_file(self, path: str) -> None:
+        self.read_from = path
+
+    def write_history_file(self, path: str) -> None:
+        self.written_to = path
+
+    def set_history_length(self, length: int) -> None:
+        pass
+
+    def add_history(self, line: str) -> None:
+        self.history.append(line)
+
+
+class TestShellHistory:
+    @pytest.fixture()
+    def fake_readline(self, monkeypatch: pytest.MonkeyPatch) -> FakeReadline:
+        fake = FakeReadline()
+        monkeypatch.setattr("frmj.cli.shell._load_readline", lambda: fake)
+        return fake
+
+    def test_history_file_is_next_to_the_database(self, db_path: Path) -> None:
+        assert get_shell_history_path() == db_path.parent / "frmj_history"
+
+    def test_history_is_loaded_and_saved(
+        self, db_path: Path, fake_readline: FakeReadline
+    ) -> None:
+        _shell("status\n")
+        history_file = str(db_path.parent / "frmj_history")
+        assert fake_readline.read_from == history_file
+        assert fake_readline.written_to == history_file
+
+    def test_only_command_lines_are_recorded(
+        self, db_path: Path, fake_readline: FakeReadline
+    ) -> None:
+        """Answers to a command's own prompts never reach the history."""
+        _shell("status\n\nmode live\nnope\nexit\n")
+        assert fake_readline.auto_history is False
+        assert fake_readline.history == ["status", "mode live", "exit"]
