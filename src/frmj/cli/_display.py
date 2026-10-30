@@ -146,7 +146,15 @@ _MANUAL_CLOSE_REASONS = frozenset(
 def _display_transaction(
     txn: sqlite3.Row, account_label: str | None = None, id_width: int = 0
 ) -> None:
-    """Print one transaction for the journal as a header line plus details.
+    """Print one transaction for the journal; see ``_format_transaction``."""
+    for line in _format_transaction(txn, account_label, id_width):
+        typer.echo(line)
+
+
+def _format_transaction(
+    txn: sqlite3.Row, account_label: str | None = None, id_width: int = 0
+) -> list[str]:
+    """Return one transaction's journal lines: a header plus any details.
 
     The header is ``#ID  TIME  [ACCOUNT  ]TYPE`` — short enough to fit an
     80-column terminal.  Fills and financing rows add one indented detail
@@ -209,9 +217,10 @@ def _display_transaction(
 
     oanda_id = f"#{txn['oanda_id']}".ljust(id_width + 1)
     account_col = f"{account_label}  " if account_label is not None else ""
-    typer.echo(f"{oanda_id}  {time_short}  {account_col}{txn['type']}")
+    lines = [f"{oanda_id}  {time_short}  {account_col}{txn['type']}"]
     if detail:
-        typer.echo(f"{_JOURNAL_INDENT}{detail}")
+        lines.append(f"{_JOURNAL_INDENT}{detail}")
+    return lines
 
 
 # ---------------------------------------------------------------------------
