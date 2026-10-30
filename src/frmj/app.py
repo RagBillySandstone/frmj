@@ -157,8 +157,7 @@ def get_db(path: Path | None = None) -> sqlite3.Connection:
     settings into each account's own config.
     """
     if path is None:
-        env_path = os.environ.get("FRMJ_DB_PATH")
-        path = Path(env_path) if env_path else _DEFAULT_DB_PATH
+        path = _resolve_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
@@ -348,8 +347,14 @@ def migrate_v1_accounts(conn: sqlite3.Connection) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Shell history
+# Files kept next to the database (shell history, streaming)
 # ---------------------------------------------------------------------------
+
+
+def _resolve_db_path() -> Path:
+    """Return the database path: ``FRMJ_DB_PATH`` if set, else the default."""
+    env_path = os.environ.get("FRMJ_DB_PATH")
+    return Path(env_path) if env_path else _DEFAULT_DB_PATH
 
 
 def get_shell_history_path() -> Path:
@@ -359,9 +364,18 @@ def get_shell_history_path() -> Path:
     the same way ``get_db`` does (a test or alternate database gets its own
     history rather than sharing the real one).
     """
-    env_path = os.environ.get("FRMJ_DB_PATH")
-    db_path = Path(env_path) if env_path else _DEFAULT_DB_PATH
-    return db_path.parent / "frmj_history"
+    return _resolve_db_path().parent / "frmj_history"
+
+
+def get_stream_dir() -> Path:
+    """Return the directory holding the background streamer's files.
+
+    ``frmj.streaming`` keeps its shell registry, locks, and log here, next
+    to the database (so it follows ``FRMJ_DB_PATH`` too). Created if absent.
+    """
+    path = _resolve_db_path().parent / "stream"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 # ---------------------------------------------------------------------------

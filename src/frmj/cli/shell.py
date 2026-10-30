@@ -52,6 +52,7 @@ from frmj.accounts import (
 from frmj.app import get_db, get_shell_history_path
 from frmj.cli import app
 from frmj.cli._completion import _complete_account_name
+from frmj.streaming import run_streamer
 
 # Lines that leave the shell.
 _EXIT_WORDS: frozenset[str] = frozenset({"exit", "quit"})
@@ -339,3 +340,9 @@ def shell(
         end_shell_session()
         if readline is not None:
             _save_history(readline)
+
+
+@app.command("streamer", hidden=True)
+def streamer() -> None:
+    """Run the background transaction streamer (started by `frmj shell`)."""
+    run_streamer()
