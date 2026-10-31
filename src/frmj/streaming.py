@@ -158,13 +158,22 @@ def _spawn_streamer() -> None:
     the shell doesn't reach it), no stdin/stdout, and appends stderr to
     ``streamer.log``. It inherits the environment, including
     ``FRMJ_DB_PATH`` and any token variables.
+
+    ``python -m`` normally puts the working directory first on
+    ``sys.path``, so a ``frmj/`` package or ``httpx.py`` sitting in the
+    directory the shell was started from would be imported in place of the
+    real one — with access to the API tokens. ``-P`` (Python 3.11+) leaves
+    that directory off ``sys.path``, and the process runs from the stream
+    directory rather than inheriting the shell's working directory.
     """
-    with open(get_stream_dir() / "streamer.log", "ab") as log_file:
+    stream_dir = get_stream_dir()
+    with open(stream_dir / "streamer.log", "ab") as log_file:
         subprocess.Popen(
-            [sys.executable, "-m", "frmj", "streamer"],
+            [sys.executable, "-P", "-m", "frmj", "streamer"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=log_file,
+            cwd=stream_dir,
             start_new_session=True,
             close_fds=True,
         )

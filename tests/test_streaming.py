@@ -19,6 +19,10 @@ from frmj.accounts import AccountRecord, add_account, remove_account
 from frmj.app import get_db, get_stream_dir
 from frmj.execution.oanda import TransactionRow
 
+# The real spawner, captured before the autouse ``_no_real_streamer`` fixture
+# replaces it, so its command line can be checked with ``Popen`` stubbed out.
+_REAL_SPAWN_STREAMER = streaming._spawn_streamer
+
 
 @pytest.fixture()
 def stream_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -98,6 +102,29 @@ class TestRegistry:
         assert streaming.live_shell_pids() == [os.getpid()]
         assert not (shells / str(dead)).exists()
         assert (shells / "not-a-pid").exists()
+
+
+class TestSpawnStreamer:
+    def test_spawn_ignores_working_directory(
+        self, stream_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The streamer starts with ``-P`` from the stream dir.
+
+        Without ``-P``, ``python -m`` would import a planted ``frmj/`` or
+        ``httpx.py`` from whatever directory the shell was started in.
+        """
+        calls: list[tuple[list[str], dict[str, Any]]] = []
+
+        def fake_popen(args: list[str], **kwargs: Any) -> None:
+            # Record the call instead of starting a real process.
+            calls.append((args, kwargs))
+
+        monkeypatch.setattr(streaming.subprocess, "Popen", fake_popen)
+        _REAL_SPAWN_STREAMER()
+
+        [(args, kwargs)] = calls
+        assert args[1:] == ["-P", "-m", "frmj", "streamer"]
+        assert kwargs["cwd"] == get_stream_dir()
 
 
 # ---------------------------------------------------------------------------
