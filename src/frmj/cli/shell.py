@@ -210,10 +210,16 @@ def _start_history(readline: ModuleType) -> None:
 
 
 def _save_history(readline: ModuleType) -> None:
-    """Write the most recent ``_HISTORY_LENGTH`` lines to the history file."""
+    """Write the most recent ``_HISTORY_LENGTH`` lines to the history file.
+
+    The file is made private to the current user (``0o600``): command lines
+    name instruments, sizes, and trade IDs.
+    """
     readline.set_history_length(_HISTORY_LENGTH)
+    path = get_shell_history_path()
     try:
-        readline.write_history_file(str(get_shell_history_path()))
+        readline.write_history_file(str(path))
+        os.chmod(path, 0o600)
     except OSError as exc:
         typer.echo(f"Warning: shell history not saved: {exc}", err=True)
 

@@ -53,7 +53,7 @@ Shows the active account name, type (practice / live), Oanda account ID, and cur
 |---|---|---|
 | `OANDA_API_TOKEN_PRACTICE` | No | API token for practice accounts. Takes priority over the OS keychain. |
 | `OANDA_API_TOKEN` | No | API token for live accounts. Takes priority over the OS keychain. Never used for practice accounts. |
-| `FRMJ_DB_PATH` | No | Path to the SQLite file. Defaults to `~/.local/share/frmj/frmj.db` on Linux, `~/Library/Application Support/frmj/frmj.db` on macOS, and `%APPDATA%\frmj\frmj.db` on Windows. On macOS and Windows, a database already at the Linux path from an earlier version keeps being used there. |
+| `FRMJ_DB_PATH` | No | Path to the SQLite file. Defaults to `~/.local/share/frmj/frmj.db` on Linux, `~/Library/Application Support/frmj/frmj.db` on macOS, and `%APPDATA%\frmj\frmj.db` on Windows. On macOS and Windows, a database already at the Linux path from an earlier version keeps being used there. The database file is made owner-only (`0600`); the default data directory is made owner-only (`0700`), but a directory you choose here is left as it is. |
 
 ## Config table keys (set with `frmj config set`)
 

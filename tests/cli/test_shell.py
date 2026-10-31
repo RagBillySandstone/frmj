@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os
 import sqlite3
+import stat
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -210,7 +211,9 @@ class FakeReadline:
         self.read_from = path
 
     def write_history_file(self, path: str) -> None:
+        # Create the file, as readline does, so its mode can be checked.
         self.written_to = path
+        Path(path).touch()
 
     def set_history_length(self, length: int) -> None:
         pass
@@ -246,6 +249,14 @@ class TestShellHistory:
         history_file = str(db_path.parent / "frmj_history")
         assert fake_readline.read_from == history_file
         assert fake_readline.written_to == history_file
+
+    def test_history_file_is_private(
+        self, db_path: Path, fake_readline: FakeReadline
+    ) -> None:
+        """Saved command lines (instruments, sizes, trade IDs) are owner-only."""
+        _shell("status\n")
+        mode = get_shell_history_path().stat().st_mode
+        assert stat.S_IMODE(mode) == 0o600
 
     def test_only_command_lines_are_recorded(
         self, db_path: Path, fake_readline: FakeReadline

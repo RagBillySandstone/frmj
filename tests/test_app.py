@@ -9,7 +9,9 @@ construction).
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import stat
 import sys
 from collections.abc import Iterator
 from decimal import Decimal
@@ -38,6 +40,7 @@ from frmj.app import (
     get_atr_config,
     get_db,
     get_risk_config,
+    get_stream_dir,
     get_token,
     load_draft_plan,
     save_draft_plan,
@@ -213,6 +216,43 @@ class TestGetDb:
             assert get_config(c, "max_open_trades") is None
         finally:
             c.close()
+
+    def test_database_file_is_private(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The database (account IDs, trades, notes) is owner-only."""
+        db_path = tmp_path / "test.db"
+        monkeypatch.setenv("FRMJ_DB_PATH", str(db_path))
+        get_db().close()
+        assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+
+    def test_default_data_dir_is_made_private(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """frmj's own data dir is tightened to 0o700, even if it already existed."""
+        data_dir = tmp_path / "frmj"
+        data_dir.mkdir(mode=0o775)
+        monkeypatch.setattr("frmj.app._DATA_DIR", data_dir)
+        get_db(path=data_dir / "frmj.db").close()
+        assert stat.S_IMODE(data_dir.stat().st_mode) == 0o700
+
+    def test_custom_db_dir_permissions_left_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A directory chosen via FRMJ_DB_PATH may be shared: don't chmod it."""
+        shared = tmp_path / "shared"
+        shared.mkdir(mode=0o755)
+        os.chmod(shared, 0o755)
+        monkeypatch.setenv("FRMJ_DB_PATH", str(shared / "test.db"))
+        get_db().close()
+        assert stat.S_IMODE(shared.stat().st_mode) == 0o755
+
+    def test_stream_dir_is_private(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The streamer's directory (log, registry, locks) is owner-only."""
+        monkeypatch.setenv("FRMJ_DB_PATH", str(tmp_path / "test.db"))
+        assert stat.S_IMODE(get_stream_dir().stat().st_mode) == 0o700
 
 
 # ---------------------------------------------------------------------------

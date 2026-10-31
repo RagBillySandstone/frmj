@@ -150,7 +150,11 @@ def get_db(path: Path | None = None) -> sqlite3.Connection:
     2. Platform-appropriate default via ``_resolve_default_data_dir()``
        (see that function's docstring for the full resolution logic).
 
-    The parent directory is created if it does not exist.  ``ensure_schema``
+    The parent directory is created if it does not exist.  The database file
+    is made private to the current user (mode ``0o600``; SQLite gives its
+    ``-wal``/``-shm`` files the same mode), and so is frmj's own default data
+    directory — never a directory chosen through ``FRMJ_DB_PATH``, which may
+    be shared.  ``ensure_schema``
     is called on every open so startup is always idempotent and schema
     upgrades are automatic.  ``migrate_v1_accounts`` runs immediately after
     to silently convert any old-style flat config into named account profiles
@@ -160,8 +164,15 @@ def get_db(path: Path | None = None) -> sqlite3.Connection:
     """
     if path is None:
         path = _resolve_db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent == _DATA_DIR:
+        # frmj owns its default data directory outright, so lock it down
+        # even if an earlier version created it world-readable.
+        _make_private_dir(path.parent)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
+    # Account IDs, trade history, and journal notes: owner-only access.
+    os.chmod(path, 0o600)
     conn.row_factory = sqlite3.Row
     ensure_schema(conn)
     migrate_v1_accounts(conn)
@@ -350,6 +361,17 @@ def migrate_v1_accounts(conn: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _make_private_dir(path: Path) -> None:
+    """Create *path* (and parents) if needed and restrict it to its owner.
+
+    ``mkdir``'s *mode* only applies to a directory it creates, so the
+    ``chmod`` also tightens one left world-readable by an older version.
+    Only call this on directories frmj owns outright.
+    """
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+
+
 def _resolve_db_path() -> Path:
     """Return the database path: ``FRMJ_DB_PATH`` if set, else the default."""
     env_path = os.environ.get("FRMJ_DB_PATH")
@@ -370,10 +392,11 @@ def get_stream_dir() -> Path:
     """Return the directory holding the background streamer's files.
 
     ``frmj.streaming`` keeps its shell registry, locks, and log here, next
-    to the database (so it follows ``FRMJ_DB_PATH`` too). Created if absent.
+    to the database (so it follows ``FRMJ_DB_PATH`` too). Created if absent
+    and kept private to the current user (the log can name account IDs).
     """
     path = _resolve_db_path().parent / "stream"
-    path.mkdir(parents=True, exist_ok=True)
+    _make_private_dir(path)
     return path
 
 
