@@ -304,7 +304,7 @@ class TestGetClient:
         self, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A named account is used instead of the active one."""
-        monkeypatch.setenv("OANDA_API_TOKEN", "test-token")
+        monkeypatch.setenv("OANDA_API_TOKEN_PRACTICE", "test-token")
         add_account(db, "active", "101-001-12345-001", is_practice=True)
         add_account(db, "other", "101-001-12345-002", is_practice=True)
         set_active_account(db, "active")
@@ -327,7 +327,7 @@ class TestGetClient:
         self, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A practice account profile yields an OandaClient with the correct account_id."""
-        monkeypatch.setenv("OANDA_API_TOKEN", "test-token")
+        monkeypatch.setenv("OANDA_API_TOKEN_PRACTICE", "test-token")
         add_account(db, "my-practice", "101-001-12345-001", is_practice=True)
         set_active_account(db, "my-practice")
         client = get_client(db)
@@ -339,7 +339,7 @@ class TestGetClient:
         self, db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A practice account profile points OandaClient at the practice API host."""
-        monkeypatch.setenv("OANDA_API_TOKEN", "test-token")
+        monkeypatch.setenv("OANDA_API_TOKEN_PRACTICE", "test-token")
         add_account(db, "practice", "101-001-12345-001", is_practice=True)
         set_active_account(db, "practice")
         client = get_client(db)
@@ -394,7 +394,7 @@ class TestGetClientForAccount:
     ) -> None:
         """No active account is configured; get_client_for_account still works."""
         monkeypatch.setenv("FRMJ_DB_PATH", str(tmp_path / "test.db"))
-        monkeypatch.setenv("OANDA_API_TOKEN", "test-token")
+        monkeypatch.setenv("OANDA_API_TOKEN_PRACTICE", "test-token")
         conn = get_db()
         add_account(conn, "unactivated", "101-001-1", is_practice=True)
         conn.close()
@@ -569,14 +569,15 @@ class TestGetToken:
         )
         assert get_token(practice=True) == "practice-env"
 
-    def test_practice_falls_back_to_legacy_env(
+    def test_practice_never_uses_live_env(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """OANDA_API_TOKEN is used as legacy fallback when no practice-specific token set."""
+        """OANDA_API_TOKEN is the live token: practice mode never falls back
+        to it, so a live credential is never sent to the practice server."""
         monkeypatch.delenv("OANDA_API_TOKEN_PRACTICE", raising=False)
-        monkeypatch.setenv("OANDA_API_TOKEN", "legacy-token")
+        monkeypatch.setenv("OANDA_API_TOKEN", "live-token")
         # _no_real_keyring autouse fixture returns None from keyring.
-        assert get_token(practice=True) == "legacy-token"
+        assert get_token(practice=True) is None
 
     def test_returns_none_on_keyring_error(
         self, monkeypatch: pytest.MonkeyPatch

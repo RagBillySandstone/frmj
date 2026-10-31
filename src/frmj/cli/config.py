@@ -308,11 +308,8 @@ def config_check(
             # Detect token source in same priority order as get_token.
             if account.is_practice and os.environ.get("OANDA_API_TOKEN_PRACTICE"):
                 checks.append(("token", "OK", "OANDA_API_TOKEN_PRACTICE env var"))
-            elif os.environ.get("OANDA_API_TOKEN"):
-                label = "OANDA_API_TOKEN env var"
-                if account.is_practice:
-                    label += " (legacy practice fallback)"
-                checks.append(("token", "OK", label))
+            elif not account.is_practice and os.environ.get("OANDA_API_TOKEN"):
+                checks.append(("token", "OK", "OANDA_API_TOKEN env var"))
             elif get_token(account.is_practice):
                 checks.append(("token", "OK", "OS keychain"))
             else:
@@ -580,9 +577,8 @@ def _print_token_status(account: AccountRecord) -> None:
     # Detect source in the same priority order as get_token.
     if account.is_practice and os.environ.get("OANDA_API_TOKEN_PRACTICE"):
         source = "set via OANDA_API_TOKEN_PRACTICE env var"
-    elif os.environ.get("OANDA_API_TOKEN"):
-        suffix = " (legacy practice fallback)" if account.is_practice else ""
-        source = f"set via OANDA_API_TOKEN env var{suffix}"
+    elif not account.is_practice and os.environ.get("OANDA_API_TOKEN"):
+        source = "set via OANDA_API_TOKEN env var"
     elif get_token(account.is_practice) is not None:
         source = "stored in OS keychain"
     else:

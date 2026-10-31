@@ -120,6 +120,7 @@ class TestConfigCommands:
     ) -> None:
         """When no token is configured, the status line says 'not set'."""
         monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
+        monkeypatch.delenv("OANDA_API_TOKEN_PRACTICE", raising=False)
         result = runner.invoke(app, ["config", "get"])
         assert "not set" in result.output
 
@@ -127,27 +128,30 @@ class TestConfigCommands:
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """OANDA_API_TOKEN_PRACTICE is detected and reported as its own
-        source for a practice account, ahead of the legacy env var."""
+        source for a practice account."""
         monkeypatch.setenv("OANDA_API_TOKEN_PRACTICE", "practice-tok")
         result = runner.invoke(app, ["config", "get"])
         assert result.exit_code == 0, result.output
         assert "OANDA_API_TOKEN_PRACTICE" in result.output
         assert "practice-tok" not in result.output  # value must not be printed
 
-    def test_config_get_all_token_from_env(
+    def test_config_get_all_live_env_not_used_for_practice(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """OANDA_API_TOKEN detected as legacy env var source — value never printed."""
+        """OANDA_API_TOKEN is the live token, so a practice account with no
+        practice token reports 'not set' rather than the live env var."""
+        monkeypatch.delenv("OANDA_API_TOKEN_PRACTICE", raising=False)
         monkeypatch.setenv("OANDA_API_TOKEN", "env-tok")
         result = runner.invoke(app, ["config", "get"])
-        # Displayed as "legacy env var" since it's the old format.
-        assert "env var" in result.output
+        assert "not set" in result.output
+        assert "OANDA_API_TOKEN env var" not in result.output
         assert "env-tok" not in result.output  # value must not be printed
 
     def test_config_get_all_token_from_keyring(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("OANDA_API_TOKEN", raising=False)
+        monkeypatch.delenv("OANDA_API_TOKEN_PRACTICE", raising=False)
         monkeypatch.setattr("frmj.app.keyring.get_password", lambda s, u: "kr-tok")
         result = runner.invoke(app, ["config", "get"])
         assert "keychain" in result.output
@@ -372,7 +376,7 @@ class TestConfigCheck:
         assert "connection refused" in result.output
 
     def test_token_from_env_shows_ok(self, db_path: Path) -> None:
-        """When OANDA_API_TOKEN is set, config check reports the token as OK."""
+        """When the fixture's practice token is set, config check reports it as OK."""
         result = runner.invoke(app, ["config", "check"])
         assert "token" in result.output
         # env var source is displayed (new format or legacy fallback format)
@@ -388,8 +392,8 @@ class TestConfigCheck:
     def test_token_practice_env_var_shows_ok(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """OANDA_API_TOKEN_PRACTICE takes priority over the legacy env var for
-        a practice account, and is reported as its own source."""
+        """OANDA_API_TOKEN_PRACTICE is reported as its own source for a
+        practice account."""
         monkeypatch.setenv("OANDA_API_TOKEN_PRACTICE", "practice-tok")
         result = runner.invoke(app, ["config", "check"])
         assert result.exit_code == 0, result.output

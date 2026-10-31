@@ -349,12 +349,12 @@ def _pending_order(
 def db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Set FRMJ_DB_PATH to a temp location and seed a practice account.
 
-    OANDA_API_TOKEN is set so that get_token falls back to it for practice
-    accounts, keeping tests independent of the OS keychain.
+    OANDA_API_TOKEN_PRACTICE is set so the practice account has a token,
+    keeping tests independent of the OS keychain.
     """
     path = tmp_path / "frmj_test.db"
     monkeypatch.setenv("FRMJ_DB_PATH", str(path))
-    monkeypatch.setenv("OANDA_API_TOKEN", "test-token-123")
+    monkeypatch.setenv("OANDA_API_TOKEN_PRACTICE", "test-token-123")
     # Add a named practice account and activate it.
     conn = get_db(path=path)
     add_account(conn, "practice", "acct-1", is_practice=True)

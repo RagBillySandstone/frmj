@@ -20,8 +20,10 @@ Resolution order for ``get_token(practice)``:
   Practice:
     1. ``OANDA_API_TOKEN_PRACTICE`` env var.
     2. ``oanda_api_token_practice`` OS keychain.
-    3. ``OANDA_API_TOKEN`` env var (legacy fallback).
-    4. ``oanda_api_token`` OS keychain (legacy fallback).
+    3. ``oanda_api_token`` OS keychain (legacy fallback).
+
+  ``OANDA_API_TOKEN`` is the live token and is never used for practice, so
+  a live credential is never sent to the practice server.
 
   Live:
     1. ``OANDA_API_TOKEN`` env var.
@@ -209,9 +211,7 @@ def get_token(practice: bool = False) -> str | None:
     Practice mode priority:
       1. ``OANDA_API_TOKEN_PRACTICE`` env var.
       2. ``oanda_api_token_practice`` OS keychain.
-      3. ``OANDA_API_TOKEN`` env var (legacy fallback — works if only one token
-         was ever configured).
-      4. ``oanda_api_token`` OS keychain (legacy fallback).
+      3. ``oanda_api_token`` OS keychain (legacy fallback).
 
     Live mode priority:
       1. ``OANDA_API_TOKEN`` env var.
@@ -232,7 +232,6 @@ def get_token(practice: bool = False) -> str | None:
         return (
             os.environ.get("OANDA_API_TOKEN_PRACTICE")
             or _keyring_get(_KEYRING_TOKEN_KEY_PRACTICE)
-            or os.environ.get("OANDA_API_TOKEN")  # legacy
             or _keyring_get(_KEYRING_TOKEN_KEY_LEGACY)  # legacy
         ) or None
     else:
