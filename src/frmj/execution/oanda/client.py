@@ -54,6 +54,7 @@ the "abort" path unreachable.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Generator, Iterator
 from decimal import Decimal
 from typing import Any, Protocol
@@ -111,6 +112,22 @@ _STREAM_READ_TIMEOUT: float = 20.0
 # in /pendingOrders (TAKE_PROFIT, STOP_LOSS, TRAILING_STOP_LOSS, ...) is an
 # exit order attached to an existing trade.
 _ENTRY_ORDER_TYPES: frozenset[str] = frozenset({"LIMIT", "STOP", "MARKET_IF_TOUCHED"})
+
+
+# Values placed in a URL path (account ID, instrument, trade ID). Oanda's own
+# IDs use only these characters; anything else — "/", "..", "?", "#" — could
+# point the request at a different endpoint than the one intended.
+_PATH_SEGMENT_RE: re.Pattern[str] = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _path_segment(value: str, what: str) -> str:
+    """Return *value* if it is safe to place in a URL path, else raise.
+
+    *what* names the value in the ``ValueError`` message, e.g. "trade ID".
+    """
+    if not _PATH_SEGMENT_RE.fullmatch(value):
+        raise ValueError(f"Invalid {what}: {value!r}")
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +217,7 @@ class OandaClient:
         # to import, and commands that never build a client shouldn't pay it.
         import httpx
 
-        self.account_id = account_id
+        self.account_id = _path_segment(account_id, "Oanda account ID")
         self._base_url = PRACTICE_BASE_URL if practice else LIVE_BASE_URL
         self._stream_url = PRACTICE_STREAM_URL if practice else LIVE_STREAM_URL
         self._http = httpx.Client(
@@ -343,7 +360,8 @@ class OandaClient:
         returned, so the result can be one shorter than *count*.
         """
         resp = self._http.get(
-            f"{self._base_url}/instruments/{instrument}/candles",
+            f"{self._base_url}/instruments/{_path_segment(instrument, 'instrument')}"
+            "/candles",
             params={
                 "granularity": "D",
                 "price": "M",
@@ -408,7 +426,8 @@ class OandaClient:
         trade is already closed or the ID is wrong).
         """
         resp = self._http.put(
-            f"{self._base_url}/accounts/{self.account_id}/trades/{trade_id}/close"
+            f"{self._base_url}/accounts/{self.account_id}"
+            f"/trades/{_path_segment(trade_id, 'trade ID')}/close"
         )
         resp.raise_for_status()
         return _parse_close_fill(resp.json())
@@ -584,7 +603,8 @@ class OandaClient:
         if distance is not None:
             trailing = {"distance": str(distance), "timeInForce": "GTC"}
         resp = self._http.put(
-            f"{self._base_url}/accounts/{self.account_id}/trades/{trade_id}/orders",
+            f"{self._base_url}/accounts/{self.account_id}"
+            f"/trades/{_path_segment(trade_id, 'trade ID')}/orders",
             json={"trailingStopLoss": trailing},
         )
         resp.raise_for_status()

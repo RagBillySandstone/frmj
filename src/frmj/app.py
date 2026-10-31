@@ -451,8 +451,10 @@ def get_client_for_account(account: AccountRecord) -> OandaClient:
     ``OandaClient`` pointed at the correct Oanda host (practice.oanda.com vs
     fxtrade.oanda.com based on ``is_practice``).
 
-    Raises ``RuntimeError`` with a clear message when no token is found so the
-    CLI can surface it as a user-facing error rather than a traceback.
+    Raises ``RuntimeError`` with a clear message when no token is found, or
+    when the stored Oanda account ID contains characters that are unsafe in a
+    URL path, so the CLI can surface it as a user-facing error rather than a
+    traceback.
     """
     env_type = "practice" if account.is_practice else "live"
     token = get_token(account.is_practice)
@@ -466,11 +468,16 @@ def get_client_for_account(account: AccountRecord) -> OandaClient:
             f"Or set the {env_var} environment variable."
         )
 
-    return OandaClient(
-        token=token,
-        account_id=account.oanda_id,
-        practice=account.is_practice,
-    )
+    try:
+        return OandaClient(
+            token=token,
+            account_id=account.oanda_id,
+            practice=account.is_practice,
+        )
+    except ValueError as exc:
+        # An account ID unsafe to put in a URL path: report it the same way
+        # as a missing token, so callers show a message, not a traceback.
+        raise RuntimeError(f"Account '{account.name}': {exc}") from exc
 
 
 def get_client(

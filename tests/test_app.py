@@ -414,6 +414,17 @@ class TestGetClientForAccount:
         with pytest.raises(RuntimeError, match="No API token"):
             get_client_for_account(account)
 
+    def test_unsafe_account_id_raises_runtime_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stored account ID unsafe in a URL is a user-facing error."""
+        monkeypatch.setenv("OANDA_API_TOKEN_PRACTICE", "test-token")
+        account = AccountRecord(
+            name="bad", oanda_id="101/../x", is_practice=True, created_at="now"
+        )
+        with pytest.raises(RuntimeError, match="Account 'bad': Invalid Oanda"):
+            get_client_for_account(account)
+
     def test_returns_client_with_correct_account_id(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

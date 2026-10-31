@@ -162,6 +162,31 @@ class TestBaseUrls:
         assert httpx.URL(base_url).scheme == "https"
 
 
+class TestPathSegmentValidation:
+    """IDs placed in a URL path can't redirect the request to another endpoint."""
+
+    @pytest.mark.parametrize("bad", ["../accounts", "1/close", "1?x=y", "1#x", ""])
+    def test_bad_trade_id_rejected_before_any_request(self, bad: str) -> None:
+        client = _make_client()  # No responses: any HTTP call would fail.
+        with pytest.raises(ValueError, match="Invalid trade ID"):
+            client.close_trade(bad)
+        with pytest.raises(ValueError, match="Invalid trade ID"):
+            client.set_trade_trailing_stop(bad, None)
+
+    def test_bad_instrument_rejected_for_candles(self) -> None:
+        client = _make_client()
+        with pytest.raises(ValueError, match="Invalid instrument"):
+            client.get_daily_candles("EUR_USD/../../accounts", 10)
+
+    def test_bad_account_id_rejected_at_construction(self) -> None:
+        with pytest.raises(ValueError, match="Invalid Oanda account ID"):
+            OandaClient(token="t", account_id="101-001/../x", practice=True)
+
+    @pytest.mark.parametrize("good", ["101-001-12345-001", "EUR_USD", "6123"])
+    def test_oanda_style_values_accepted(self, good: str) -> None:
+        assert oanda_client._path_segment(good, "value") == good
+
+
 class TestGetAccountSummary:
     def test_returns_parsed_summary(self) -> None:
         """A summary response is parsed into an ``AccountSummary`` and the
