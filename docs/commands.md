@@ -75,6 +75,8 @@ frmj export --instrument EUR_USD --since 2026-01-01 --include-notes
 
 Supports the same `--instrument`, `--type`, and `--since` filters as `journal`. Unlike `journal`, export always includes every account in the local database (the `account_id` column tells them apart) and does not sync first — run `frmj sync` beforehand for up-to-date data.
 
+In CSV output, a text cell that a spreadsheet would run as a formula (one starting with `=`, `+`, `-` or `@`, such as a note reading `=HYPERLINK(...)`) gets a leading `'` so it opens as plain text. Signed numbers like `-12.34` are left as they are. JSON output is never altered.
+
 ## `frmj financing`
 
 Show current long/short financing rates for every tradable FX pair (Oanda's own "daily financing rates" — annualized percentages, republished daily). Pairs are grouped Majors / Minors / Exotics, alphabetical within each group; metals (XAU, XAG, ...) are excluded since the major/minor/exotic taxonomy doesn't apply to them.

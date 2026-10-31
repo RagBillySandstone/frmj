@@ -6,7 +6,7 @@ import csv as _csv
 import io
 import json
 import sqlite3
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import typer
 
@@ -154,8 +154,35 @@ def _make_export_record(
     return rec
 
 
+# A cell starting with one of these is run as a formula by Excel, LibreOffice
+# and Google Sheets ("CSV injection").
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _neutralize_formula(value: object) -> object:
+    """Return *value* safe to open in a spreadsheet.
+
+    A text cell that a spreadsheet would treat as a formula (say a journal
+    note reading ``=HYPERLINK(...)``) gets a leading ``'``, which makes the
+    spreadsheet show it as plain text. Numbers are left alone, so negative
+    P/L like ``-12.34`` stays numeric for analysis.
+    """
+    if not isinstance(value, str) or not value.startswith(_FORMULA_PREFIXES):
+        return value
+    # A plain number ("-12.34", "+5") is safe and must stay a number.
+    try:
+        Decimal(value)
+        return value
+    except InvalidOperation:
+        return "'" + value
+
+
 def _records_to_csv(records: list[dict], include_notes: bool) -> str:
-    """Serialise export records to CSV text."""
+    """Serialise export records to CSV text.
+
+    Text cells that would run as spreadsheet formulas are neutralized (see
+    ``_neutralize_formula``). JSON export is left exactly as stored.
+    """
     fields = list(_EXPORT_FIELDS)
     if include_notes:
         fields.append("notes")
@@ -166,7 +193,12 @@ def _records_to_csv(records: list[dict], include_notes: bool) -> str:
     )
     writer.writeheader()
     for rec in records:
-        writer.writerow({k: ("" if rec.get(k) is None else rec[k]) for k in fields})
+        writer.writerow(
+            {
+                k: ("" if rec.get(k) is None else _neutralize_formula(rec[k]))
+                for k in fields
+            }
+        )
     return buf.getvalue()
 
 

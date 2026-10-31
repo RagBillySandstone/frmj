@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import sqlite3
 from pathlib import Path
@@ -11,6 +13,7 @@ from typer.testing import CliRunner
 
 from frmj.app import get_db
 from frmj.cli import app
+from frmj.cli.export import _neutralize_formula
 
 runner = CliRunner()
 
@@ -126,6 +129,52 @@ class TestExportCommand:
         assert result.exit_code == 0, result.output
         assert "notes" in result.output
         assert "Entry confirmed" in result.output
+
+    def test_csv_neutralizes_formula_in_notes(self, export_db: Path) -> None:
+        """A note that a spreadsheet would run as a formula is exported as
+        text (leading ``'``)."""
+        conn = sqlite3.connect(str(export_db))
+        txn_id = conn.execute(
+            "SELECT id FROM transactions WHERE oanda_id = '2'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO notes (transaction_id, body) VALUES (?, ?)",
+            (txn_id, '=HYPERLINK("http://example.com","x")'),
+        )
+        conn.commit()
+        conn.close()
+
+        result = runner.invoke(app, ["export", "--include-notes"])
+        assert result.exit_code == 0, result.output
+        rows = list(csv.DictReader(io.StringIO(result.output)))
+        noted = next(r for r in rows if r["oanda_id"] == "2")
+        assert noted["notes"] == '\'=HYPERLINK("http://example.com","x")'
+
+    @pytest.mark.parametrize("number", ["-12.34", "+5", "-1.50"])
+    def test_csv_leaves_signed_numbers_numeric(self, number: str) -> None:
+        """Negative P/L and other signed numbers are not prefixed."""
+        assert _neutralize_formula(number) == number
+
+    @pytest.mark.parametrize("text", ["-sell more", "+1+1", "@SUM(A1)", "\t=1"])
+    def test_csv_prefixes_other_formula_starts(self, text: str) -> None:
+        assert _neutralize_formula(text) == "'" + text
+
+    def test_json_keeps_formula_text_unchanged(self, export_db: Path) -> None:
+        """Only CSV is escaped: JSON export carries the note verbatim."""
+        conn = sqlite3.connect(str(export_db))
+        txn_id = conn.execute(
+            "SELECT id FROM transactions WHERE oanda_id = '2'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO notes (transaction_id, body) VALUES (?, '=1+1')",
+            (txn_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        result = runner.invoke(app, ["export", "--format", "json", "--include-notes"])
+        assert result.exit_code == 0, result.output
+        assert '"=1+1"' in result.output
 
     def test_output_to_file(self, export_db: Path, tmp_path: Path) -> None:
         out = tmp_path / "out.csv"
