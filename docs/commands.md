@@ -79,7 +79,7 @@ In CSV output, a text cell that a spreadsheet would run as a formula (one starti
 
 ## `frmj financing`
 
-Show current long/short financing rates for every tradable FX pair (Oanda's own "daily financing rates" — annualized percentages, republished daily). Pairs are grouped Majors / Minors / Exotics, alphabetical within each group; metals (XAU, XAG, ...) are excluded since the major/minor/exotic taxonomy doesn't apply to them.
+Show current long/short financing rates for every tradable FX pair (Oanda's own "daily financing rates" — annualized percentages, republished daily). Pairs are grouped Majors / Minors / Exotics, alphabetical within each group, with Majors and Minors in the first column and Exotics in the second; metals (XAU, XAG, ...) are excluded since the major/minor/exotic taxonomy doesn't apply to them.
 
 ```sh
 frmj financing
