@@ -71,10 +71,10 @@ def _fetch_with_retry(client: Any, delays: tuple[int, ...]) -> list[FinancingRat
 # financing command
 # ---------------------------------------------------------------------------
 
-# Separates the Majors/Minors column from the Exotics column. Four spaces keep
-# the table within 80 columns: two columns of 33 chars (rates up to +/-99%) make
-# 70, which leaves room for rates of 100% or more.
-_FINANCING_COLUMN_GAP: str = "    "
+# Separates the Majors/Minors column from the Exotics column. Eight spaces still
+# keep the table within 80 columns: two 33-char columns (rates up to +/-99%) make
+# 74, and two 35-char columns (rates of 100% or more on both sides) make 78.
+_FINANCING_COLUMN_GAP: str = " " * 8
 
 
 def _color_financing_pct_padded(rate: Decimal, width: int) -> str:
