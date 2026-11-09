@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from datetime import date
 from decimal import Decimal
+from itertools import zip_longest
 from typing import Any
 
 import httpx
@@ -70,6 +71,11 @@ def _fetch_with_retry(client: Any, delays: tuple[int, ...]) -> list[FinancingRat
 # financing command
 # ---------------------------------------------------------------------------
 
+# Separates the Majors/Minors column from the Exotics column. Eight spaces still
+# keep the table within 80 columns: two 33-char columns (rates up to +/-99%) make
+# 74, and two 35-char columns (rates of 100% or more on both sides) make 78.
+_FINANCING_COLUMN_GAP: str = " " * 8
+
 
 def _color_financing_pct_padded(rate: Decimal, width: int) -> str:
     """Return _color_financing_pct(rate) right-justified to *width* visible chars."""
@@ -88,46 +94,89 @@ def _group_financing_rates(
     return groups
 
 
+def _financing_column(
+    tiers: list[tuple[str, list[FinancingRate]]],
+    instr_w: int,
+    long_w: int,
+    short_w: int,
+) -> list[str]:
+    """Stack *tiers* into one display column, omitting tiers with no rates.
+
+    Every returned line is padded to the same visible width (color escapes
+    excluded), so a second column can be placed beside this one by plain
+    string concatenation. Returns an empty list if every tier is empty.
+    """
+    heading = f"  {'':<{instr_w}}  {'Long':>{long_w}}  {'Short':>{short_w}}"
+    # The heading carries no color escapes, so its length is the visible width
+    # shared by every row (rows use the same indent and field widths).
+    col_w = len(heading)
+
+    lines: list[str] = []
+    for label, tier_rates in tiers:
+        if not tier_rates:
+            continue
+        # A blank line separates tiers stacked in the same column. It is padded
+        # like everything else so the next column stays aligned beside it.
+        if lines:
+            lines.append(" " * col_w)
+        lines.extend((label.ljust(col_w), "─" * col_w, heading))
+        for rate in tier_rates:
+            lines.append(
+                f"  {rate.instrument:<{instr_w}}  "
+                f"{_color_financing_pct_padded(rate.long_rate, long_w)}  "
+                f"{_color_financing_pct_padded(rate.short_rate, short_w)}"
+            )
+    return lines
+
+
 def _display_financing_rates(
     rates: list[FinancingRate], rate_date: str | None = None
 ) -> None:
-    """Render the major/minor/exotic financing-rate table for *rates*.
+    """Render the financing-rate table for *rates* in two side-by-side columns.
 
-    *rate_date* customizes the header for a stored snapshot (``--date``);
-    ``None`` renders the header for a live fetch.
+    Majors and minors stack in the first column and exotics fill the second,
+    so the full pair list fits on one screen. A column with no rates is left
+    out rather than drawn empty. *rate_date* customizes the header for a stored
+    snapshot (``--date``); ``None`` renders the header for a live fetch.
     """
     groups = _group_financing_rates(rates)
+    # Widths are measured across all rates, not per column, so both columns
+    # come out the same width and the table stays regular.
     long_w = max(len(_fmt_financing_pct(r.long_rate)) for r in rates)
     short_w = max(len(_fmt_financing_pct(r.short_rate)) for r in rates)
     instr_w = max(9, max(len(r.instrument) for r in rates))
 
-    typer.echo("─" * 50)
+    candidate_columns: tuple[list[str], list[str]] = (
+        _financing_column(
+            [("Majors", groups["major"]), ("Minors", groups["minor"])],
+            instr_w,
+            long_w,
+            short_w,
+        ),
+        _financing_column([("Exotics", groups["exotic"])], instr_w, long_w, short_w),
+    )
+    # Dropping an empty column keeps an exotics-only table flush left instead
+    # of indented behind a blank first column. *rates* is never empty here (the
+    # width calculations above require that), so at least one column remains.
+    columns: list[list[str]] = [c for c in candidate_columns if c]
+
+    # A column's first line is its tier label: padded and never colored, so its
+    # length is the column's visible width.
+    blank_cell: str = " " * len(columns[0][0])
+    table_w: int = len(_FINANCING_COLUMN_GAP.join(c[0] for c in columns))
+
+    typer.echo("─" * table_w)
     if rate_date is None:
         typer.echo("Annualized financing rates (updated daily)")
     else:
         typer.echo(f"Annualized financing rates — snapshot from {rate_date}")
     typer.echo("")
 
-    first = True
-    for label, tier_rates in (
-        ("Majors", groups["major"]),
-        ("Minors", groups["minor"]),
-        ("Exotics", groups["exotic"]),
-    ):
-        if not tier_rates:
-            continue
-        if not first:
-            typer.echo("")
-        first = False
-        typer.echo(label)
-        typer.echo("─" * 50)
-        typer.echo(f"  {'':<{instr_w}}  {'Long':>{long_w}}  {'Short':>{short_w}}")
-        for rate in tier_rates:
-            typer.echo(
-                f"  {rate.instrument:<{instr_w}}  "
-                f"{_color_financing_pct_padded(rate.long_rate, long_w)}  "
-                f"{_color_financing_pct_padded(rate.short_rate, short_w)}"
-            )
+    # The columns differ in height, so the shorter one is filled out with blank
+    # cells. rstrip drops the padding left at the end of a line with nothing
+    # beside it; a colored row ends in an escape code, so it is unaffected.
+    for cells in zip_longest(*columns, fillvalue=blank_cell):
+        typer.echo(_FINANCING_COLUMN_GAP.join(cells).rstrip())
 
 
 @app.command()
@@ -158,7 +207,8 @@ def financing(
     Oanda's own site calls "daily financing rates" (republished daily, but
     quoted per year, not per day). A negative rate means you pay to hold
     that side overnight; a positive rate means you're paid. Pairs are
-    grouped major/minor/exotic, alphabetical within each group.
+    grouped major/minor/exotic, alphabetical within each group, with majors
+    and minors in the first column and exotics in the second.
 
     With no options, fetches live rates from Oanda and also records them as
     today's snapshot. With ``--date``, skips the API call and instead looks

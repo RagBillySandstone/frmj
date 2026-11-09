@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import typer
 from click.testing import Result
 from typer.testing import CliRunner
 
@@ -157,6 +158,143 @@ class TestFinancingCommand:
         assert "Majors" in result.output
         assert "Minors" not in result.output
         assert "Exotics" not in result.output
+
+    def test_exotics_sit_beside_majors_and_minors(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Exotics share lines with the first column instead of following it."""
+        result = self._invoke(
+            monkeypatch,
+            [
+                FinancingRate("EUR_USD", Decimal("-0.0049"), Decimal("0.0009")),
+                FinancingRate("EUR_GBP", Decimal("-0.0021"), Decimal("0.0005")),
+                FinancingRate("USD_TRY", Decimal("-0.4521"), Decimal("0.4102")),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        lines = result.output.splitlines()
+
+        # The two column headers and first rows of each column share a line.
+        header = next(line for line in lines if "Majors" in line)
+        assert "Exotics" in header
+        assert header.index("Majors") < header.index("Exotics")
+        row = next(line for line in lines if "EUR_USD" in line)
+        assert "USD_TRY" in row
+        assert row.index("EUR_USD") < row.index("USD_TRY")
+
+        # Minors stay below Majors in the first column, not beside them.
+        minors = next(line for line in lines if "Minors" in line)
+        assert minors.index("Minors") == header.index("Majors")
+        assert lines.index(minors) > lines.index(row)
+
+    def test_second_column_aligned_despite_color_codes(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Color escapes in the first column must not shift the second one."""
+        # One positive, one negative, one uncolored zero: each first-column row
+        # has a different number of invisible escape characters. GBP_USD's wider
+        # rates force padding onto the narrower rows, so padding measured on the
+        # colored text instead of the visible text would shift the second column.
+        fake = FakeFullClient(
+            financing_rates=[
+                FinancingRate("AUD_USD", Decimal("0.0100"), Decimal("-0.0100")),
+                FinancingRate("EUR_USD", Decimal("0"), Decimal("0")),
+                FinancingRate("GBP_USD", Decimal("-0.4521"), Decimal("0.4102")),
+                FinancingRate("USD_MXN", Decimal("0.0100"), Decimal("0.0100")),
+                FinancingRate("USD_NOK", Decimal("0.0100"), Decimal("0.0100")),
+                FinancingRate("USD_PLN", Decimal("0.0100"), Decimal("0.0100")),
+            ]
+        )
+        monkeypatch.setattr("frmj.cli.financing.get_client", lambda conn: fake)
+        result = runner.invoke(app, ["financing"], color=True)
+        assert result.exit_code == 0, result.output
+        # Guard: without real escapes this test would pass vacuously.
+        assert "\x1b[" in result.output
+
+        lines = [typer.unstyle(line) for line in result.output.splitlines()]
+        # Check each row exactly: "Exotics" is flush with the column and rows are
+        # indented by two spaces, so a two-char shift must not pass as an indent.
+        column_start = next(line for line in lines if "Exotics" in line).index(
+            "Exotics"
+        )
+        for exotic in ("USD_MXN", "USD_NOK", "USD_PLN"):
+            row = next(line for line in lines if exotic in line)
+            assert row.index(exotic) == column_start + 2, row
+
+    def test_second_column_continues_below_a_shorter_first_column(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Exotic rows past the end of the first column keep their indent."""
+        result = self._invoke(
+            monkeypatch,
+            [
+                FinancingRate("EUR_USD", Decimal("0.0100"), Decimal("0.0100")),
+                FinancingRate("USD_MXN", Decimal("0.0100"), Decimal("0.0100")),
+                FinancingRate("USD_NOK", Decimal("0.0100"), Decimal("0.0100")),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        lines = result.output.splitlines()
+        beside = next(line for line in lines if "USD_MXN" in line)
+        below = next(line for line in lines if "USD_NOK" in line)
+        assert "EUR_USD" in beside
+        assert "EUR_USD" not in below
+        assert below.index("USD_NOK") == beside.index("USD_MXN")
+
+    def test_second_column_aligned_beside_the_blank_line_between_tiers(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The blank line between Majors and Minors still holds the column's width."""
+        # Majors takes four lines (label, rule, heading, one row), so the blank
+        # separator is line five, which is where the second exotic row lands.
+        result = self._invoke(
+            monkeypatch,
+            [
+                FinancingRate("EUR_USD", Decimal("0.0100"), Decimal("0.0100")),
+                FinancingRate("EUR_GBP", Decimal("0.0100"), Decimal("0.0100")),
+                FinancingRate("USD_MXN", Decimal("0.0100"), Decimal("0.0100")),
+                FinancingRate("USD_NOK", Decimal("0.0100"), Decimal("0.0100")),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        lines = result.output.splitlines()
+        above = next(line for line in lines if "USD_MXN" in line)
+        beside_blank = next(line for line in lines if "USD_NOK" in line)
+        # Guard: this row must really be sitting beside the separator.
+        assert beside_blank.lstrip().startswith("USD_NOK")
+        assert beside_blank.index("USD_NOK") == above.index("USD_MXN")
+
+    def test_exotics_only_table_is_flush_left(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With no majors or minors there is no blank column to indent behind."""
+        result = self._invoke(
+            monkeypatch,
+            [FinancingRate("USD_TRY", Decimal("-0.4521"), Decimal("0.4102"))],
+        )
+        assert result.exit_code == 0, result.output
+        lines = result.output.splitlines()
+        assert any(line.startswith("Exotics") for line in lines)
+        assert any(line.startswith("  USD_TRY") for line in lines)
+
+    def test_full_pair_list_fits_one_screen(
+        self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every pair at a realistic worst-case rate fits 80 columns, no blank tail."""
+        result = self._invoke(
+            monkeypatch,
+            [
+                FinancingRate(pair, Decimal("-0.4521"), Decimal("-0.4102"))
+                for pair in _FINANCING_PAIRS
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        lines = result.output.splitlines()
+        assert max(len(line) for line in lines) <= 80
+        # Height is set by the first column: title (3 lines), then Majors (3 + 7),
+        # a blank line, and Minors (3 + 21).
+        assert len(lines) == 3 + 10 + 1 + 24
+        assert all(line == line.rstrip() for line in lines)
 
     def test_requests_the_full_financing_pairs_list(
         self, fin_db: Path, monkeypatch: pytest.MonkeyPatch
