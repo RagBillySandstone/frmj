@@ -29,3 +29,7 @@ Unlike the REST API's ORDER_FILL transactions, the Oanda Hub CSV export never st
 ### 16. Saved trade drafts collide between concurrent shells
 
 `trade` saves a failed order's plan to a single `saved_plan.json` in the default data directory, and `trade --resume` reads it back. With several `frmj shell` instances trading different accounts, a second failure overwrites the first shell's draft. `--resume` would then resume the other account's plan: it places the order on the account recorded in the draft, not on the shell's account. Key drafts by account (e.g. `saved_plan-<oanda_id>.json`) and have `--resume` pick the active account's draft, or list the drafts when it's ambiguous.
+
+### 17. `frmj book --from/--to` — export a range of snapshots for charting
+
+`frmj book orders|positions` writes one snapshot at a time (latest or `--at`). Charting the books over time in the analytics stack needs a range: one request per 20-minute snapshot between `--from` and `--to`, appended to a single CSV (it already carries `time` on every row). Oanda always sends the whole book, about 520 KB for an order book and 46 KB for a position book, and takes ~100 ms per request, so a week of EUR_USD order books is ~500 requests (~50 s); a year is ~26,000. Decide whether to throttle, how to report a missing snapshot mid-range (Oanda 404s it; skip and warn, or stop), and whether to resume an interrupted export. The analytics stack stores the result, not frmj.
