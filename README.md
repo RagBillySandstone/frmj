@@ -81,6 +81,7 @@ frmj config check --connectivity   # also calls the Oanda API to verify credenti
 | Command | What it does |
 |---|---|
 | [`frmj account`](docs/commands.md#frmj-account) | Add, rename, and remove account profiles; API tokens; [account groups](docs/commands.md#frmj-account-group) |
+| [`frmj book`](docs/commands.md#frmj-book) | Oanda's order and position books for an instrument, latest or past, as CSV or JSON |
 | [`frmj close`](docs/commands.md#frmj-close) | Close all open tickets for an instrument |
 | [`frmj config`](docs/commands.md#frmj-config) | Get, set, and validate configuration and risk settings |
 | [`frmj export`](docs/commands.md#frmj-export) | Export transactions to CSV or JSON |

@@ -70,7 +70,7 @@ flowchart TB
         api[("Oanda v20 REST + stream API<br/>via httpx")]
         db[("SQLite database")]
         keychain[("OS keychain<br/>via keyring")]
-        files[("Files: saved_plan.json,<br/>export output, Hub CSV,<br/>shell history, stream/")]
+        files[("Files: saved_plan.json,<br/>export/book output, Hub CSV,<br/>shell history, stream/")]
     end
 
     user --> cli
@@ -96,7 +96,7 @@ flowchart TB
     persistence & app & accounts & sync & services & queries --> db
 ```
 
-The CLI imports all four domain modules, drawn as one arrow to the layer. Its file access is `export --output` and the shell's history file; `csv_import.py` reads the Hub CSV for `sync --csv`; `app.py` owns `saved_plan.json`; `streaming.py` owns the `stream/` directory (shell registry, locks, log), whose location `app.py` resolves.
+The CLI imports all four domain modules, drawn as one arrow to the layer. Its file access is `export --output`, `book --output` and the shell's history file; `csv_import.py` reads the Hub CSV for `sync --csv`; `app.py` owns `saved_plan.json`; `streaming.py` owns the `stream/` directory (shell registry, locks, log), whose location `app.py` resolves.
 
 - **Dependencies point inward, with no cycles.** The domain layer imports only itself, and nothing outside `cli/` imports `cli/`. `services.py` does not import `app.py`: it is handed an open connection and client, which is what keeps it free of Typer and reusable from another front end.
 - **`sizing.py` is the core.** `risk.py`, `pricing.py`, and the Oanda models all import it for `InstrumentSpec`, `PriceQuote`, and `Direction`.
@@ -112,7 +112,7 @@ The execution layer (`oanda`, `sync`) handles all network and database I/O. It f
 
 `accounts.py` is pure SQLite CRUD — no I/O beyond the database connection. All keychain access and environment-variable resolution happens in `app.py`.
 
-`app.py` is the only place that resolves configuration from the environment, touches the database file or draft plan, or accesses the OS keychain. It also resolves where `frmj shell` keeps its history and where `streaming.py` keeps its files, though those modules read and write them. The exceptions are files the user names on the command line (`export --output` writes one, `sync --csv` reads one) and `config get`/`config check`, which look at the token environment variables only to report where the token comes from. The CLI commands call `app.py` to obtain wired-up dependencies, then pass them into `services.py` and the domain layer.
+`app.py` is the only place that resolves configuration from the environment, touches the database file or draft plan, or accesses the OS keychain. It also resolves where `frmj shell` keeps its history and where `streaming.py` keeps its files, though those modules read and write them. The exceptions are files the user names on the command line (`export --output` and `book --output` write one, `sync --csv` reads one) and `config get`/`config check`, which look at the token environment variables only to report where the token comes from. The CLI commands call `app.py` to obtain wired-up dependencies, then pass them into `services.py` and the domain layer.
 
 `services.py` holds multi-step operations that combine several Oanda API calls and/or domain calls into one unit — fetching the market data needed to plan a trade, evaluating risk and correlation, attaching TP/SL and syncing after a fill, fetching the data behind `positions`, and closing tickets for `close`. It takes an already-open connection and client as arguments and has no Typer dependency, so it's reusable from any future non-CLI interface. Prompting, confirmation, and terminal output stay in the `cli/` package.
 

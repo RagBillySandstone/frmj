@@ -34,6 +34,30 @@ frmj account group show my-props         # show one group's members
 frmj account group delete my-props       # delete the group entirely
 ```
 
+## `frmj book`
+
+Oanda's order book and position book for an instrument, as CSV or JSON for external analysis.
+
+```sh
+frmj book orders EUR_USD                           # latest order book, CSV to stdout
+frmj book positions EUR_USD --format json          # latest position book as JSON
+frmj book orders EUR_USD --at "2026-11-06 14:07"   # a past snapshot (local time)
+frmj book orders USD_JPY --pips 50 --output book.csv
+```
+
+Every 20 minutes (:00, :20 and :40 UTC, weekends included) Oanda publishes two snapshots per instrument. Each is a list of price buckets giving the percentage of all longs and all shorts that sit in each one:
+
+- **`book orders`** shows where Oanda's clients have orders waiting: entry orders, take-profits and stop-losses. Sells clustered just below the price usually mark longs' stops.
+- **`book positions`** shows the prices at which their open positions were entered.
+
+The data covers only Oanda's own clients, and it counts orders and positions, not units. Oanda publishes books for 14 FX pairs (AUD_JPY, AUD_USD, EUR_AUD, EUR_CHF, EUR_GBP, EUR_JPY, EUR_USD, GBP_CHF, GBP_JPY, GBP_USD, NZD_USD, USD_CAD, USD_CHF, USD_JPY) and for gold and silver (XAU_USD, XAG_USD). TAB completes only these, and any other instrument is an error. The books are the same for every account; the active account only supplies the API token.
+
+`--at TIME` fetches a past snapshot instead of the latest. It takes a date or date-time: `2026-11-06`, `2026-11-06 14:07` (local time), `2026-11-06T14:07Z` (UTC), or one with an offset such as `+10:00`. The time is rounded down to the last snapshot at or before it, so the book at a trade's fill time is never one taken after the fill. Oanda keeps the history back to at least late 2017, so frmj stores nothing locally.
+
+`--pips N` (default 200) keeps only the buckets within N pips of the snapshot price. The full order book runs to thousands of buckets, out to stray orders at absurd prices. The pips are Oanda's, which for the metals are tiny next to the price: one pip of XAU_USD is $0.01 and one of XAG_USD is $0.0001, so ±200 pips comes back nearly empty. Use something like `--pips 5000` for them (±$50 of gold, ±$0.50 of silver).
+
+`--format csv` (the default) writes one row per bucket, with the columns `instrument, time, price, bucket_width, bucket_price, long_pct, short_pct`. `time` and `price` are the snapshot's: its UTC time and the market price then. `bucket_price` is the bucket's lower edge, and the percentages are of the whole book (`1.2104` means 1.21%). `--format json` writes one object with the same field names, with the buckets in a `buckets` array. Numbers are written exactly as Oanda sends them; JSON keeps them as strings. `--output PATH` (`-o`) writes to a file instead of stdout.
+
 ## `frmj close`
 
 Close all open tickets for an instrument.

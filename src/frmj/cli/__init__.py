@@ -2,7 +2,8 @@
 FRoMaJ CLI — typer application.
 
 This package defines the Typer ``app`` and its sub-apps (``config``,
-``account``, ``account group``, ``mode``) plus the small ``status`` command;
+``account``, ``account group``, ``mode``, ``book``) plus the small ``status``
+command;
 every other command lives in its own module, imported at the bottom of this
 file to register it.  The full command and option reference is
 ``docs/commands.md`` — it is deliberately not repeated here, so there is one
@@ -62,6 +63,14 @@ mode_app = typer.Typer(
 )
 app.add_typer(mode_app, name="mode")
 
+book_app = typer.Typer(
+    name="book",
+    help="Oanda's order and position books: where its clients' orders and"
+    " positions sit, by price.",
+    no_args_is_help=True,
+)
+app.add_typer(book_app, name="book")
+
 
 # ---------------------------------------------------------------------------
 # status command
@@ -92,12 +101,13 @@ def status() -> None:
 
 # ---------------------------------------------------------------------------
 # Import each command module for its side effect of registering commands on
-# app/config_app/account_app/group_app/mode_app above. Must come after those
+# app/config_app/account_app/group_app/mode_app/book_app above. Must come after those
 # are defined, since each module does `from frmj.cli import app` (etc.) at
 # import time.
 # ---------------------------------------------------------------------------
 
 from frmj.cli import accounts as accounts  # noqa: E402  (see comment above)
+from frmj.cli import book as book  # noqa: E402
 from frmj.cli import close as close  # noqa: E402
 from frmj.cli import config as config  # noqa: E402
 from frmj.cli import export as export  # noqa: E402
