@@ -15,8 +15,8 @@ from frmj.cli._completion import (
     _complete_direction,
     _complete_env_type,
     _complete_instrument,
+    _complete_output_format,
 )
-from frmj.cli.export import _complete_export_format
 
 runner = CliRunner()
 
@@ -53,9 +53,9 @@ class TestCompletionHelpers:
     def test_complete_env_type_no_match_returns_empty(self) -> None:
         assert _complete_env_type("x") == []
 
-    def test_complete_export_format_matches_prefix(self) -> None:
-        assert _complete_export_format("cs") == ["csv"]
-        assert _complete_export_format("") == ["csv", "json"]
+    def test_complete_output_format_matches_prefix(self) -> None:
+        assert _complete_output_format("cs") == ["csv"]
+        assert _complete_output_format("") == ["csv", "json"]
 
     def test_complete_account_name_filters_by_prefix(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch

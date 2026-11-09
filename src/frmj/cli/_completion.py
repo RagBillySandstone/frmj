@@ -1,9 +1,8 @@
 """Shell tab-completion callbacks shared by two or more CLI commands.
 
 Completers used by only a single command live next to that command instead
-(e.g. ``_complete_export_format`` in ``export.py``, ``_complete_oanda_id`` and
-``_complete_tag`` in ``journal.py``, ``_complete_config_key``/``_complete_config_value``
-in ``config.py``).
+(e.g. ``_complete_oanda_id`` and ``_complete_tag`` in ``journal.py``,
+``_complete_config_key``/``_complete_config_value`` in ``config.py``).
 """
 
 from __future__ import annotations
@@ -252,3 +251,11 @@ def _complete_txn_type(incomplete: str) -> list[str]:
     finally:
         conn.close()
     return [t for t in types if t.startswith(incomplete.upper())]
+
+
+def _complete_output_format(incomplete: str) -> list[str]:
+    """Return the ``--format`` values (``csv``, ``json``) starting with *incomplete*.
+
+    Shared by every command that writes machine-readable output.
+    """
+    return [f for f in ("csv", "json") if f.startswith(incomplete.lower())]

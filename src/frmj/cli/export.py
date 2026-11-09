@@ -13,7 +13,11 @@ import typer
 from frmj import queries
 from frmj.app import get_db
 from frmj.cli import app
-from frmj.cli._completion import _complete_instrument, _complete_txn_type
+from frmj.cli._completion import (
+    _complete_instrument,
+    _complete_output_format,
+    _complete_txn_type,
+)
 
 # ---------------------------------------------------------------------------
 # export command
@@ -33,10 +37,6 @@ _EXPORT_FIELDS = (
 )
 
 
-def _complete_export_format(incomplete: str) -> list[str]:
-    return [f for f in ("csv", "json") if f.startswith(incomplete.lower())]
-
-
 @app.command()
 def export(
     fmt: str = typer.Option(
@@ -44,7 +44,7 @@ def export(
         "--format",
         "-f",
         help="Output format: csv or json.",
-        autocompletion=_complete_export_format,
+        autocompletion=_complete_output_format,
     ),
     output: str | None = typer.Option(
         None,
