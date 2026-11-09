@@ -8,6 +8,8 @@ Endpoints implemented
   GET  /accounts/{id}/instruments              (InstrumentSpec / financing rates)
   GET  /accounts/{id}/pricing                  (live bid/ask + conversions)
   GET  /instruments/{name}/candles             (daily candles for ATR)
+  GET  /instruments/{name}/orderBook           (order book snapshot)
+  GET  /instruments/{name}/positionBook        (position book snapshot)
   GET  /accounts/{id}/trades                   (open ticket count per instrument)
   GET  /accounts/{id}/pendingOrders            (pending entry orders)
   POST /accounts/{id}/orders                   (place market / limit order)
@@ -56,6 +58,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Generator, Iterator
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -64,6 +67,7 @@ from frmj.domain.sizing import InstrumentSpec, PriceQuote
 
 from .models import (
     AccountSummary,
+    Book,
     CloseFill,
     FinancingRate,
     LimitOrderResult,
@@ -76,6 +80,7 @@ from .parsing import (
     _compute_conversion_rate,
     _extract_bid_ask,
     _parse_account_summary,
+    _parse_book,
     _parse_candles,
     _parse_close_fill,
     _parse_financing_rate,
@@ -372,6 +377,22 @@ class OandaClient:
         )
         resp.raise_for_status()
         return _parse_candles(resp.json())
+
+    def get_order_book(self, instrument: str, time: datetime | None = None) -> Book:
+        """Fetch Oanda's order book for *instrument*: the latest snapshot, or
+        the one at *time*.
+
+        See ``_get_book`` for how *time* is sent and what Oanda rejects.
+        """
+        return self._get_book(instrument, "orderBook", time)
+
+    def get_position_book(self, instrument: str, time: datetime | None = None) -> Book:
+        """Fetch Oanda's position book for *instrument*: the latest snapshot,
+        or the one at *time*.
+
+        See ``_get_book`` for how *time* is sent and what Oanda rejects.
+        """
+        return self._get_book(instrument, "positionBook", time)
 
     def get_open_tickets_on_instrument(self, instrument: str) -> int:
         """Count open trade tickets for *instrument* (for the scale-in check).
@@ -695,6 +716,33 @@ class OandaClient:
         )
         resp.raise_for_status()
         return _parse_order_create_txn_id(resp.json())
+
+    def _get_book(self, instrument: str, endpoint: str, time: datetime | None) -> Book:
+        """GET /instruments/{instrument}/{endpoint} and parse the snapshot.
+
+        *endpoint* is ``"orderBook"`` or ``"positionBook"``, which is also the
+        response's top-level key. Oanda takes a snapshot every 20 minutes and
+        rejects a *time* off that grid with a 400 ("misaligned"), so callers
+        must round *time* down to :00, :20 or :40 first. A *time* with no
+        snapshot (in the future, or before Oanda's history starts) gets a 404,
+        and an instrument Oanda keeps no book for gets a 400. Each error's
+        ``errorMessage`` says which; this method raises
+        ``httpx.HTTPStatusError`` and leaves reporting to the caller.
+        """
+        params: dict[str, str] = {}
+        if time is not None:
+            # Oanda wants RFC 3339 in UTC; an aware datetime in any zone is
+            # converted, so the same instant is asked for whatever the zone.
+            params["time"] = time.astimezone(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+        resp = self._http.get(
+            f"{self._base_url}/instruments/"
+            f"{_path_segment(instrument, 'instrument')}/{endpoint}",
+            params=params,
+        )
+        resp.raise_for_status()
+        return _parse_book(resp.json(), endpoint)
 
     def _fetch_all_cold(self) -> list[TransactionRow]:
         """

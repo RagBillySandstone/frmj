@@ -212,3 +212,40 @@ class CloseFill:
     transaction_id: str
     close_price: Decimal
     realised_pl: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class BookBucket:
+    """One price bucket of an Oanda order book or position book.
+
+    ``price`` is the bucket's lower edge; the bucket covers ``price`` up to
+    ``price + Book.bucket_width``. ``long_pct`` and ``short_pct`` are the
+    share of the whole book's orders (or positions) that sit in this bucket,
+    in percent — ``Decimal("1.2104")`` means 1.21%. They count orders, not
+    units, so a 1,000-unit order weighs the same as a 10,000,000-unit one.
+    """
+
+    price: Decimal
+    long_pct: Decimal
+    short_pct: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class Book:
+    """A snapshot of Oanda's order book or position book for one instrument.
+
+    Both endpoints (GET /instruments/{name}/orderBook and /positionBook)
+    return this same shape. The order book shows where Oanda's clients have
+    orders waiting (entry orders, take-profits and stop-losses); the position
+    book shows the prices at which their open positions were entered.
+
+    ``time`` is Oanda's snapshot time, verbatim (ISO-8601 UTC, always on the
+    20-minute grid). ``price`` is the market price at that time. ``buckets``
+    are in ascending price order and omit buckets that hold nothing.
+    """
+
+    instrument: str
+    time: str
+    price: Decimal
+    bucket_width: Decimal
+    buckets: tuple[BookBucket, ...]

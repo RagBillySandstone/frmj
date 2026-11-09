@@ -12,6 +12,7 @@ HTTP call around those helpers (or perform their own response interpretation).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -330,6 +331,76 @@ class TestGetDailyCandles:
             "dailyAlignment": 17,
             "alignmentTimezone": "America/New_York",
         }
+
+
+# ---------------------------------------------------------------------------
+# get_order_book / get_position_book
+# ---------------------------------------------------------------------------
+
+
+def _book_response(key: str) -> dict[str, Any]:
+    """A one-bucket book response under *key* ("orderBook"/"positionBook")."""
+    return {
+        key: {
+            "instrument": "EUR_USD",
+            "time": "2026-11-06T14:20:00Z",
+            "price": "1.08472",
+            "bucketWidth": "0.00050",
+            "buckets": [
+                {
+                    "price": "1.08450",
+                    "longCountPercent": "0.6630",
+                    "shortCountPercent": "0.7158",
+                }
+            ],
+        }
+    }
+
+
+class TestGetBooks:
+    @pytest.mark.parametrize(
+        ("method", "endpoint"),
+        [("get_order_book", "orderBook"), ("get_position_book", "positionBook")],
+    )
+    def test_latest_snapshot_sends_no_time(self, method: str, endpoint: str) -> None:
+        """With no time, the instrument endpoint (not account-scoped) is hit
+        with no ``time`` param, so Oanda returns its most recent snapshot."""
+        client = _make_client(_book_response(endpoint))
+        book = getattr(client, method)("EUR_USD")
+        assert book.time == "2026-11-06T14:20:00Z"
+        assert book.buckets[0].long_pct == Decimal("0.6630")
+
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        call = http.calls[0]
+        assert call.method == "GET"
+        assert call.url.endswith(f"/v3/instruments/EUR_USD/{endpoint}")
+        assert call.kwargs["params"] == {}
+
+    @pytest.mark.parametrize(
+        ("method", "endpoint"),
+        [("get_order_book", "orderBook"), ("get_position_book", "positionBook")],
+    )
+    def test_time_is_sent_as_utc_rfc3339(self, method: str, endpoint: str) -> None:
+        """An aware time in any zone is sent as the same instant in UTC."""
+        client = _make_client(_book_response(endpoint))
+        sydney_winter = timezone(timedelta(hours=10))
+        getattr(client, method)(
+            "EUR_USD", datetime(2026, 11, 7, 0, 20, tzinfo=sydney_winter)
+        )
+        http: _FakeHttp = client._http  # type: ignore[assignment]
+        assert http.calls[0].kwargs["params"] == {"time": "2026-11-06T14:20:00Z"}
+
+    def test_error_status_raises(self) -> None:
+        """A 400/404 (no book for the instrument, no snapshot at the time) is
+        raised for the caller to report."""
+        client = _make_client(_ErrorResponse(404))
+        with pytest.raises(httpx.HTTPStatusError):
+            client.get_order_book("EUR_USD")
+
+    def test_bad_instrument_rejected_before_any_request(self) -> None:
+        client = _make_client()  # No responses: any HTTP call would fail.
+        with pytest.raises(ValueError, match="Invalid instrument"):
+            client.get_position_book("EUR_USD/../../accounts")
 
 
 # ---------------------------------------------------------------------------

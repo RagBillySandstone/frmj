@@ -18,12 +18,15 @@ import pytest
 
 from frmj.execution.oanda import (
     AccountSummary,
+    Book,
+    BookBucket,
     CloseFill,
     OpenTrade,
     TransactionRow,
     _compute_conversion_rate,
     _extract_bid_ask,
     _parse_account_summary,
+    _parse_book,
     _parse_candles,
     _parse_close_fill,
     _parse_instrument_spec,
@@ -236,6 +239,59 @@ class TestParseCandles:
 
     def test_no_candles_key_is_empty(self) -> None:
         assert _parse_candles({}) == []
+
+
+class TestParseBook:
+    """Order and position books share one shape under different top-level keys."""
+
+    @staticmethod
+    def _payload(key: str) -> dict:
+        """A trimmed-down book response, as Oanda sends it (numbers as strings)."""
+        return {
+            key: {
+                "instrument": "EUR_USD",
+                "time": "2026-11-06T14:20:00Z",
+                "unixTime": "1793974800",
+                "price": "1.08472",
+                "bucketWidth": "0.00050",
+                "buckets": [
+                    {
+                        "price": "1.08400",
+                        "longCountPercent": "1.5541",
+                        "shortCountPercent": "0.4010",
+                    },
+                    {
+                        "price": "1.08450",
+                        "longCountPercent": "0.6630",
+                        "shortCountPercent": "0.7158",
+                    },
+                ],
+            }
+        }
+
+    @pytest.mark.parametrize("key", ["orderBook", "positionBook"])
+    def test_parses_header_and_buckets(self, key: str) -> None:
+        assert _parse_book(self._payload(key), key) == Book(
+            instrument="EUR_USD",
+            time="2026-11-06T14:20:00Z",
+            price=Decimal("1.08472"),
+            bucket_width=Decimal("0.00050"),
+            buckets=(
+                BookBucket(Decimal("1.08400"), Decimal("1.5541"), Decimal("0.4010")),
+                BookBucket(Decimal("1.08450"), Decimal("0.6630"), Decimal("0.7158")),
+            ),
+        )
+
+    def test_numbers_keep_oandas_exact_text(self) -> None:
+        """Trailing zeros survive, so output can repeat Oanda's own figures."""
+        book = _parse_book(self._payload("orderBook"), "orderBook")
+        assert str(book.bucket_width) == "0.00050"
+        assert str(book.buckets[0].short_pct) == "0.4010"
+
+    def test_missing_buckets_is_empty(self) -> None:
+        payload = self._payload("orderBook")
+        del payload["orderBook"]["buckets"]
+        assert _parse_book(payload, "orderBook").buckets == ()
 
 
 class TestExtractBidAsk:

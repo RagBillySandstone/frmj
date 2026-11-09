@@ -40,6 +40,8 @@ from .client import (
 )
 from .models import (
     AccountSummary,
+    Book,
+    BookBucket,
     CloseFill,
     FinancingRate,
     LimitOrderResult,
@@ -52,6 +54,7 @@ from .parsing import (
     _compute_conversion_rate,
     _extract_bid_ask,
     _parse_account_summary,
+    _parse_book,
     _parse_candles,
     _parse_close_fill,
     _parse_financing_rate,
@@ -74,6 +77,8 @@ __all__ = [
     "TransactionRow",
     "OpenTrade",
     "AccountSummary",
+    "Book",
+    "BookBucket",
     "FinancingRate",
     "OrderFill",
     "LimitOrderResult",
@@ -82,6 +87,7 @@ __all__ = [
     "_compute_conversion_rate",
     "_extract_bid_ask",
     "_parse_account_summary",
+    "_parse_book",
     "_parse_candles",
     "_parse_close_fill",
     "_parse_financing_rate",

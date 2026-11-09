@@ -17,6 +17,8 @@ from frmj.domain.sizing import InstrumentSpec
 
 from .models import (
     AccountSummary,
+    Book,
+    BookBucket,
     CloseFill,
     FinancingRate,
     OpenTrade,
@@ -221,6 +223,32 @@ def _parse_candles(payload: dict[str, Any]) -> list[Candle]:
         for c in payload.get("candles", [])
         if c.get("complete", False)
     ]
+
+
+def _parse_book(payload: dict[str, Any], key: str) -> Book:
+    """Parse a GET /instruments/{name}/orderBook or /positionBook response.
+
+    *key* is the payload's top-level key: ``"orderBook"`` or
+    ``"positionBook"``. The two responses are otherwise identical. Every
+    number arrives as a decimal string and is kept exact as a ``Decimal``,
+    so writing one back out (``str``) gives back Oanda's own text, trailing
+    zeros included.
+    """
+    book = payload[key]
+    return Book(
+        instrument=book["instrument"],
+        time=book["time"],
+        price=Decimal(book["price"]),
+        bucket_width=Decimal(book["bucketWidth"]),
+        buckets=tuple(
+            BookBucket(
+                price=Decimal(b["price"]),
+                long_pct=Decimal(b["longCountPercent"]),
+                short_pct=Decimal(b["shortCountPercent"]),
+            )
+            for b in book.get("buckets", [])
+        ),
+    )
 
 
 def _extract_bid_ask(payload: dict[str, Any]) -> tuple[Decimal, Decimal]:
